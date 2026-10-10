@@ -29,7 +29,7 @@ pub struct Grant {
 ///
 /// Unknown options are surfaced as `High` risk rather than hidden.
 pub fn parse_finish_args(args: &[String]) -> Vec<Grant> {
-    args.iter().map(parse_one).collect()
+    args.iter().map(|arg| parse_one(arg.as_str())).collect()
 }
 
 fn parse_one(arg: &str) -> Grant {

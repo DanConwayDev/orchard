@@ -18,6 +18,36 @@ toolchain lives in `rust-toolchain.toml`.
 Run the built binary on the host, not in the container: the GPUI shell
 needs the host's Wayland session, and the container has no seat.
 
+## Volume labels (learned 2026-10-10)
+
+build.sh mounts the cargo/rustup named volumes WITHOUT :Z, and that is
+load-bearing: podman labels fresh volumes `container_file_t:s0` (no
+category pair), which every container can read. Mounting one with :Z
+relabels it to a single container's category pair, and every later
+unlabeled run then fails with "cargo: command not found" (the rustup
+shims become unreadable). Recovery from the host:
+
+    chcon -R system_u:object_r:container_file_t:s0 \
+      ~/.local/share/containers/storage/volumes/orchard-cargo-home/_data \
+      ~/.local/share/containers/storage/volumes/orchard-rustup-home/_data
+
+The project bind mount (`$PWD:/work:Z`) keeps its :Z. Relabeling the
+project tree is fine; relabeling the volumes is not.
+
+## The libc pin (learned 2026-10-10)
+
+Cargo.lock pins `libc` at 0.2.189, deliberately: gpui's tree pulls `xattr`
+0.2.3 (via `zed-async-tar`), whose `platforms!` macro references
+`libc::ENOATTR`; libc removed that constant from its linux targets in
+0.2.190 (the linux errno is ENODATA). `nix 0.31` (via `which`, via gpui)
+floors libc at ^0.2.186, and 0.2.186 through 0.2.189 still carry ENOATTR,
+so 0.2.189 satisfies everyone. A bare `cargo update` bumps libc to 0.2.190+
+and xattr stops compiling; re-pin with:
+
+    cargo update -p libc --precise 0.2.189
+
+Revisit when gpui ships a tree without xattr 0.2.x.
+
 ## Rules
 
 - Commit before build: the tree that produced a binary is a named commit.
