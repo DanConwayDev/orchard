@@ -1,0 +1,19 @@
+[package]
+name = "orchard-indexd"
+description = "Local Flatpak OCI registry-index shim backed by Orchard's catalog"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow = { workspace = true }
+axum = { workspace = true }
+orchard-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+
+[[bin]]
+name = "orchard-indexd"
+path = "src/main.rs"

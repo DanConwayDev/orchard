@@ -1,0 +1,9 @@
+[package]
+name = "orchard-flatpak"
+description = "Single seam between Orchard and the flatpak CLI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]

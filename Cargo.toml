@@ -1,0 +1,27 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/orchard-core",
+    "crates/orchard-flatpak",
+    "crates/orchard-indexd",
+    "crates/orchard",
+]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+# internal
+orchard-core = { path = "crates/orchard-core" }
+orchard-flatpak = { path = "crates/orchard-flatpak" }
+orchard-indexd = { path = "crates/orchard-indexd" }
+
+# shared
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+axum = "0.8"
+gpui = "0.2.2"

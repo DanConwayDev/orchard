@@ -1,0 +1,13 @@
+[package]
+name = "orchard"
+description = "The permissionless Flatpak store — GPUI client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+gpui = { workspace = true }
+orchard-core = { workspace = true }
+orchard-flatpak = { workspace = true }
+orchard-indexd = { workspace = true }
