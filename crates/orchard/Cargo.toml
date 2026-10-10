@@ -1,6 +1,6 @@
 [package]
 name = "orchard"
-description = "The permissionless Flatpak store — GPUI client"
+description = "The permissionless Flatpak store (GPUI client)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

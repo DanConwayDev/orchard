@@ -14,7 +14,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Placeholder until M2 wires the real catalog in. Swap `com.example.Hello`
     // for whatever the spike's OCI image actually is; digest is intentionally
-    // fake for now — the point is to validate the index protocol end-to-end.
+    // fake for now; the point is to validate the index protocol end-to-end.
     let catalog = StaticCatalog::new(vec![IndexEntry::for_ref(
         "app/com.example.Hello/x86_64/stable",
         "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),

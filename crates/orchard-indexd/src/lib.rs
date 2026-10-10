@@ -4,7 +4,7 @@
 //! `127.0.0.1` that exposes Flatpak's OCI "registry index" protocol, backed by
 //! Orchard's catalog instead of by a central server. The user's flatpak talks
 //! to it as an ordinary remote (`oci+http://127.0.0.1:7780`), so every Orchard
-//! app is a native Flatpak remote app — GNOME Software, Discover, and
+//! app is a native Flatpak remote app: GNOME Software, Discover, and
 //! `flatpak update` all keep working.
 //!
 //! ## Protocol status

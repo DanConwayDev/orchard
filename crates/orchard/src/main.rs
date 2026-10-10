@@ -1,4 +1,4 @@
-//! Orchard — the permissionless Flatpak store client.
+//! Orchard: the permissionless Flatpak store client.
 //!
 //! M1 target: browse the local Flathub AppStream catalog, search, install.
 //! For now this is the GPUI shell (window + placeholder view) so the UI
@@ -38,7 +38,7 @@ impl gpui::Render for Shell {
                 div()
                     .text_size(px(13.))
                     .text_color(rgb(ACCENT))
-                    .child("The permissionless Flatpak store — see DESIGN.md for the roadmap"),
+                    .child("The permissionless Flatpak store (see DESIGN.md for the roadmap)"),
             )
     }
 }

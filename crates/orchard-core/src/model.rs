@@ -20,9 +20,9 @@ impl AppId {
 /// A publisher, identified by their Nostr public key.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Publisher {
-    /// Nostr pubkey (hex or npub; normalize later — M3 decision).
+    /// Nostr pubkey (hex or npub; normalize later, M3 decision).
     pub pubkey: String,
-    /// nip05 address (e.g. `name@example.com`) — the analog of Flathub's
+    /// nip05 address (e.g. `name@example.com`), the analog of Flathub's
     /// "verified" badge. `Some` only after the client validated it.
     pub nip05: Option<String>,
 }
@@ -46,7 +46,7 @@ pub struct ArtifactRef {
     /// e.g. `owner/repo`
     pub repository: String,
     pub tag: Option<String>,
-    /// `sha256:…` — MUST match the registry manifest, else refuse to install.
+    /// `sha256:…`. MUST match the registry manifest, else refuse to install.
     pub digest: Option<String>,
 }
 
