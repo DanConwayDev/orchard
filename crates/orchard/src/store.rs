@@ -5,7 +5,8 @@
 //! single CLI seam (`orchard-flatpak`); the UI polls nothing, results land
 //! via `cx.spawn` updates.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 use gpui::{
     div, prelude::*, px, ClickEvent, Context, FocusHandle, KeyDownEvent, ParentElement, Render,
@@ -14,7 +15,7 @@ use gpui::{
 
 use orchard_core::{oci, permissions, CatalogFile, Risk, Source, StoreApp};
 
-use crate::ui::{self, app_icon, badge, button};
+use crate::ui::{self, app_icon, badge, button, icon_button};
 
 /// Port the in-process indexd listens on. The client is the remote.
 pub const INDEXD_PORT: u16 = 7780;
@@ -88,6 +89,15 @@ pub struct StoreRoot {
     verified: HashMap<String, String>,
     error: Option<String>,
     flathub_loading: bool,
+    /// Detail dock: true = bottom edge, false = right edge.
+    detail_bottom: bool,
+    /// None = auto (window-width rule), Some(dock) = pinned by the lock.
+    detail_lock: Option<bool>,
+    /// Remote images resolved through the disk cache: url -> path, or
+    /// None when the fetch failed.
+    fetched: HashMap<String, Option<PathBuf>>,
+    /// Fetches in flight, keyed by url.
+    fetching: HashSet<String>,
 }
 
 impl StoreRoot {
@@ -103,6 +113,10 @@ impl StoreRoot {
             verified: HashMap::new(),
             error: None,
             flathub_loading: true,
+            detail_bottom: false,
+            detail_lock: None,
+            fetched: HashMap::new(),
+            fetching: HashSet::new(),
         };
 
         // Orchard channel: read the catalog over HTTP from the in-process
@@ -126,7 +140,6 @@ impl StoreRoot {
                 .background_executor()
                 .spawn(async move { load_flathub() })
                 .await;
-            let count = apps.len();
             let _ = this.update(cx, |this, cx| {
                 this.apps.extend(apps);
                 this.flathub_loading = false;
@@ -178,6 +191,103 @@ impl StoreRoot {
             });
         })
         .detach();
+    }
+
+    /// Select an app and queue its remote images (icon fallback and
+    /// screenshots) for the disk cache.
+    fn select_app(&mut self, app_id: &str, cx: &mut Context<Self>) {
+        if self.selected.as_deref() == Some(app_id) {
+            return;
+        }
+        self.selected = Some(app_id.to_string());
+        let urls: Vec<String> = self
+            .apps
+            .iter()
+            .find(|a| a.app_id == app_id)
+            .map(|app| {
+                let mut urls = Vec::new();
+                if app.icon_path.is_none() {
+                    if let Some(url) = &app.icon_url {
+                        urls.push(url.clone());
+                    }
+                }
+                urls.extend(app.screenshots.iter().take(4).cloned());
+                urls
+            })
+            .unwrap_or_default();
+        // failed fetches get one retry per selection
+        for url in &urls {
+            if self.fetched.get(url) == Some(&None) {
+                self.fetched.remove(url);
+            }
+        }
+        self.ensure_fetched(urls, cx);
+        cx.notify();
+    }
+
+    /// Start a background fetch for each not-yet-cached url. Results
+    /// land in `fetched` and notify.
+    fn ensure_fetched(&mut self, urls: Vec<String>, cx: &mut Context<Self>) {
+        let mut todo = Vec::new();
+        for url in urls {
+            if self.fetched.contains_key(&url) || self.fetching.contains(&url) {
+                continue;
+            }
+            self.fetching.insert(url.clone());
+            todo.push(url);
+        }
+        if todo.is_empty() {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            for url in todo {
+                let target = url.clone();
+                let path = cx
+                    .background_executor()
+                    .spawn(async move { crate::cache::fetch(&target) })
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    this.fetching.remove(&url);
+                    this.fetched.insert(url, path);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    // ----- detail dock (kuma-files' inspector pattern) -----
+
+    /// Follow the window width while unlocked: right when wide, bottom
+    /// when narrow, hysteresis band between so a window resting near a
+    /// threshold never flickers between docks.
+    fn auto_dock(&mut self, window: &Window) {
+        if self.detail_lock.is_some() {
+            return;
+        }
+        let width = f32::from(window.viewport_size().width);
+        if let Some(bottom) = auto_dock_for(width, self.detail_bottom) {
+            self.detail_bottom = bottom;
+        }
+    }
+
+    /// Move the detail pane between the right edge and the bottom edge.
+    /// Auto mode would snap the dock straight back on the next render,
+    /// so a manual flip pins the pane where it is put.
+    fn flip_dock(&mut self, cx: &mut Context<Self>) {
+        self.detail_bottom = !self.detail_bottom;
+        self.detail_lock = Some(self.detail_bottom);
+        cx.notify();
+    }
+
+    /// Pin the pane to its current dock, or release it back to the
+    /// window-width rule.
+    fn toggle_dock_lock(&mut self, cx: &mut Context<Self>) {
+        self.detail_lock = match self.detail_lock {
+            None => Some(self.detail_bottom),
+            Some(_) => None,
+        };
+        cx.notify();
     }
 
     // ----- actions -----
@@ -385,7 +495,8 @@ impl StoreRoot {
             "enter" => {
                 if self.selected.is_none() {
                     if let Some(first) = self.filtered().first() {
-                        self.selected = Some(first.app_id.clone());
+                        let app_id = first.app_id.clone();
+                        self.select_app(&app_id, cx);
                     }
                 }
             }
@@ -431,15 +542,9 @@ impl StoreRoot {
                     .hover(|style| style.bg(ui::surface()))
                     .when(is_selected, |row| row.bg(ui::row_selected()))
                     .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
-                        this.selected = Some(app_id.clone());
-                        cx.notify();
+                        this.select_app(&app_id, cx);
                     }))
-                    .child(app_icon(
-                        app.icon_path.as_deref(),
-                        app.icon_url.as_deref(),
-                        &app.name,
-                        36.,
-                    ))
+                    .child(app_icon(app.icon_path.as_deref(), &app.name, 36.))
                     .child(
                         div()
                             .flex_1()
@@ -511,16 +616,36 @@ impl StoreRoot {
         let installed = self.installed.contains_key(&app_id);
         let job = self.jobs.get(&app_id);
         let verified = self.verified.get(&app_id).cloned();
+        let bottom = self.detail_bottom;
+        let locked = self.detail_lock == Some(bottom);
 
-        div()
-            .w(px(420.))
-            .h_full()
-            .flex()
-            .flex_col()
-            .bg(ui::panel())
-            .border_l_1()
-            .border_color(ui::divider())
-            .child(
+        // the header icon: cached AppStream PNG, or a disk-cache fetch
+        // of the remote icon, or the initials tile
+        let header_icon = match (&app.icon_path, &app.icon_url) {
+            (Some(path), _) => app_icon(Some(path), &app.name, 40.),
+            (None, Some(url)) => match self.fetched.get(url) {
+                Some(Some(path)) => app_icon(Some(path), &app.name, 40.),
+                _ => app_icon(None, &app.name, 40.),
+            },
+            (None, None) => app_icon(None, &app.name, 40.),
+        };
+
+        let pane = div().flex().flex_col().bg(ui::panel()).overflow_hidden();
+        let pane = if bottom {
+            pane.w_full()
+                .flex_none()
+                .h(px(320.))
+                .border_t_1()
+                .border_color(ui::divider())
+        } else {
+            pane.w(px(420.))
+                .flex_none()
+                .h_full()
+                .border_l_1()
+                .border_color(ui::divider())
+        };
+
+        pane.child(
                 // header
                 div()
                     .flex()
@@ -542,12 +667,7 @@ impl StoreRoot {
                             }))
                             .child("← Back"),
                     )
-                    .child(app_icon(
-                        app.icon_path.as_deref(),
-                        app.icon_url.as_deref(),
-                        &app.name,
-                        40.,
-                    ))
+                    .child(header_icon)
                     .child(
                         div()
                             .flex_1()
@@ -567,7 +687,33 @@ impl StoreRoot {
                                     .whitespace_nowrap()
                                     .child(app.app_id.clone()),
                             ),
-                    ),
+                    )
+                    .child(icon_button(
+                        "dock-flip",
+                        if bottom {
+                            "icons/chevron_right.svg"
+                        } else {
+                            "icons/chevron_down.svg"
+                        },
+                        ui::text_dim(),
+                    ).on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
+                        this.flip_dock(cx);
+                    })))
+                    .child(icon_button(
+                        "dock-lock",
+                        if locked {
+                            "icons/lock.svg"
+                        } else {
+                            "icons/lock_open.svg"
+                        },
+                        if locked {
+                            ui::accent()
+                        } else {
+                            ui::text_dim()
+                        },
+                    ).on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
+                        this.toggle_dock_lock(cx);
+                    }))),
             )
             .child(
                 div()
@@ -607,14 +753,18 @@ impl StoreRoot {
                                 .gap_2()
                                 .overflow_x_scroll()
                                 .children(app.screenshots.iter().take(4).map(|url| {
-                                    gpui::img(url.clone())
-                                        .w(px(176.))
-                                        .h(px(108.))
-                                        .flex_none()
-                                        .object_fit(gpui::ObjectFit::Cover)
-                                        .rounded_sm()
-                                        .border_1()
-                                        .border_color(ui::divider())
+                                    match self.fetched.get(url) {
+                                        Some(Some(path)) => gpui::img(path.clone())
+                                            .w(px(176.))
+                                            .h(px(108.))
+                                            .flex_none()
+                                            .object_fit(gpui::ObjectFit::Cover)
+                                            .rounded_sm()
+                                            .border_1()
+                                            .border_color(ui::divider())
+                                            .into_any_element(),
+                                        slot => image_placeholder(slot.is_none()),
+                                    }
                                 })),
                         )
                     })
@@ -711,6 +861,41 @@ fn risk_label(risk: Risk) -> &'static str {
     }
 }
 
+/// The auto-dock rule behind the detail pane: right when the window
+/// is wide (1024 and up), bottom when narrow (below 950), keep the
+/// current dock in the hysteresis band between the two thresholds.
+/// `Some` only when the dock changes.
+fn auto_dock_for(width: f32, current_bottom: bool) -> Option<bool> {
+    if width >= 1024.0 {
+        Some(false)
+    } else if width < 950.0 {
+        Some(true)
+    } else {
+        None
+    }
+    .filter(|bottom| *bottom != current_bottom)
+}
+
+/// The screenshot slot while its image fetch is in flight, or after it
+/// failed.
+fn image_placeholder(loading: bool) -> gpui::AnyElement {
+    div()
+        .w(px(176.))
+        .h(px(108.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_sm()
+        .bg(ui::inset())
+        .border_1()
+        .border_color(ui::divider_soft())
+        .text_size(px(ui::TEXT_SIZE_LABEL))
+        .text_color(ui::text_dim())
+        .child(if loading { "loading…" } else { "unavailable" })
+        .into_any_element()
+}
+
 fn render_permissions_static(app: &StoreApp) -> gpui::AnyElement {
     // Borrow-free re-render of the permissions section (the method version
     // cannot be called from a non-self context).
@@ -758,7 +943,8 @@ fn render_permissions_static(app: &StoreApp) -> gpui::AnyElement {
 }
 
 impl Render for StoreRoot {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.auto_dock(window);
         let selected = self.selected_app().cloned();
         let filter = self.filter;
         let total = self.apps.len();
@@ -848,15 +1034,24 @@ impl Render for StoreRoot {
                         }),
                     )),
             )
-            // body
-            .child(
+            // body: the detail pane docks right when the window is
+            // wide, bottom when narrow (auto_dock above, unless locked)
+            .child(if self.detail_bottom {
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .child(self.render_list(cx))
+                    .children(selected.map(|app| self.render_detail(app, cx)))
+            } else {
                 div()
                     .flex_1()
                     .min_h_0()
                     .flex()
                     .child(self.render_list(cx))
-                    .children(selected.map(|app| self.render_detail(app, cx))),
-            )
+                    .children(selected.map(|app| self.render_detail(app, cx)))
+            })
             // status bar
             .child(
                 div()

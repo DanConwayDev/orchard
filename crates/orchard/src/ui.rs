@@ -276,15 +276,12 @@ pub fn button(id: &'static str, label: &str, accent: bool) -> gpui::Stateful<Div
     }
 }
 
-/// The app's icon: the cached AppStream PNG when present, otherwise the
-/// remote icon (gpui fetches and decodes it on demand), otherwise a
-/// quiet accent-tinted tile with the app's initials.
-pub fn app_icon(
-    icon_path: Option<&std::path::Path>,
-    icon_url: Option<&str>,
-    name: &str,
-    size: f32,
-) -> gpui::AnyElement {
+/// The app's icon: the local PNG (a cached AppStream icon, or a disk
+/// cache entry fetched by `cache::fetch`) when present, otherwise a
+/// quiet accent-tinted tile with the app's initials. Remote URLs never
+/// go to gpui directly: its URI image source is a NullHttpClient in
+/// 0.2.2, so `cache.rs` resolves them to files first.
+pub fn app_icon(icon_path: Option<&std::path::Path>, name: &str, size: f32) -> gpui::AnyElement {
     let tile = div()
         .flex_none()
         .w(px(size))
@@ -301,13 +298,6 @@ pub fn app_icon(
                 .object_fit(ObjectFit::Contain),
         )
         .into_any_element()
-    } else if let Some(url) = icon_url {
-        tile.child(
-            gpui::img(url.to_string())
-                .size_full()
-                .object_fit(ObjectFit::Contain),
-        )
-        .into_any_element()
     } else {
         let initials: String = name
             .split_whitespace()
@@ -320,6 +310,22 @@ pub fn app_icon(
             .child(initials.to_uppercase())
             .into_any_element()
     }
+}
+
+/// A small square icon button (the dock chevron, the lock).
+pub fn icon_button(id: &'static str, icon: &'static str, fg: Rgba) -> gpui::Stateful<Div> {
+    div()
+        .id(SharedString::from(id))
+        .flex()
+        .h(px(22.))
+        .w(px(24.))
+        .items_center()
+        .justify_center()
+        .rounded_sm()
+        .cursor_pointer()
+        .text_color(fg)
+        .hover(|style| style.bg(surface()).text_color(text()))
+        .child(gpui::svg().path(icon).size(px(14.)).text_color(fg))
 }
 
 #[cfg(test)]

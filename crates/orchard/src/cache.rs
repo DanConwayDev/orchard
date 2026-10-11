@@ -1,0 +1,57 @@
+//! Disk cache for remote images (screenshots, remote icons).
+//!
+//! gpui 0.2.2 ships a NullHttpClient (its URI image source can never
+//! fetch), so remote images are downloaded here with ureq and rendered
+//! from local files. Entries live under the XDG cache dir, keyed by a
+//! stable hash of the URL, and survive restarts.
+
+use std::io::Read as _;
+use std::path::PathBuf;
+
+/// The cache root: `$XDG_CACHE_HOME/orchard` or `$HOME/.cache/orchard`.
+fn root() -> PathBuf {
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
+        .unwrap_or_else(|| PathBuf::from("/tmp"));
+    base.join("orchard")
+}
+
+/// FNV-1a: stable across runs without pulling a hashing crate.
+fn fnv1a(text: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in text.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// Resolve `url` to a local file, downloading through the cache on
+/// first use. Blocking; call from a background executor. `None` on
+/// network failure (the caller keeps its placeholder).
+pub fn fetch(url: &str) -> Option<PathBuf> {
+    let dir = root();
+    let path = dir.join(format!("{:016x}.img", fnv1a(url)));
+    if path.exists() {
+        return Some(path);
+    }
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(15))
+        .build();
+    let response = agent.get(url).call().ok()?;
+    if !(200..300).contains(&response.status()) {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    response.into_reader().read_to_end(&mut bytes).ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    std::fs::create_dir_all(&dir).ok()?;
+    // tmp + rename so a partial download never lands in the cache
+    let tmp = dir.join(format!("{}.{}.part", fnv1a(url), std::process::id()));
+    std::fs::write(&tmp, &bytes).ok()?;
+    std::fs::rename(&tmp, &path).ok()?;
+    Some(path)
+}

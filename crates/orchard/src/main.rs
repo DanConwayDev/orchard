@@ -5,6 +5,8 @@
 //! in-process indexd), with digest-verified direct OCI installs and a
 //! finish-args permissions viewer.
 
+mod assets;
+mod cache;
 mod store;
 mod ui;
 
@@ -96,24 +98,26 @@ fn main() {
         start_indexd(catalog);
     }
 
-    Application::new().run(|cx: &mut App| {
-        // Establish the palette seam: defaults today, wallpaper-derived
-        // palettes later swap this wholesale.
-        crate::ui::apply_palette(&crate::ui::Palette::default());
-        let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                ..Default::default()
-            },
-            |window, cx| {
-                let root = cx.new(|cx| StoreRoot::new(cx));
-                // Keyboard lives on the root from the start (type to search).
-                window.focus(&root.read(cx).focus_handle);
-                root
-            },
-        )
-        .expect("failed to open Orchard window");
-        cx.activate(true);
-    });
+    Application::new()
+        .with_assets(assets::Assets)
+        .run(|cx: &mut App| {
+            // Establish the palette seam: defaults today, wallpaper-derived
+            // palettes later swap this wholesale.
+            crate::ui::apply_palette(&crate::ui::Palette::default());
+            let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    ..Default::default()
+                },
+                |window, cx| {
+                    let root = cx.new(|cx| StoreRoot::new(cx));
+                    // Keyboard lives on the root from the start (type to search).
+                    window.focus(&root.read(cx).focus_handle);
+                    root
+                },
+            )
+            .expect("failed to open Orchard window");
+            cx.activate(true);
+        });
 }
