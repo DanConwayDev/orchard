@@ -26,6 +26,7 @@ use anyhow::{bail, Result};
 use nostr::prelude::*;
 use orchard_core::{CatalogApp, CatalogFile, Publisher};
 
+pub mod events;
 pub mod relay;
 
 pub const KIND_PROFILE: u32 = 0;

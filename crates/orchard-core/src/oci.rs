@@ -62,12 +62,18 @@ pub enum Location {
     /// A local OCI image layout directory, e.g. `oci:/path/to/layout`.
     OciDir(PathBuf),
     /// A registry exposed via the Docker v2 API, e.g.
-    /// `docker://ghcr.io/owner/repo:tag` (tag optional; digest pin rides
-    /// alongside in the catalog).
+    /// `docker://ghcr.io/owner/repo:tag` or the digest form
+    /// `docker://ghcr.io/owner/repo@sha256:<hex>` (tag optional; the
+    /// digest pin also rides alongside in the catalog). The registry
+    /// part may carry an explicit scheme (`docker://https://…`):
+    /// otherwise localhost registries use http and everything else
+    /// https.
     Registry {
         registry: String,
         repository: String,
         tag: Option<String>,
+        digest: Option<String>,
+        scheme: Option<String>,
     },
 }
 
@@ -80,6 +86,19 @@ impl Location {
             return Ok(Location::OciDir(PathBuf::from(rest)));
         }
         if let Some(rest) = s.strip_prefix("docker://") {
+            // An @digest ref is the artifact's identity, immutable: split
+            // it off first so the tag logic below cannot eat it.
+            let (rest, digest) = match rest.rfind('@') {
+                Some(at) => (&rest[..at], Some(rest[at + 1..].to_string())),
+                None => (rest, None),
+            };
+            // an explicit scheme wins over the localhost default; it
+            // must be stripped before the slash split
+            let (scheme, rest) = match rest {
+                r if let Some(host) = r.strip_prefix("http://") => (Some("http"), host),
+                r if let Some(host) = r.strip_prefix("https://") => (Some("https"), host),
+                r => (None, r),
+            };
             // Registry = up to the first slash; the tag is a trailing colon
             // in the repository part (a registry port lives before it).
             let (registry, repository) = rest
@@ -96,12 +115,16 @@ impl Location {
                 registry: registry.to_string(),
                 repository: repository.to_string(),
                 tag,
+                digest,
+                scheme: scheme.map(str::to_string),
             });
         }
         bail!("unsupported artifact location {s:?} (want oci: or docker://)")
     }
 
-    /// What to hand to `flatpak install` as the image location.
+    /// What to hand to `flatpak install` as the image location. The
+    /// digest form when we have it: flatpak then pulls the exact bytes
+    /// that were verified, not whatever the tag points at now.
     pub fn install_arg(&self) -> String {
         match self {
             Location::OciDir(path) => format!("oci:{}", path.display()),
@@ -109,15 +132,21 @@ impl Location {
                 registry,
                 repository,
                 tag,
+                digest,
+                scheme: _,
             } => {
                 let repo = if registry.contains('/') {
                     repository.to_string()
                 } else {
                     format!("{registry}/{repository}")
                 };
-                match tag {
-                    Some(tag) => format!("docker://{repo}:{tag}"),
-                    None => format!("docker://{repo}"),
+                if let Some(digest) = digest {
+                    format!("docker://{repo}@{digest}")
+                } else {
+                    match tag {
+                        Some(tag) => format!("docker://{repo}:{tag}"),
+                        None => format!("docker://{repo}"),
+                    }
                 }
             }
         }
@@ -133,7 +162,24 @@ pub fn verify(location: &Location, pinned_digest: Option<&str>) -> Result<Verify
             registry,
             repository,
             tag,
-        } => verify_registry(registry, repository, tag.as_deref(), pinned_digest),
+            digest,
+            scheme,
+        } => {
+            // the location's own digest, when present, is the strongest
+            // pin and must agree with the catalog's
+            if let (Some(located), Some(pinned)) = (digest.as_deref(), pinned_digest) {
+                if !located.eq_ignore_ascii_case(pinned) {
+                    bail!("artifact location pins {located}, catalog pins {pinned}");
+                }
+            }
+            verify_registry(
+                registry,
+                repository,
+                scheme.as_deref(),
+                digest.as_deref().or(tag.as_deref()),
+                pinned_digest,
+            )
+        }
     }
 }
 
@@ -177,12 +223,19 @@ fn verify_local(dir: &Path, pinned: Option<&str>) -> Result<VerifyReport> {
 fn verify_registry(
     registry: &str,
     repository: &str,
-    tag: Option<&str>,
+    scheme: Option<&str>,
+    reference: Option<&str>,
     pinned: Option<&str>,
 ) -> Result<VerifyReport> {
-    let base = registry_base(registry);
+    let base = registry_base(registry, scheme);
     let agent = agent();
-    let reference = tag.unwrap_or("latest");
+    // fetch by digest when we have one: immutable, so what we verify is
+    // exactly what the pin names; a tag resolves to whatever the
+    // registry currently serves, so the pin check still runs after
+    let reference = reference
+        .map(str::to_string)
+        .or_else(|| pinned.map(str::to_string))
+        .unwrap_or_else(|| "latest".to_string());
     let url = format!("{base}/v2/{repository}/manifests/{reference}");
     let bytes = http_get(&agent, &url)?;
 
@@ -244,11 +297,13 @@ fn agent() -> ureq::Agent {
 }
 
 /// Local registries speak plain http; everything else is https.
-fn registry_base(registry: &str) -> String {
-    let local = registry.starts_with("localhost:")
-        || registry.starts_with("127.0.0.1:")
-        || registry.starts_with("[::1]:");
-    let scheme = if local { "http" } else { "https" };
+fn registry_base(registry: &str, scheme: Option<&str>) -> String {
+    let scheme = scheme.map(str::to_string).unwrap_or_else(|| {
+        let local = registry.starts_with("localhost:")
+            || registry.starts_with("127.0.0.1:")
+            || registry.starts_with("[::1]:");
+        if local { "http" } else { "https" }.to_string()
+    });
     format!("{scheme}://{registry}")
 }
 
@@ -502,7 +557,9 @@ mod tests {
             Location::Registry {
                 registry: "ghcr.io".into(),
                 repository: "owner/repo".into(),
-                tag: Some("1.2".into())
+                tag: Some("1.2".into()),
+                digest: None,
+                scheme: None
             }
         );
         assert_eq!(loc.install_arg(), "docker://ghcr.io/owner/repo:1.2");
@@ -514,9 +571,43 @@ mod tests {
             Location::Registry {
                 registry: "localhost:5000".into(),
                 repository: "hello".into(),
-                tag: Some("stable".into())
+                tag: Some("stable".into()),
+                digest: None,
+                scheme: None
             }
         );
+
+        // an explicit scheme overrides the localhost default
+        let loc = Location::parse("docker://https://localhost:5000/hello").unwrap();
+        assert_eq!(
+            loc,
+            Location::Registry {
+                registry: "localhost:5000".into(),
+                repository: "hello".into(),
+                tag: None,
+                digest: None,
+                scheme: Some("https".into())
+            }
+        );
+        assert_eq!(loc.install_arg(), "docker://localhost:5000/hello");
+
+        // digest refs split off before the tag logic sees them
+        let digest_ref = format!(
+            "docker://localhost:5000/hello@{}",
+            DIGEST_PIN
+        );
+        let loc = Location::parse(&digest_ref).unwrap();
+        assert_eq!(
+            loc,
+            Location::Registry {
+                registry: "localhost:5000".into(),
+                repository: "hello".into(),
+                tag: None,
+                digest: Some(DIGEST_PIN.into()),
+                scheme: None
+            }
+        );
+        assert_eq!(loc.install_arg(), digest_ref);
 
         let loc = Location::parse("oci:/some/dir").unwrap();
         assert_eq!(loc.install_arg(), "oci:/some/dir");
@@ -527,12 +618,19 @@ mod tests {
     #[test]
     fn local_registries_use_http() {
         assert_eq!(
-            registry_base("localhost:5000"),
+            registry_base("localhost:5000", None),
             "http://localhost:5000"
         );
         assert_eq!(
-            registry_base("ghcr.io"),
+            registry_base("ghcr.io", None),
             "https://ghcr.io"
         );
+        assert_eq!(
+            registry_base("localhost:5000", Some("https")),
+            "https://localhost:5000"
+        );
     }
+
+    /// A realistic pinned digest for location parsing tests.
+    const DIGEST_PIN: &str = "sha256:09cd4430de03980c9c2c599fb36b9ea9786c92bfe406a311426dbf6b80c0223c";
 }

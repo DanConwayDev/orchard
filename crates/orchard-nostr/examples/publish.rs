@@ -1,6 +1,7 @@
 //! Sign and publish NIP-82 events for one app release: the hand-rolled
-//! test publisher for the M3 vertical slice. It is the reference for what
-//! `orchard-publish` (M5) will do properly.
+//! test publisher for the M3 vertical slice, kept as a reference for the
+//! event side of `orchard-publish` (which adds the artifact build and
+//! registry push around it).
 //!
 //! Usage (all keys/options long-form, no dependencies):
 //!
@@ -17,14 +18,11 @@
 //!       --runtime org.freedesktop.Platform/x86_64/25.08
 //!       --channel stable --notes "What changed."
 //!       --author-name "Example Dev" --nip05 dev@example.com
-//!
-//! Publishes: profile (optional), listing, asset, release. Waits for the
-//! relay's OK for each event; exits nonzero on any rejection.
 
 use anyhow::{bail, Result};
 use nostr::prelude::*;
-use orchard_nostr::{KIND_APP, KIND_ASSET, KIND_RELEASE};
-use tungstenite::Message;
+use orchard_nostr::events::{self, Asset, Listing, Profile, Release};
+use orchard_nostr::relay;
 
 fn main() {
     if let Err(err) = run() {
@@ -134,120 +132,59 @@ fn run() -> Result<()> {
             generated
         }
     };
-    let pubkey = keys.get_public_key()?.to_string();
-    println!("publisher {pubkey}");
+    println!("publisher {}", keys.get_public_key()?.to_string());
 
     // asset first: the release references its event id
-    let mut asset_tags = vec![
-        ("i", args.app_id.as_str()),
-        ("x", args.digest.as_str()),
-        ("version", args.version.as_str()),
-        ("oci", args.location.as_str()),
-    ];
-    let asset_runtime: Option<(&str, &str)> = args
-        .runtime
-        .as_deref()
-        .map(|runtime| ("runtime", runtime));
-    if let Some((name, value)) = asset_runtime {
-        asset_tags.push((name, value));
-    }
-    let asset = signed(&keys, KIND_ASSET, "", asset_tags)?;
-    let asset_id = asset.id.to_string();
-
-    let release = signed(
+    let asset = events::sign_asset(
         &keys,
-        KIND_RELEASE,
-        args.notes.as_deref().unwrap_or(""),
-        vec![
-            ("d", &format!("{}@{}", args.app_id, args.version)[..]),
-            ("i", args.app_id.as_str()),
-            ("version", args.version.as_str()),
-            ("c", args.channel.as_str()),
-            ("e", asset_id.as_str()),
-        ],
+        &Asset {
+            app_id: args.app_id.clone(),
+            version: args.version.clone(),
+            digest: args.digest.clone(),
+            location: args.location.clone(),
+            runtime: args.runtime.clone(),
+        },
+    )?;
+    let release = events::sign_release(
+        &keys,
+        &Release {
+            app_id: args.app_id.clone(),
+            version: args.version.clone(),
+            channel: args.channel.clone(),
+            notes: args.notes.clone(),
+            asset_id: asset.id.to_string(),
+        },
+    )?;
+    let listing = events::sign_listing(
+        &keys,
+        &Listing {
+            app_id: args.app_id.clone(),
+            name: args.name.clone(),
+            summary: args.summary.clone(),
+            description: args.description.clone(),
+            icon: args.icon.clone(),
+            categories: args.categories.clone(),
+            arch: args.arch.clone(),
+            license: None,
+            repository: None,
+        },
     )?;
 
-    let mut listing_tags = vec![
-        ("d", args.app_id.as_str()),
-        ("name", args.name.as_str()),
-        ("summary", args.summary.as_str()),
-        ("f", args.arch.as_str()),
-    ];
-    if let Some(icon) = args.icon.as_deref() {
-        listing_tags.push(("icon", icon));
-    }
-    for category in &args.categories {
-        listing_tags.push(("t", category.as_str()));
-    }
-    let listing = signed(&keys, KIND_APP, args.description.as_deref().unwrap_or(""), listing_tags)?;
-
-    let mut events = vec![asset, release, listing];
-    // profile last so a fresh relay session has the listing already
+    let mut signed = vec![asset, release, listing];
     if args.author_name.is_some() || args.nip05.is_some() {
-        let profile = serde_json::json!({
-            "name": args.author_name.clone().unwrap_or_else(|| args.name.clone()),
-            "nip05": args.nip05,
-        });
-        // kind 0 content is the metadata document itself
-        let profile = EventBuilder::new(Kind::Metadata, profile.to_string())
-            .finalize(&keys)?;
-        events.push(profile);
+        // profile last so a fresh relay session has the listing already
+        signed.push(events::sign_profile(
+            &keys,
+            &Profile {
+                name: Some(args.author_name.clone().unwrap_or_else(|| args.name.clone())),
+                nip05: args.nip05.clone(),
+            },
+        )?);
     }
 
-    for relay in &args.relays {
-        publish_to(relay, &events)?;
+    for relay_url in &args.relays {
+        relay::send(relay_url, &signed)?;
     }
-    println!("published {} events", events.len());
+    println!("published {} events", signed.len());
     Ok(())
 }
-
-fn signed(
-    keys: &Keys,
-    kind: u32,
-    content: &str,
-    tags: Vec<(&str, &str)>,
-) -> Result<Event> {
-    let builder = EventBuilder::new(Kind::Custom(kind as u16), content).tags(tags.into_iter().map(
-        |(name, value)| Tag::custom(name, [value]),
-    ));
-    Ok(builder.finalize(keys)?)
-}
-
-fn publish_to(relay: &str, events: &[Event]) -> Result<()> {
-    let (mut socket, _response) = tungstenite::connect(relay)?;
-    for event in events {
-        socket.send(Message::text(
-            serde_json::json!(["EVENT", event]).to_string(),
-        ))?;
-    }
-    // read OKs until every event is acknowledged or the relay errs
-    let mut confirmed = 0;
-    while confirmed < events.len() {
-        let reply = socket.read()?;
-        let Message::Text(text) = reply else {
-            continue;
-        };
-        let frame: serde_json::Value = serde_json::from_str(text.as_str())?;
-        match frame.as_array().and_then(|rows| rows.first()).and_then(|v| v.as_str()) {
-            Some("OK") => {
-                let (id, accepted, message) = (
-                    frame.get(1).and_then(|v| v.as_str()).unwrap_or("?"),
-                    frame.get(2).and_then(|v| v.as_bool()).unwrap_or(false),
-                    frame.get(3).and_then(|v| v.as_str()).unwrap_or(""),
-                );
-                if accepted {
-                    confirmed += 1;
-                    println!("  {relay}: ok {id}");
-                } else {
-                    bail!("{relay}: rejected {id}: {message}");
-                }
-            }
-            Some("NOTICE") => {
-                bail!("{relay}: notice {}", frame.get(1).and_then(|v| v.as_str()).unwrap_or(""))
-            }
-            _ => {}
-        }
-    }
-    Ok(())
-}
-

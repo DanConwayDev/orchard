@@ -5,6 +5,7 @@ members = [
     "crates/orchard-flatpak",
     "crates/orchard-indexd",
     "crates/orchard-nostr",
+    "crates/orchard-publish",
     "crates/orchard",
 ]
 
@@ -20,6 +21,7 @@ orchard-core = { path = "crates/orchard-core" }
 orchard-flatpak = { path = "crates/orchard-flatpak" }
 orchard-indexd = { path = "crates/orchard-indexd" }
 orchard-nostr = { path = "crates/orchard-nostr" }
+orchard-publish = { path = "crates/orchard-publish" }
 
 # shared
 anyhow = "1"
@@ -33,7 +35,13 @@ gpui = "0.2.2"
 quick-xml = "0.38"
 flate2 = "1"
 sha2 = "0.10"
-# blocking HTTP client for registry verification calls; rustls so no OpenSSL
-ureq = { version = "2", default-features = false, features = ["tls", "gzip", "json"] }
+# blocking HTTP client for registry verification calls; rustls with the
+# system trust store so real registries and local test CAs both work
+ureq = { version = "2", default-features = false, features = ["tls", "native-certs", "gzip", "json"] }
 # NIP-01/NIP-82 events: keys, signing, signature verification (no async runtime)
 nostr = { version = "0.45", features = ["os-rng"] }
+# publish side: deterministic OCI layer tarballs, gzip (mtime 0), manifest
+# TOML, and the GVariant string-variant encoding of xa.metadata
+tar = "0.4"
+base64 = "0.22"
+toml = "0.8"

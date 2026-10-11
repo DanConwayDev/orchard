@@ -18,7 +18,7 @@ use gpui::{
     TextLayout, TextRun, UniformListScrollHandle, Window,
 };
 
-use orchard_core::{oci, permissions, CatalogApp, CatalogFile, Publisher, Risk, Source, StoreApp};
+use orchard_core::{oci, permissions, CatalogFile, Risk, Source, StoreApp};
 
 use crate::ui::{self, app_icon, badge, button};
 
@@ -2275,6 +2275,7 @@ fn update_available(app: &StoreApp, installed: &InstalledInfo) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orchard_core::{CatalogApp, Publisher};
 
     #[test]
     fn version_outdated_numeric_compare() {

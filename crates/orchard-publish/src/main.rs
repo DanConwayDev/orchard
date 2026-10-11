@@ -1,0 +1,252 @@
+//! Publisher CLI: the whole M5 pipeline in one command.
+//!
+//!     orchard-publish app.publish.toml \
+//!       --registry localhost:5000/hello    # push (else local layout only)
+//!
+//! Steps: parse the manifest, build the app tree into a deterministic OCI
+//! layout, push to the publisher's registry (optional), sign the NIP-82
+//! events (asset, release, listing, optional profile), send them to the
+//! relays. Sandbox permissions never leave the artifact: the ini in the
+//! tree rides the image config labels, and the event pins the manifest
+//! digest that carries them.
+
+use std::path::PathBuf;
+
+use anyhow::{bail, Result};
+use nostr::prelude::*;
+
+mod artifact;
+mod manifest;
+mod push;
+
+use orchard_nostr::events::{self, Asset, Listing, Profile, Release};
+use orchard_nostr::relay;
+
+fn main() {
+    if let Err(err) = run() {
+        eprintln!("orchard-publish: {err:#}");
+        std::process::exit(1);
+    }
+}
+
+struct Args {
+    manifest_path: PathBuf,
+    registry: Option<String>,
+    relays: Option<Vec<String>>,
+    nsec: Option<String>,
+    out: Option<PathBuf>,
+    skip_relays: bool,
+    skip_push: bool,
+}
+
+fn parse_args() -> Result<Args> {
+    let mut values = std::env::args().skip(1);
+    let mut manifest_path = None;
+    let mut registry = None;
+    let mut relays = None;
+    let mut nsec = std::env::var("ORCHARD_NSEC").ok();
+    let mut out = None;
+    let mut skip_relays = false;
+    let mut skip_push = false;
+    while let Some(flag) = values.next() {
+        let mut next = || {
+            values.next().ok_or_else(|| anyhow::anyhow!("missing value for {flag}"))
+        };
+        match flag.as_str() {
+            "--registry" => registry = Some(next()?),
+            "--relays" => {
+                relays = Some(
+                    next()?
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|url| !url.is_empty())
+                        .map(str::to_string)
+                        .collect(),
+                )
+            }
+            "--nsec" => nsec = Some(next()?),
+            "--out" => out = Some(PathBuf::from(next()?)),
+            "--skip-relays" => skip_relays = true,
+            "--skip-push" => skip_push = true,
+            other if other.starts_with('-') => bail!("unknown flag {other:?}"),
+            other => {
+                if manifest_path.is_some() {
+                    bail!("one manifest per run (got {other:?} after another)")
+                }
+                manifest_path = Some(PathBuf::from(other));
+            }
+        }
+    }
+    Ok(Args {
+        manifest_path: manifest_path.ok_or_else(|| anyhow::anyhow!("usage: orchard-publish <manifest.toml> [--registry registry/repo] [--relays urls]"))?,
+        registry,
+        relays,
+        nsec,
+        out,
+        skip_relays,
+        skip_push,
+    })
+}
+
+fn run() -> Result<()> {
+    let args = parse_args()?;
+    let manifest = manifest::load(&args.manifest_path)?;
+    let app_id = &manifest.app.id;
+    let version = &manifest.release.version;
+
+    // keys: flag beats env beats manifest key file; nothing means
+    // generate (with a loud warning, an ephemeral identity is almost
+    // never what a publisher wants)
+    let keys = match args.nsec.as_deref().map(str::to_string) {
+        Some(raw) => Keys::parse(raw.trim())?,
+        None => match &manifest.publish.as_ref().and_then(|p| p.key_file.as_ref()) {
+            Some(key_file) => {
+                let raw = std::fs::read_to_string(key_file)
+                    .and_then(|content| {
+                        Ok::<String, std::io::Error>(content.trim().to_string())
+                    })
+                    .map_err(|err| anyhow::anyhow!("reading key file {}: {err}", key_file.display()))?;
+                Keys::parse(&raw)?
+            }
+            None => {
+                let generated = Keys::generate();
+                eprintln!(
+                    "no key: generated an ephemeral identity, LOSE IT AND LOSE YOUR APP:\n  nsec {}",
+                    generated.secret_key().to_secret_hex()
+                );
+                generated
+            }
+        },
+    };
+    let publisher = keys.get_public_key()?.to_string();
+    println!("publisher {publisher}");
+
+    // build
+    let out = args
+        .out
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(format!("target/publish/{app_id}")));
+    let built = artifact::build(
+        &manifest.artifact.tree,
+        &out,
+        app_id,
+        version,
+        &manifest.ref_arch(),
+        manifest.release.notes.as_deref(),
+    )?;
+    println!(
+        "built {} {}:\n  layer    {}\n  diff id  {}\n  artifact {}",
+        app_id,
+        version,
+        built.layer_digest,
+        built.diff_id,
+        built.manifest_digest
+    );
+
+    // push: the event pins the digest the registry serves, which the
+    // client later verifies before install
+    let location = match (&args.registry, args.skip_push) {
+        (Some(registry_repo), false) => {
+            let tag = manifest
+                .publish
+                .as_ref()
+                .map(|p| p.tag.as_str())
+                .unwrap_or("latest");
+            let digest = push::push_layout(registry_repo, tag, &built.layout)?;
+            if digest != built.manifest_digest {
+                bail!("registry serves {digest}, built {built_digest}", built_digest = built.manifest_digest);
+            }
+            println!("pushed as {registry_repo}:{tag}");
+            format!("docker://{registry_repo}")
+        }
+        _ => format!("oci:{}", built.layout.display()),
+    };
+
+    // sign: asset first so the release can reference its id
+    let asset = events::sign_asset(
+        &keys,
+        &Asset {
+            app_id: app_id.clone(),
+            version: version.clone(),
+            digest: built.manifest_digest.clone(),
+            location: location.clone(),
+            runtime: manifest.release.runtime.clone(),
+        },
+    )?;
+    let release = events::sign_release(
+        &keys,
+        &Release {
+            app_id: app_id.clone(),
+            version: version.clone(),
+            channel: manifest.release.channel.clone(),
+            notes: manifest.release.notes.clone(),
+            asset_id: asset.id.to_string(),
+        },
+    )?;
+    let listing = events::sign_listing(
+        &keys,
+        &Listing {
+            app_id: app_id.clone(),
+            name: manifest.app.name.clone(),
+            summary: manifest.app.summary.clone(),
+            description: manifest.app.description.clone(),
+            icon: manifest.app.icon.clone(),
+            categories: manifest.app.categories.clone(),
+            arch: manifest.release.arch.clone(),
+            license: manifest.app.license.clone(),
+            repository: manifest.app.repository.clone(),
+        },
+    )?;
+    let mut signed = vec![asset, release, listing];
+    if let Some(publish) = &manifest.publish {
+        if publish.author_name.is_some() || publish.nip05.is_some() {
+            signed.push(events::sign_profile(
+                &keys,
+                &Profile {
+                    name: publish.author_name.clone(),
+                    nip05: publish.nip05.clone(),
+                },
+            )?);
+        }
+    }
+
+    // send
+    if args.skip_relays {
+        println!("{} events signed, not sent (--skip-relays)", signed.len());
+    } else {
+        let default_relays = vec!["ws://127.0.0.1:8008".to_string()];
+        let relays = args.relays.clone().or_else(|| {
+            manifest
+                .publish
+                .as_ref()
+                .filter(|p| !p.relays.is_empty())
+                .map(|p| p.relays.clone())
+        });
+        for relay_url in relays.unwrap_or(default_relays) {
+            relay::send(&relay_url, &signed)?;
+        }
+        println!("{} events published to the relays", signed.len());
+    }
+
+    println!(
+        "done:\n  app       {app_id} {version}\n  artifact  {}\n  location  {location}\n  sizes     {} down, {} installed",
+        built.manifest_digest,
+        human_bytes(built.download_size),
+        human_bytes(built.installed_size)
+    );
+    Ok(())
+}
+
+/// Same scale the client shows (`human_size` in the store): a size a
+/// human can compare against the download page.
+fn human_bytes(size: u64) -> String {
+    const KB: f64 = 1024.0;
+    let size = size as f64;
+    if size >= KB * KB {
+        format!("{:.1} MiB", size / (KB * KB))
+    } else if size >= KB {
+        format!("{:.1} KiB", size / KB)
+    } else {
+        format!("{size} B")
+    }
+}

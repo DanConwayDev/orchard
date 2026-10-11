@@ -95,3 +95,44 @@ fn handle_frame(text: &str, feed: &Arc<Mutex<Feed>>) -> Result<bool> {
         _ => Ok(false),
     }
 }
+
+/// Publish signed events to one relay and wait for every OK. A rejection
+/// or notice is a hard error: a relay that silently drops events would
+/// strand the release.
+pub fn send(relay_url: &str, events: &[Event]) -> Result<()> {
+    let (mut socket, _response) = tungstenite::connect(relay_url)?;
+    for event in events {
+        socket.send(Message::text(
+            serde_json::json!(["EVENT", event]).to_string(),
+        ))?;
+    }
+    let mut confirmed = 0;
+    while confirmed < events.len() {
+        let reply = socket.read()?;
+        let Message::Text(text) = reply else {
+            continue;
+        };
+        let frame: serde_json::Value = serde_json::from_str(text.as_str())?;
+        match frame.as_array().and_then(|rows| rows.first()).and_then(|v| v.as_str()) {
+            Some("OK") => {
+                let (id, accepted, message) = (
+                    frame.get(1).and_then(|v| v.as_str()).unwrap_or("?"),
+                    frame.get(2).and_then(|v| v.as_bool()).unwrap_or(false),
+                    frame.get(3).and_then(|v| v.as_str()).unwrap_or(""),
+                );
+                if accepted {
+                    confirmed += 1;
+                    println!("  {relay_url}: ok {id}");
+                } else {
+                    anyhow::bail!("{relay_url}: rejected {id}: {message}");
+                }
+            }
+            Some("NOTICE") => anyhow::bail!(
+                "{relay_url}: notice {}",
+                frame.get(1).and_then(|v| v.as_str()).unwrap_or("")
+            ),
+            _ => {}
+        }
+    }
+    Ok(())
+}

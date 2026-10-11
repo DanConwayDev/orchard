@@ -178,7 +178,8 @@ catalog. Rendered as the "reviewed" channel; Orchard-native apps as the
 |---|---|
 | `orchard-core` | domain types, event model, digest + permission logic |
 | `orchard-flatpak` | the *only* place the flatpak CLI is invoked (auto `flatpak-spawn --host` when sandboxed) |
-| `orchard-indexd` | local shim: Flatpak OCI registry-index on `127.0.0.1` (+ standalone bin for M0) |
+| `orchard-indexd` | local shim: Flatpak OCI registry-index on `127.0.0.1` (+ standalone bin for M0); hosts the Nostr read path (relay threads, verified feed, event cache) and serves the merged catalog |
+| `orchard-nostr` | NIP-82 events both ways: the verified read feed (`Feed`), the sync relay client (one thread per relay, reconnect with backoff), shared event builders for the publish side |
 | `orchard` | GPUI app |
 | `orchard-publish` (M5) | manifest → build → OCI push → sign → Nostr event |
 
@@ -233,8 +234,24 @@ verify → install — is proven with one app before any tooling investment.
 
 **M4: permissions viewer + `orchard://` scheme handler** (the signature feature).
 
-**M5: publish CLI.** `orchard-publish` = manifest → build → OCI push → cosign → signed
-Nostr event. Then Orchard feeds itself.
+**M5: publish CLI (built).** `orchard-publish` = manifest → build → OCI push → sign →
+Nostr event. The manifest (TOML) carries the listing and release fields; the app tree's
+`metadata` ini is the sandbox source of truth and rides the image config labels
+byte-exact; the layer tar and gzip are deterministic (mtime 0, sorted entries), so the
+same tree builds to the same digest. Conventions proven live against a TLS registry:
+- the asset's `oci` tag names the repository (`docker://host/repo`), the `x` tag pins
+  `sha256:<manifest digest>`; the client verifies by fetching the manifest **by digest**
+  (immutable) and flatpak installs the **digest ref** (`docker://host/repo@sha256:…`),
+  so what was verified is exactly what gets installed, no tag races;
+- a registry part may carry an explicit scheme (`docker://https://localhost:5000/hello`);
+  otherwise localhost registries use http and everything else https (docker's
+  insecure-registry convention); `install_arg` always prints the bare host form;
+- the push is monolithic blob upload + manifest PUT, then a read-back by digest: the
+  signed event only goes out if the registry serves the bytes we built.
+
+Cosign is dropped from M5: the Nostr signature already binds publisher identity to the
+pinned digest, and a second signature chain would add a trust source without adding
+trust.
 
 **M6: reviews + web of trust; self-distribution.** CI builds Orchard's own `.flatpak`
 bundle; dogfood the update path by updating Orchard through Orchard.

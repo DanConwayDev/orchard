@@ -1,0 +1,26 @@
+# The Orchard Hello demo, published the M5 way: one command builds the
+# app tree into an OCI artifact, pushes it to the publisher's registry,
+# and signs the NIP-82 events for the relays.
+#
+#   ORCHARD_NSEC=<key> orchard-publish demo/hello.publish.toml \
+#     --registry localhost:5000/hello
+
+[app]
+id = "com.orchard.Hello"
+name = "Orchard Hello"
+summary = "Demo app published through Orchard"
+description = "The Orchard demo: a shell script packaged as a flatpak by orchard-publish, pushed to the publisher's registry, and announced as NIP-82 events. The client verifies the pinned digest before install."
+categories = ["Utilities"]
+
+[release]
+version = "1.2.0"
+arch = "linux-x86_64"
+runtime = "org.freedesktop.Platform/x86_64/25.08"
+notes = "Third demo release, published with the orchard-publish CLI: manifest, build, push, sign."
+
+[artifact]
+tree = "hello"
+
+[publish]
+relays = ["ws://127.0.0.1:8008"]
+tag = "latest"
