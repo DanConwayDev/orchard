@@ -9,7 +9,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use gpui::{
-    div, prelude::*, px, ClickEvent, Context, FocusHandle, KeyDownEvent, ParentElement, Render,
+    div, prelude::*, px, ClickEvent, Context, CursorStyle, DragMoveEvent, FocusHandle,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseUpEvent, ParentElement, Point, Pixels, Render,
     SharedString, Styled, Window,
 };
 
@@ -98,6 +99,12 @@ pub struct StoreRoot {
     fetched: HashMap<String, Option<PathBuf>>,
     /// Fetches in flight, keyed by url.
     fetching: HashSet<String>,
+    /// Detail pane height while bottom-docked (set by the handle).
+    bottom_size: f32,
+    /// Detail pane width while right-docked (set by the handle).
+    right_size: f32,
+    /// Active resize drag: pointer position and size at drag start.
+    resize_anchor: Option<ResizeAnchor>,
 }
 
 impl StoreRoot {
@@ -117,6 +124,9 @@ impl StoreRoot {
             detail_lock: None,
             fetched: HashMap::new(),
             fetching: HashSet::new(),
+            bottom_size: 380.0,
+            right_size: 420.0,
+            resize_anchor: None,
         };
 
         // Orchard channel: read the catalog over HTTP from the in-process
@@ -260,9 +270,10 @@ impl StoreRoot {
 
     /// Follow the window width while unlocked: right when wide, bottom
     /// when narrow, hysteresis band between so a window resting near a
-    /// threshold never flickers between docks.
+    /// threshold never flickers between docks. Frozen mid-resize so a
+    /// drag near a threshold cannot flip the dock under the pointer.
     fn auto_dock(&mut self, window: &Window) {
-        if self.detail_lock.is_some() {
+        if self.detail_lock.is_some() || self.resize_anchor.is_some() {
             return;
         }
         let width = f32::from(window.viewport_size().width);
@@ -287,6 +298,45 @@ impl StoreRoot {
             None => Some(self.detail_bottom),
             Some(_) => None,
         };
+        cx.notify();
+    }
+
+    /// Track an active pane resize: the size follows the pointer
+    /// relative to where the drag started, clamped to the dock's
+    /// minimum and to what leaves the list breathing room.
+    fn on_resize_move(
+        &mut self,
+        event: &DragMoveEvent<DockDrag>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(anchor) = self.resize_anchor else {
+            // drag started without the handle's mousedown (should not
+            // happen): anchor at the first move instead
+            let bottom = self.detail_bottom;
+            let size = if bottom {
+                self.bottom_size
+            } else {
+                self.right_size
+            };
+            self.resize_anchor = Some(ResizeAnchor {
+                bottom,
+                pos: event.event.position,
+                size,
+            });
+            return;
+        };
+        let cursor = event.event.position;
+        let viewport = window.viewport_size();
+        if anchor.bottom {
+            let max = (f32::from(viewport.height) - LIST_MIN_AXIS).max(MIN_BOTTOM_HEIGHT);
+            self.bottom_size = (anchor.size + f32::from(anchor.pos.y) - f32::from(cursor.y))
+                .clamp(MIN_BOTTOM_HEIGHT, max);
+        } else {
+            let max = (f32::from(viewport.width) - LIST_MIN_AXIS).max(MIN_RIGHT_WIDTH);
+            self.right_size = (anchor.size + f32::from(cursor.x) - f32::from(anchor.pos.x))
+                .clamp(MIN_RIGHT_WIDTH, max);
+        }
         cx.notify();
     }
 
@@ -611,13 +661,29 @@ impl StoreRoot {
             })
     }
 
-    fn render_detail(&self, app: StoreApp, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_detail(
+        &self,
+        app: StoreApp,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let app_id = app.app_id.clone();
         let installed = self.installed.contains_key(&app_id);
         let job = self.jobs.get(&app_id);
         let verified = self.verified.get(&app_id).cloned();
         let bottom = self.detail_bottom;
         let locked = self.detail_lock == Some(bottom);
+
+        // pane size: user-dragged, clamped to the dock's minimum and
+        // to what leaves the list breathing room
+        let viewport = window.viewport_size();
+        let pane_size = if bottom {
+            let max = (f32::from(viewport.height) - LIST_MIN_AXIS).max(MIN_BOTTOM_HEIGHT);
+            self.bottom_size.clamp(MIN_BOTTOM_HEIGHT, max)
+        } else {
+            let max = (f32::from(viewport.width) - LIST_MIN_AXIS).max(MIN_RIGHT_WIDTH);
+            self.right_size.clamp(MIN_RIGHT_WIDTH, max)
+        };
 
         // the header icon: cached AppStream PNG, or a disk-cache fetch
         // of the remote icon, or the initials tile
@@ -630,22 +696,65 @@ impl StoreRoot {
             (None, None) => app_icon(None, &app.name, 40.),
         };
 
+        // the grab strip along the edge that faces the list: drag it
+        // to resize the pane (kuma-files' drag machinery: marker
+        // payload, empty ghost, move events on the root)
+        let handle = div()
+            .id("dock-handle")
+            .flex_none()
+            .cursor(if bottom {
+                CursorStyle::ResizeUpDown
+            } else {
+                CursorStyle::ResizeLeftRight
+            })
+            .hover(|style| style.bg(ui::accent()))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    let bottom = this.detail_bottom;
+                    this.resize_anchor = Some(ResizeAnchor {
+                        bottom,
+                        pos: event.position,
+                        size: if bottom {
+                            this.bottom_size
+                        } else {
+                            this.right_size
+                        },
+                    });
+                    cx.notify();
+                }),
+            )
+            .on_drag(DockDrag, |_, _, _, cx| cx.new(|_| DockDragGhost))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                    if this.resize_anchor.take().is_some() {
+                        cx.notify();
+                    }
+                }),
+            );
+        let handle = if bottom {
+            handle.w_full().h(px(6.))
+        } else {
+            handle.w(px(6.)).h_full()
+        };
+
         let pane = div().flex().flex_col().bg(ui::panel()).overflow_hidden();
         let pane = if bottom {
             pane.w_full()
                 .flex_none()
-                .h(px(320.))
+                .h(px(pane_size))
                 .border_t_1()
                 .border_color(ui::divider())
         } else {
-            pane.w(px(420.))
+            pane.w(px(pane_size))
                 .flex_none()
                 .h_full()
                 .border_l_1()
                 .border_color(ui::divider())
         };
 
-        pane.child(
+        let pane = pane.child(
                 // header
                 div()
                     .flex()
@@ -849,7 +958,24 @@ impl StoreRoot {
                             buttons
                         }
                     }),
-            )
+            );
+
+        if bottom {
+            div()
+                .w_full()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .child(handle)
+                .child(pane)
+        } else {
+            div()
+                .flex_none()
+                .h_full()
+                .flex()
+                .child(handle)
+                .child(pane)
+        }
     }
 }
 
@@ -859,6 +985,34 @@ fn risk_label(risk: Risk) -> &'static str {
         Risk::Medium => "medium",
         Risk::High => "high",
     }
+}
+
+/// Detail pane sizing: the smallest draggable size for each dock and
+/// the breathing room the list keeps on the other axis.
+const MIN_BOTTOM_HEIGHT: f32 = 200.0;
+const MIN_RIGHT_WIDTH: f32 = 320.0;
+const LIST_MIN_AXIS: f32 = 160.0;
+
+/// Marker payload for the detail-pane resize drag.
+struct DockDrag;
+
+/// The drag ghost for the resize handle: nothing, the moving edge is
+/// the feedback.
+struct DockDragGhost;
+
+impl Render for DockDragGhost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
+
+/// Where a pane resize started: the pointer position and the pane
+/// size at that moment.
+#[derive(Clone, Copy)]
+struct ResizeAnchor {
+    bottom: bool,
+    pos: Point<Pixels>,
+    size: f32,
 }
 
 /// The auto-dock rule behind the detail pane: right when the window
@@ -1043,14 +1197,14 @@ impl Render for StoreRoot {
                     .flex()
                     .flex_col()
                     .child(self.render_list(cx))
-                    .children(selected.map(|app| self.render_detail(app, cx)))
+                    .children(selected.map(|app| self.render_detail(app, window, cx)))
             } else {
                 div()
                     .flex_1()
                     .min_h_0()
                     .flex()
                     .child(self.render_list(cx))
-                    .children(selected.map(|app| self.render_detail(app, cx)))
+                    .children(selected.map(|app| self.render_detail(app, window, cx)))
             })
             // status bar
             .child(
@@ -1082,6 +1236,20 @@ impl Render for StoreRoot {
             .on_click(cx.listener(|this, _e: &ClickEvent, window, _cx| {
                 // Keep the keyboard attached to the search context.
                 window.focus(&this.focus_handle);
+            }))
+            .on_drag_move::<DockDrag>(cx.listener(Self::on_resize_move))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                    if this.resize_anchor.take().is_some() {
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_drop(cx.listener(|this, _: &DockDrag, _window, cx| {
+                if this.resize_anchor.take().is_some() {
+                    cx.notify();
+                }
             }))
     }
 }
