@@ -26,6 +26,7 @@ use anyhow::{bail, Context as _, Result};
 use nostr::prelude::*;
 use orchard_core::{CatalogApp, CatalogFile, Publisher};
 
+pub mod connect;
 pub mod events;
 pub mod relay;
 

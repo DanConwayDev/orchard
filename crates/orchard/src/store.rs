@@ -120,22 +120,21 @@ pub struct StoreRoot {
     reviews_fetching: bool,
     /// The reviews list is collapsed by default; the header toggles it.
     reviews_expanded: bool,
-    /// The signed-in reviewer: the Nostr key reviews are signed with.
-    /// None until the user signs in; the key file survives restarts.
+    /// The signed-in reviewer: a NIP-46 session (the remote signer's
+    /// key is the identity). None until the user pairs a signer; the
+    /// pairing file survives restarts and restores the session.
     reviewer: Option<Reviewer>,
-    /// The sign-in form is open: step one asks for the key, step two
-    /// for an optional published name.
-    signin_open: bool,
-    signin_step: SigninStep,
-    /// Where the sign-in form shows: the header account panel or the
-    /// reviews section of the open page.
-    signin_origin: SigninOrigin,
-    /// The header sign-in panel's anchor (the click point).
-    signin_anchor: Option<gpui::Point<gpui::Pixels>>,
-    /// The key parsed in step one, signed in at the end of step two.
-    pending_keys: Option<nostr::prelude::Keys>,
-    /// The nsec of a freshly generated key, shown once for backup.
-    new_key_notice: Option<String>,
+    /// The sign-in modal is open (a QR pairing, then an optional name).
+    signin_modal: bool,
+    /// The live pairing session while the QR shows: None once paired
+    /// (the session becomes a pending reviewer) or on close.
+    connect: Option<ConnectSession>,
+    /// The reviewer built from a successful pairing, waiting through
+    /// the optional name question.
+    pending_reviewer: Option<Reviewer>,
+    /// The modal opened from the reviews flow: drop into the composer
+    /// after sign-in. The header entry point does not.
+    signin_for_review: bool,
     /// The channel dropdown is open, anchored at the click point.
     channel_menu: Option<gpui::Point<gpui::Pixels>>,
     /// The account dropdown is open, anchored at the click point.
@@ -207,12 +206,10 @@ impl StoreRoot {
             reviews_fetching: false,
             reviews_expanded: false,
             reviewer: load_reviewer(),
-            signin_open: false,
-            signin_step: SigninStep::Key,
-            signin_origin: SigninOrigin::Reviews,
-            signin_anchor: None,
-            pending_keys: None,
-            new_key_notice: None,
+            signin_modal: false,
+            connect: None,
+            pending_reviewer: None,
+            signin_for_review: false,
             channel_menu: None,
             account_menu: None,
             composing: false,
@@ -640,13 +637,12 @@ impl StoreRoot {
             cx.notify();
             return;
         };
-        let reviewer = self.reviewer.as_ref().unwrap();
         let Some(rating) = self.review_draft.0 else {
             self.review_error = Some("Pick a rating first (keys 1 to 5).".into());
             cx.notify();
             return;
         };
-        let key_hex = reviewer.keys.secret_key().to_secret_hex();
+        let reviewer = self.reviewer.clone().unwrap();
         let content = self.review_draft.1.trim().to_string();
         self.review_posting = true;
         self.review_error = None;
@@ -654,7 +650,7 @@ impl StoreRoot {
         cx.spawn(async move |this, cx| {
             let posted = cx
                 .background_executor()
-                .spawn(async move { post_review(&key_hex, &app_id, rating, content) })
+                .spawn(async move { post_review(&reviewer, &app_id, rating, content) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.review_posting = false;
@@ -678,75 +674,123 @@ impl StoreRoot {
     }
 
     /// Enter the review flow from the page: compose when signed in,
-    /// the sign-in form when not. Both expand the section.
+    /// the sign-in modal when not. Both expand the section.
     fn start_review(&mut self, cx: &mut Context<Self>) {
         self.reviews_expanded = true;
         self.review_error = None;
         if self.reviewer.is_some() {
             self.composing = true;
         } else {
-            self.close_signin();
-            self.signin_open = true;
-            self.signin_origin = SigninOrigin::Reviews;
+            self.open_signin_modal(true, cx);
         }
         cx.notify();
     }
 
-    /// Open the header account panel: the sign-in form when signed
-    /// out, a session menu when not. Any open dropdown closes first.
-    fn open_account_menu(&mut self, anchor: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
-        self.channel_menu = None;
-        if self.reviewer.is_some() {
-            self.account_menu = Some(anchor);
-            cx.notify();
-            return;
-        }
+    /// Open the sign-in modal and start a fresh pairing session: an
+    /// ephemeral client key, the pairing URI with its anti-spoofing
+    /// secret, and the QR image on disk. The connect relay is the
+    /// first review relay; it has to be one the signer app can reach.
+    fn open_signin_modal(&mut self, for_review: bool, cx: &mut Context<Self>) {
         self.close_signin();
-        self.signin_open = true;
-        self.signin_origin = SigninOrigin::Header;
-        self.signin_anchor = Some(anchor);
-        cx.notify();
+        self.signin_modal = true;
+        self.signin_for_review = for_review;
+        self.start_pairing(cx);
     }
 
-    /// Sign-in step one: parse the pasted key (nsec or hex). Valid
-    /// keys move the form to the optional name question.
-    fn accept_nsec(&mut self, cx: &mut Context<Self>) {
-        use nostr::prelude::*;
-        let raw = self.review_draft.1.trim();
-        match Keys::parse(raw) {
-            Ok(keys) => {
-                self.pending_keys = Some(keys);
-                self.signin_step = SigninStep::Name;
-                self.review_draft = (None, String::new());
-                self.review_cursor = 0;
-                self.review_anchor = None;
-                self.review_layout = None;
-                self.review_error = None;
-            }
-            Err(_) => {
-                self.review_error = Some(
-                    "That does not parse as a Nostr key; paste nsec1… or 64 hex characters."
-                        .into(),
-                );
-            }
-        }
-        cx.notify();
-    }
-
-    /// A fresh key for reviewers without one: nothing is written until
-    /// sign-in completes, so this notice is the one chance to copy it.
-    fn new_identity(&mut self, cx: &mut Context<Self>) {
+    /// Build one pairing session and start its poll loop. Runs again
+    /// for "new pairing code".
+    fn start_pairing(&mut self, cx: &mut Context<Self>) {
+        use nostr::key::GetPublicKey as _;
         use nostr::nips::nip19::ToBech32 as _;
         use nostr::prelude::*;
+        self.review_error = None;
+        let Some(relay) = review_relays().first().cloned() else {
+            self.review_error = Some("No relay configured for the connect channel.".into());
+            return;
+        };
         let keys = Keys::generate();
-        // Err is Infallible: the encoding cannot fail
-        let nsec = keys
+        // the anti-spoofing secret: the signer echoes it back in the
+        // connect response, a pairing answer without it is noise
+        let secret = keys
             .secret_key()
             .to_bech32()
             .expect("nsec bech32 encoding is infallible");
-        self.new_key_notice = Some(nsec);
-        self.pending_keys = Some(keys);
-        self.signin_step = SigninStep::Name;
+        let client_pubkey = keys.get_public_key().expect("generated key has a pubkey");
+        let qr_path =
+            match orchard_nostr::connect::connect_uri(&client_pubkey, &relay, "Orchard", &secret)
+                .and_then(|uri| crate::qr::write_qr_png(&uri, &qr_cache_dir()))
+            {
+                Ok(path) => path,
+                Err(err) => {
+                    self.review_error = Some(format!("pairing QR failed: {err:#}"));
+                    return;
+                }
+            };
+        self.connect = Some(ConnectSession {
+            qr_path,
+            relay: relay.clone(),
+            keys: keys.clone(),
+        });
+        cx.notify();
+
+        // the poll loop: while the modal shows the QR, listen for the
+        // signer's connect response; pairing completes from here
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(1200))
+                .await;
+            let waiting = this
+                .update(cx, |this, _| {
+                    this.signin_modal && this.connect.is_some() && this.pending_reviewer.is_none()
+                })
+                .unwrap_or(false);
+            if !waiting {
+                break;
+            }
+            let answer = cx
+                .background_executor()
+                .spawn({
+                    let relay = relay.clone();
+                    let keys = keys.clone();
+                    let secret = secret.clone();
+                    async move {
+                        orchard_nostr::connect::poll_connect(
+                            &relay,
+                            &keys,
+                            &secret,
+                            std::time::Duration::from_millis(1500),
+                        )
+                    }
+                })
+                .await;
+            match answer {
+                Ok(Some((signer_pubkey, secret))) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.pairing_connected(signer_pubkey, secret, cx);
+                    });
+                    break;
+                }
+                // nothing yet: poll again; relay hiccups retry the
+                // same way until the modal closes
+                _ => {}
+            }
+        })
+        .detach();
+    }
+
+    /// A signer answered the pairing: keep the session as a pending
+    /// reviewer and ask the optional name question.
+    fn pairing_connected(&mut self, signer_pubkey: String, secret: String, cx: &mut Context<Self>) {
+        let Some(session) = self.connect.take() else {
+            return;
+        };
+        self.pending_reviewer = Some(Reviewer {
+            keys: session.keys,
+            relay: session.relay,
+            signer_pubkey,
+            secret,
+            name: None,
+        });
         self.review_draft = (None, String::new());
         self.review_cursor = 0;
         self.review_anchor = None;
@@ -755,72 +799,76 @@ impl StoreRoot {
         cx.notify();
     }
 
-    /// Sign-in step two: persist the key (plus the optional published
-    /// name), close the form, drop into compose.
+    /// Finish sign-in from the name question: persist the pairing
+    /// (plus the optional published name), close the modal, drop into
+    /// compose when it opened from the reviews flow.
     fn finish_sign_in(&mut self, cx: &mut Context<Self>) {
-        let Some(keys) = self.pending_keys.take() else {
-            self.signin_step = SigninStep::Key;
+        let Some(pending) = self.pending_reviewer.take() else {
+            self.close_signin();
             cx.notify();
             return;
         };
         let name = self.review_draft.1.trim().to_string();
         let name = (!name.is_empty()).then_some(name);
-        let from_reviews = self.signin_origin == SigninOrigin::Reviews;
+        let from_reviews = self.signin_for_review;
+        let mut reviewer = pending;
+        reviewer.name = name.clone();
         cx.spawn(async move |this, cx| {
-            use nostr::key::GetPublicKey as _;
-            let done = cx.background_executor().spawn(async move {
-                save_reviewer(&keys, name.as_deref())?;
-                let pubkey = keys.get_public_key()?.to_string();
-                let mut warning = None;
-                if let Some(published) = &name {
-                    // proper profile management: merge against the
-                    // author's latest kind 0 so every field they ever
-                    // published survives; when indexd cannot answer,
-                    // publish nothing rather than guess
-                    match fetch_profile_raws() {
-                        Ok(raws) => {
-                            let merged = merge_profile_raw(
-                                raws.get(&pubkey).map(String::as_str),
-                                published,
-                            );
-                            if let Err(err) = send_profile(&keys, &merged) {
-                                warning = Some(format!("profile publish failed: {err:#}"));
+            let done = cx
+                .background_executor()
+                .spawn(async move {
+                    let publish = (|| -> anyhow::Result<()> {
+                        save_reviewer(&reviewer)?;
+                        if let Some(published) = &name {
+                            // proper profile management: merge against
+                            // the author's latest kind 0 so every field
+                            // they ever published survives; when indexd
+                            // cannot answer, publish nothing rather
+                            // than guess
+                            match fetch_profile_raws() {
+                                Ok(raws) => {
+                                    let merged = merge_profile_raw(
+                                        raws.get(&reviewer.signer_pubkey).map(String::as_str),
+                                        published,
+                                    );
+                                    if let Err(err) = send_signed(
+                                        &reviewer,
+                                        orchard_nostr::KIND_PROFILE as u16,
+                                        Vec::new(),
+                                        &merged,
+                                    ) {
+                                        return Err(anyhow::anyhow!(
+                                            "profile publish failed: {err:#}"
+                                        ));
+                                    }
+                                }
+                                Err(err) => {
+                                    return Err(anyhow::anyhow!(
+                                        "could not read your existing profile ({err:#}); \
+                                         the name is kept on this device only"
+                                    ));
+                                }
                             }
                         }
-                        Err(err) => {
-                            warning = Some(format!(
-                                "could not read your existing profile ({err:#}); \
-                                 the name is kept on this device only"
-                            ));
-                        }
-                    }
-                }
-                Ok::<_, anyhow::Error>((
-                    Reviewer {
-                        pubkey,
-                        name,
-                        keys,
-                    },
-                    warning,
-                ))
-            }).await;
+                        Ok(())
+                    })();
+                    (reviewer, publish)
+                })
+                .await;
             let _ = this.update(cx, |this, cx| {
-                match done {
-                    Ok((reviewer, warning)) => {
+                let (reviewer, publish) = done;
+                match publish {
+                    Ok(()) => {
                         let named_locally = reviewer.name.is_some();
                         this.reviewer = Some(reviewer);
-                        this.signin_open = false;
-                        this.signin_anchor = None;
-                        this.new_key_notice = None;
+                        this.signin_modal = false;
+                        this.signin_for_review = false;
                         this.composing = from_reviews;
                         this.review_draft = (None, String::new());
                         this.review_cursor = 0;
                         this.review_anchor = None;
                         this.review_layout = None;
                         this.review_error = None;
-                        if let Some(warning) = warning {
-                            this.error = Some(warning);
-                        }
                         if !named_locally {
                             // an established key: their name comes from
                             // the profile they already published
@@ -830,7 +878,10 @@ impl StoreRoot {
                         // name once the profile propagates
                         this.ensure_reviews(cx);
                     }
+                    // keep the pairing: the name question stays up with
+                    // the error under it, so the user can retry
                     Err(err) => {
+                        this.pending_reviewer = Some(reviewer);
                         this.review_error = Some(format!("{err:#}"));
                     }
                 }
@@ -853,7 +904,7 @@ impl StoreRoot {
                 if let Ok(raws) = raws {
                     if let Some(reviewer) = this.reviewer.as_mut() {
                         if reviewer.name.is_none() {
-                            if let Some(raw) = raws.get(&reviewer.pubkey) {
+                            if let Some(raw) = raws.get(&reviewer.signer_pubkey) {
                                 let value: serde_json::Value =
                                     serde_json::from_str(raw).unwrap_or_default();
                                 if let Some(name) = value["name"].as_str() {
@@ -869,23 +920,23 @@ impl StoreRoot {
         .detach();
     }
 
-    /// End the session: the key stays in identity.json on this device
-    /// and reloads on the next launch.
+    /// End the session: the pairing stays in identity.json on this
+    /// device and restores the session on the next launch. The secret
+    /// key itself never lives here at all.
     fn sign_out(&mut self, cx: &mut Context<Self>) {
         self.reviewer = None;
         self.composing = false;
         cx.notify();
     }
 
-    /// Close the sign-in form wherever it shows, dropping any
-    /// half-entered key. The reviews draft resets with it: the shared
-    /// input belongs to whatever form opens next.
+    /// Close the sign-in modal, dropping the pairing session and any
+    /// half-paired signer. The reviews draft resets with it: the
+    /// shared input belongs to whatever form opens next.
     fn close_signin(&mut self) {
-        self.signin_open = false;
-        self.signin_anchor = None;
-        self.signin_step = SigninStep::Key;
-        self.pending_keys = None;
-        self.new_key_notice = None;
+        self.signin_modal = false;
+        self.signin_for_review = false;
+        self.connect = None;
+        self.pending_reviewer = None;
         self.review_draft = (None, String::new());
         self.review_cursor = 0;
         self.review_anchor = None;
@@ -1152,17 +1203,21 @@ impl StoreRoot {
             return;
         }
 
-        // ----- sign-in form: keystrokes go to the shared input (the
-        // nsec on step one, the optional name on step two) -----
-        if self.signin_open {
+        // ----- sign-in modal: QR phase swallows keys (Escape closes);
+        // the name question takes the shared input like the composer -----
+        if self.signin_modal {
+            if self.pending_reviewer.is_none() {
+                if key == "escape" {
+                    self.close_signin();
+                    cx.notify();
+                }
+                return;
+            }
             match key {
                 "escape" => {
                     self.close_signin();
                 }
-                "enter" => match self.signin_step {
-                    SigninStep::Key => self.accept_nsec(cx),
-                    SigninStep::Name => self.finish_sign_in(cx),
-                },
+                "enter" => self.finish_sign_in(cx),
                 "left" | "right" | "home" | "end" | "backspace" | "delete" => {
                     self.move_draft_cursor(key, shift)
                 }
@@ -1172,8 +1227,6 @@ impl StoreRoot {
                 }
                 "v" if ctrl => {
                     if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                        // a key is one token: strip every whitespace
-                        // character on paste
                         let pasted: String = text.split_whitespace().collect();
                         self.insert_draft_text(&pasted);
                     }
@@ -2391,11 +2444,9 @@ impl StoreRoot {
                 section = section.child(row);
             }
 
-            // compose or sign-in, depending on session state (the
-            // header hosts its own sign-in panel)
-            if self.signin_open && self.signin_origin == SigninOrigin::Reviews {
-                section = section.child(self.render_review_signin(font.clone(), cx));
-            } else if self.composing {
+            // compose or invitation, depending on session state (the
+            // sign-in modal is window-level, not part of the section)
+            if self.composing {
                 section = section.child(self.render_review_compose(app_id, font.clone(), cx));
             } else {
                 let mut invitation = div().flex().items_center().gap_2();
@@ -2426,7 +2477,7 @@ impl StoreRoot {
                                 .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
                                     this.sign_out(cx);
                                 }))
-                                .child("sign out (key stays on device)"),
+                                .child("sign out (pairing stays on device)"),
                         );
                 } else {
                     invitation = invitation.child(
@@ -2449,123 +2500,174 @@ impl StoreRoot {
         section.into_any_element()
     }
 
-    /// The sign-in form, in two steps: the Nostr key first (pasted or
-    /// freshly generated), an optional published display name second.
-    /// The key is the identity; the name is only a kind 0 profile.
-    fn render_review_signin(&mut self, font: gpui::Font, cx: &mut Context<Self>) -> gpui::AnyElement {
-        match self.signin_step {
-            SigninStep::Key => {
-                // the key never shows on screen: asterisks stand in
-                // for every character, and byte counts match so the
-                // caret maps through the same field state
-                let masked = "*".repeat(self.review_draft.1.len());
-                let input =
-                    self.render_text_input("signin-input", &masked, "nsec1… or 64-hex private key", font);
-                self.render_signin_frame(
-                    "Sign in with your Nostr key",
-                    input,
-                    Some("Reviews are signed with this key; it stays on this device."),
-                    "Continue",
-                    Some("create a new key instead"),
-                    cx,
-                )
-            }
-            SigninStep::Name => {
-                let text = self.review_draft.1.clone();
-                let input = self.render_text_input(
-                    "signin-input",
-                    &text,
-                    "Display name (optional, publishes a public profile)",
-                    font,
-                );
-                let notice = self.new_key_notice.as_deref().map(|nsec| {
-                    format!("New key, copy it now, it is your identity: {nsec}")
-                });
-                self.render_signin_frame(
-                    "Signing in",
-                    input,
-                    notice.as_deref(),
-                    "Start reviewing",
-                    Some("Skip"),
-                    cx,
-                )
-            }
-        }
+    /// The sign-in modal body: the QR pairing while it waits, the
+    /// optional name question once a signer answered. The chrome
+    /// (backdrop, centering) is around it in render_signin_modal.
+    fn render_signin_modal(&mut self, font: gpui::Font, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let body = if self.pending_reviewer.is_some() {
+            self.render_name_phase(font, cx)
+        } else if self.connect.is_some() {
+            self.render_pairing_phase(cx)
+        } else {
+            div()
+                .text_size(px(ui::TEXT_SIZE))
+                .text_color(ui::text_dim())
+                .child("Preparing the pairing…")
+                .into_any_element()
+        };
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            // the dimmed click-away is a FIRST sibling; the panel after
+            // it wins every click that lands on it
+            .child(
+                div()
+                    .id("signin-modal-backdrop")
+                    .absolute()
+                    .inset_0()
+                    .bg(gpui::rgba(0x000000B3))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _e: &MouseDownEvent, _w, cx| {
+                            this.close_signin();
+                            cx.notify();
+                        }),
+                    ),
+            )
+            .child(body)
+            .into_any_element()
     }
 
-    /// The sign-in form chrome around its single input: title, optional
-    /// notice or hint line, confirm button and optional secondary link.
-    fn render_signin_frame(
-        &mut self,
-        title: &str,
-        input: gpui::Stateful<gpui::Div>,
-        notice: Option<&str>,
-        confirm: &str,
-        secondary: Option<&str>,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let confirm_id: SharedString =
-            format!("btn-{}", confirm.to_lowercase().replace(' ', "-")).into();
-        let mut footer = div().flex().items_center().gap_3().child(
-            button(confirm_id, None, confirm, true).on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
-                match this.signin_step {
-                    SigninStep::Key => this.accept_nsec(cx),
-                    SigninStep::Name => this.finish_sign_in(cx),
-                }
-            })),
-        );
-        if let Some(link) = secondary {
-            footer = footer.child(
-                div()
-                    .id(SharedString::from(format!("link-{link}")))
-                    .cursor_pointer()
-                    .text_size(px(ui::TEXT_SIZE_LABEL))
-                    .text_color(ui::text_dim())
-                    .hover(|style| style.text_color(ui::text()))
-                    .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
-                        if this.signin_step == SigninStep::Key {
-                            this.new_identity(cx);
-                        } else {
-                            this.finish_sign_in(cx);
-                        }
-                    }))
-                    .child(link.to_string()),
-            );
-        }
-
-        let mut form = div()
+    /// The pairing panel: QR image, what to do with it, the relay
+    /// both ends must reach, live status, retry and cancel.
+    fn render_pairing_phase(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let Some(session) = self.connect.as_ref() else {
+            return div().into_any_element();
+        };
+        let qr = session.qr_path.clone();
+        let relay = session.relay.clone();
+        let mut panel = div()
+            .w(px(420.))
             .flex()
             .flex_col()
-            .gap_2()
-            .rounded_sm()
+            .gap_3()
+            .rounded_md()
             .border_1()
-            .border_color(ui::accent())
-            .px_3()
-            .py_2()
+            .border_color(ui::divider())
+            .bg(ui::panel())
+            .p_4()
+            .child(
+                div()
+                    .text_size(px(ui::TEXT_SIZE_EMPHASIS))
+                    .text_color(ui::text())
+                    .child("Sign in with your Nostr signer"),
+            )
+            .child(
+                div().flex().justify_center().child(
+                    gpui::img(qr).w(px(260.)).h(px(260.)).rounded_sm(),
+                ),
+            )
             .child(
                 div()
                     .text_size(px(ui::TEXT_SIZE))
                     .text_color(ui::text())
-                    .child(title.to_string()),
-            );
-        if let Some(notice) = notice {
-            form = form.child(
+                    .child(
+                        "Scan with a NIP-46 signer app (Amber, nsec-app, …) and approve \
+                         the sign-in there. Your secret key never enters this app.",
+                    ),
+            )
+            .child(
                 div()
                     .text_size(px(ui::TEXT_SIZE_LABEL))
                     .text_color(ui::text_dim())
-                    .child(notice.to_string()),
+                    .child(format!(
+                        "Pairing via {relay}; that relay must be reachable from your signer device."
+                    )),
+            )
+            .child(
+                div()
+                    .text_size(px(ui::TEXT_SIZE_LABEL))
+                    .text_color(ui::text_dim())
+                    .child("Waiting for approval…"),
             );
-        }
-        form = form.child(input).child(footer);
         if let Some(error) = &self.review_error {
-            form = form.child(
+            panel = panel.child(
                 div()
                     .text_size(px(ui::TEXT_SIZE_LABEL))
                     .text_color(ui::risk_color(Risk::Medium))
                     .child(error.clone()),
             );
         }
-        form.into_any_element()
+        panel = panel.child(
+            div().flex().items_center().gap_3().child(
+                button("btn-new-pairing", None, "New pairing code", false).on_click(cx.listener(
+                    |this, _e: &ClickEvent, _w, cx| {
+                        this.start_pairing(cx);
+                    },
+                )),
+            ),
+        );
+        panel.into_any_element()
+    }
+
+    /// The name question after a successful pairing: one optional
+    /// line, published as a merged kind 0 profile through the signer.
+    fn render_name_phase(&mut self, font: gpui::Font, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let text = self.review_draft.1.clone();
+        let input = self.render_text_input(
+            "signin-input",
+            &text,
+            "Display name (optional, publishes a public profile)",
+            font,
+        );
+        div()
+            .w(px(420.))
+            .flex()
+            .flex_col()
+            .gap_3()
+            .rounded_md()
+            .border_1()
+            .border_color(ui::divider())
+            .bg(ui::panel())
+            .p_4()
+            .child(
+                div()
+                    .text_size(px(ui::TEXT_SIZE_EMPHASIS))
+                    .text_color(ui::text())
+                    .child("Signer connected"),
+            )
+            .child(
+                div()
+                    .text_size(px(ui::TEXT_SIZE))
+                    .text_color(ui::text())
+                    .child("Approvals for signing now happen on your device."),
+            )
+            .child(input)
+            .child(
+                div().flex().items_center().gap_3().child(
+                    button("btn-start-reviewing", None, "Start reviewing", true).on_click(
+                        cx.listener(|this, _e: &ClickEvent, _w, cx| {
+                            this.finish_sign_in(cx);
+                        }),
+                    ),
+                ),
+            )
+            .child(
+                div()
+                    .text_size(px(ui::TEXT_SIZE_LABEL))
+                    .text_color(ui::text_dim())
+                    .child("Enter confirms; leave the field empty to skip the name."),
+            )
+            .children(self.review_error.clone().map(|error| {
+                div()
+                    .text_size(px(ui::TEXT_SIZE_LABEL))
+                    .text_color(ui::risk_color(Risk::Medium))
+                    .child(error)
+            }))
+            .into_any_element()
     }
 
     /// The shared single-line text input: StyledText with selection
@@ -3104,17 +3206,16 @@ impl Render for StoreRoot {
 
 impl StoreRoot {
     /// Is any window-level layer (channel dropdown, account dropdown,
-    /// header sign-in panel) showing?
+    /// sign-in modal) showing?
     fn any_layer_open(&self) -> bool {
-        self.channel_menu.is_some()
-            || self.account_menu.is_some()
-            || (self.signin_open && self.signin_origin == SigninOrigin::Header)
+        self.channel_menu.is_some() || self.account_menu.is_some() || self.signin_modal
     }
 
     /// The window-level layers, if any. The wrapper carries no
     /// hitbox of its own; each layer is a click-away overlay with the
     /// panel as a later sibling, so clicks on the panel stay the
-    /// panel's and every click outside closes the layer.
+    /// panel's and every click outside closes the layer. The modal
+    /// paints last: it covers the dropdowns too.
     fn render_layers(&mut self, font: gpui::Font, cx: &mut Context<Self>) -> gpui::AnyElement {
         let mut layers = div().absolute().inset_0();
         if self.channel_menu.is_some() {
@@ -3123,8 +3224,8 @@ impl StoreRoot {
         if self.account_menu.is_some() {
             layers = layers.child(self.render_account_menu(cx));
         }
-        if self.signin_open && self.signin_origin == SigninOrigin::Header {
-            layers = layers.child(self.render_header_signin(font, cx));
+        if self.signin_modal {
+            layers = layers.child(self.render_signin_modal(font, cx));
         }
         layers.into_any_element()
     }
@@ -3249,35 +3350,8 @@ impl StoreRoot {
                                 this.account_menu = None;
                                 this.sign_out(cx);
                             }))
-                            .child("Sign out (key stays on device)"),
+                            .child("Sign out (pairing stays on device)"),
                     ),
-            )
-            .into_any_element()
-    }
-
-    /// The header sign-in panel: the same two-step form the reviews
-    /// section uses, floating over the window.
-    fn render_header_signin(&mut self, font: gpui::Font, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let anchor = self.signin_anchor.unwrap_or_default();
-        let left = (anchor.x - px(280.)).max(px(8.));
-        div()
-            .id("signin-overlay")
-            .absolute()
-            .inset_0()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _e: &MouseDownEvent, _w, cx| {
-                    this.close_signin();
-                    cx.notify();
-                }),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .left(left)
-                    .top(anchor.y + px(6.))
-                    .w(px(320.))
-                    .child(self.render_review_signin(font, cx)),
             )
             .into_any_element()
     }
@@ -3298,7 +3372,6 @@ impl StoreRoot {
             .hover(|style| style.bg(ui::surface()))
             .on_click(cx.listener(|this, event: &ClickEvent, _w, cx| {
                 this.account_menu = None;
-                this.close_signin();
                 this.channel_menu = Some(event.position());
                 cx.notify();
             }))
@@ -3328,7 +3401,6 @@ impl StoreRoot {
                     .hover(|style| style.bg(ui::surface()))
                     .on_click(cx.listener(|this, event: &ClickEvent, _w, cx| {
                         this.channel_menu = None;
-                        this.close_signin();
                         this.account_menu = Some(event.position());
                         cx.notify();
                     }))
@@ -3337,8 +3409,8 @@ impl StoreRoot {
                     .into_any_element()
             }
             None => button("btn-sign-in-header", None, "Sign in", false)
-                .on_click(cx.listener(|this, event: &ClickEvent, _w, cx| {
-                    this.open_account_menu(event.position(), cx);
+                .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
+                    this.open_signin_modal(false, cx);
                 }))
                 .into_any_element(),
         }
@@ -3473,23 +3545,12 @@ fn load_reviews() -> anyhow::Result<HashMap<String, Vec<orchard_core::Review>>> 
     Ok(grouped)
 }
 
-/// Sign and send one review event to the review relays. Blocking: runs
-/// on the background pool. The key arrives as hex; the reviewer is
-/// always signed in by the time this runs.
-fn post_review(key_hex: &str, app_id: &str, rating: f32, content: String) -> anyhow::Result<()> {
-    use nostr::prelude::*;
-    let keys = Keys::parse(key_hex)?;
-    let event = orchard_nostr::events::sign_review(
-        &keys,
-        &orchard_nostr::events::Review {
-            app_id: app_id.to_string(),
-            rating: Some(rating),
-            content,
-        },
-    )?;
-    for url in review_relays() {
-        orchard_nostr::relay::send(&url, std::slice::from_ref(&event))?;
-    }
+/// Sign and send one review event through the signer, then publish it
+/// to the review relays. Blocking: runs on the background pool.
+fn post_review(reviewer: &Reviewer, app_id: &str, rating: f32, content: String) -> anyhow::Result<()> {
+    let mut tags: Vec<Vec<String>> = vec![vec!["d".into(), app_id.to_string()]];
+    tags.push(vec!["rating".into(), format!("{rating:.1}")]);
+    send_signed(reviewer, orchard_nostr::KIND_REVIEW as u16, tags, &content)?;
     Ok(())
 }
 
@@ -3507,29 +3568,26 @@ fn review_relays() -> Vec<String> {
     }
 }
 
-/// Where the sign-in form is: the key question comes first, the
-/// optional profile name second.
-#[derive(Clone, Copy, PartialEq)]
-enum SigninStep {
-    Key,
-    Name,
+/// A live pairing session: the ephemeral client key, the QR image on
+/// screen, and the relay both ends must reach. The anti-spoofing
+/// secret rides in the poll loop that waits for the connect response.
+struct ConnectSession {
+    keys: nostr::prelude::Keys,
+    qr_path: std::path::PathBuf,
+    relay: String,
 }
 
-/// Which surface hosts the sign-in form: the header account panel or
-/// the reviews section. The form state is shared; the origin decides
-/// where it renders and what a successful sign-in does next.
-#[derive(Clone, Copy, PartialEq)]
-enum SigninOrigin {
-    Header,
-    Reviews,
-}
-
-/// The signed-in reviewer: the Nostr key the reviews are signed with,
-/// its public key, and the display name if one was published (None:
-/// reviews resolve to a pubkey fragment until a profile exists).
+/// The signed-in reviewer: a NIP-46 session, not a key. `keys` is the
+/// ephemeral client keypair the connect channel encrypts with; the
+/// identity reviews carry is the REMOTE signer's pubkey, and every
+/// signature is a `sign_event` request the user approves on their
+/// device. The client never sees the identity's secret key.
+#[derive(Clone)]
 pub struct Reviewer {
     keys: nostr::prelude::Keys,
-    pub pubkey: String,
+    pub signer_pubkey: String,
+    pub secret: String,
+    pub relay: String,
     pub name: Option<String>,
 }
 
@@ -3538,39 +3596,47 @@ impl Reviewer {
     /// name, else a short pubkey fragment.
     pub fn display(&self) -> String {
         self.name.clone().unwrap_or_else(|| {
-            format!("{}…", &self.pubkey[..self.pubkey.len().min(12)])
+            format!(
+                "{}…",
+                &self.signer_pubkey[..self.signer_pubkey.len().min(12)]
+            )
         })
     }
 }
 
-/// Load the device's reviewer identity, if one is saved. The file
-/// holds the secret key (nsec or hex) and the optional published
-/// name; the key is the identity, so it stays on disk across
-/// sign-outs.
+/// Load the saved NIP-46 session, if one is stored. The file holds the
+/// ephemeral client key, the signer relationship, and the optional
+/// locally chosen name; it survives sign-outs (the signer holds the
+/// real key, so this file is not the identity).
 fn load_reviewer() -> Option<Reviewer> {
-    use nostr::key::GetPublicKey as _;
     let path = identity_path()?;
     let raw = std::fs::read_to_string(path).ok()?;
     let saved: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    let keys = nostr::prelude::Keys::parse(saved["secret_key"].as_str()?).ok()?;
+    // files from the nsec-key experiment have no signer_pubkey: they
+    // are ignored, the flow starts over with a pairing
+    let keys = nostr::prelude::Keys::parse(saved["client_key"].as_str()?).ok()?;
     Some(Reviewer {
-        pubkey: keys.get_public_key().ok()?.to_string(),
+        signer_pubkey: saved["signer_pubkey"].as_str()?.to_string(),
+        secret: saved["secret"].as_str()?.to_string(),
+        relay: saved["relay"].as_str()?.to_string(),
         name: saved["name"].as_str().map(str::to_string),
         keys,
     })
 }
 
-/// Persist the signed-in identity: the key as given plus the optional
-/// published name. The key leaves the memory of this machine only
-/// when the file is deleted.
-fn save_reviewer(keys: &nostr::prelude::Keys, name: Option<&str>) -> anyhow::Result<()> {
+/// Persist the NIP-46 session: the client's ephemeral key, the signer
+/// relationship, and the optional published name.
+fn save_reviewer(reviewer: &Reviewer) -> anyhow::Result<()> {
     let path = identity_path().ok_or_else(|| anyhow::anyhow!("XDG_DATA_HOME not set"))?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let saved = serde_json::json!({
-        "secret_key": keys.secret_key().to_secret_hex(),
-        "name": name,
+        "client_key": reviewer.keys.secret_key().to_secret_hex(),
+        "signer_pubkey": reviewer.signer_pubkey,
+        "secret": reviewer.secret,
+        "relay": reviewer.relay,
+        "name": reviewer.name,
     });
     std::fs::write(&path, serde_json::to_vec_pretty(&saved)?)?;
     #[cfg(unix)]
@@ -3581,10 +3647,30 @@ fn save_reviewer(keys: &nostr::prelude::Keys, name: Option<&str>) -> anyhow::Res
     Ok(())
 }
 
-/// Sign and send one kind 0 metadata document (the merged profile) to
-/// the review relays. Blocking: runs on the background pool.
-fn send_profile(keys: &nostr::prelude::Keys, raw_metadata: &str) -> anyhow::Result<()> {
-    let event = orchard_nostr::events::sign_profile_raw(keys, raw_metadata)?;
+/// Sign one event through the signer (NIP-46 `sign_event`) and publish
+/// it to the review relays. Blocking: runs on the background pool.
+fn send_signed(
+    reviewer: &Reviewer,
+    kind: u16,
+    tags: Vec<Vec<String>>,
+    content: &str,
+) -> anyhow::Result<()> {
+    let unsigned = serde_json::json!({
+        "pubkey": reviewer.signer_pubkey,
+        "created_at": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs(),
+        "kind": kind,
+        "tags": tags,
+        "content": content,
+    })
+    .to_string();
+    let event = orchard_nostr::connect::sign_event(
+        &reviewer.relay,
+        &reviewer.keys,
+        &reviewer.signer_pubkey.parse()?,
+        &unsigned,
+    )?;
     for url in review_relays() {
         orchard_nostr::relay::send(&url, std::slice::from_ref(&event))?;
     }
@@ -3595,6 +3681,18 @@ fn identity_path() -> Option<std::path::PathBuf> {
     std::env::var_os("XDG_DATA_HOME").map(|data| {
         std::path::PathBuf::from(data).join("orchard/identity.json")
     })
+}
+
+/// Where the pairing QR lands: the XDG cache when set, the data
+/// directory otherwise, /tmp last.
+fn qr_cache_dir() -> std::path::PathBuf {
+    if let Some(cache) = std::env::var_os("XDG_CACHE_HOME") {
+        return std::path::PathBuf::from(cache).join("orchard");
+    }
+    if let Some(data) = std::env::var_os("XDG_DATA_HOME") {
+        return std::path::PathBuf::from(data).join("orchard/qr");
+    }
+    std::env::temp_dir().join("orchard/qr")
 }
 
 /// Parse `flatpak list --app --columns=application,version,origin,installation`.

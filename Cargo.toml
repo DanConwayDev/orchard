@@ -39,7 +39,11 @@ sha2 = "0.10"
 # system trust store so real registries and local test CAs both work
 ureq = { version = "2", default-features = false, features = ["tls", "native-certs", "gzip", "json"] }
 # NIP-01/NIP-82 events: keys, signing, signature verification (no async runtime)
-nostr = { version = "0.45", features = ["os-rng"] }
+# nip44/nip46: the Nostr Connect sign-in channel
+nostr = { version = "0.45", features = ["os-rng", "nip44", "nip46"] }
+# NIP-46 sign-in QR: the QR encoder is pure Rust, the PNG is written by
+# hand on top of flate2 (no image crate)
+qrcodegen = "1.8"
 # publish side: deterministic OCI layer tarballs, gzip (mtime 0), manifest
 # TOML, and the GVariant string-variant encoding of xa.metadata
 tar = "0.4"
