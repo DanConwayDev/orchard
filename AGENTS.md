@@ -16,7 +16,12 @@ cargo registry in named volumes so builds are incremental. The pinned
 toolchain lives in `rust-toolchain.toml`.
 
 Run the built binary on the host, not in the container: the GPUI shell
-needs the host's Wayland session, and the container has no seat.
+needs the host's Wayland session, and the container has no seat. The host
+image lacks libxkbcommon-x11 at runtime (the container only needs it to
+link), so `lib/` bundles that one library and `scripts/run.sh` sets
+`LD_LIBRARY_PATH` before exec. Never mount the cargo/rustup volumes with
+`:Z` for read-only debugging either: any `:Z` mount relabels the volume
+and breaks the next unlabeled build (see recovery below).
 
 ## Volume labels (learned 2026-10-10)
 
