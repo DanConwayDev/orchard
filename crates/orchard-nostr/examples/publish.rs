@@ -48,6 +48,8 @@ struct Args {
     notes: Option<String>,
     author_name: Option<String>,
     nip05: Option<String>,
+    homepage: Option<String>,
+    repository: Option<String>,
     arch: String,
 }
 
@@ -69,6 +71,8 @@ fn parse_args() -> Result<Args> {
     let mut notes = None;
     let mut author_name = None;
     let mut nip05 = None;
+    let mut homepage = None;
+    let mut repository = None;
     let mut arch = "linux-x86_64".to_string();
     while let Some(flag) = values.next() {
         let mut next = || {
@@ -91,6 +95,8 @@ fn parse_args() -> Result<Args> {
             "--notes" => notes = Some(next()?),
             "--author-name" => author_name = Some(next()?),
             "--nip05" => nip05 = Some(next()?),
+            "--homepage" => homepage = Some(next()?),
+            "--repository" => repository = Some(next()?),
             "--arch" => arch = next()?,
             other => bail!("unknown argument {other:?}"),
         }
@@ -112,6 +118,8 @@ fn parse_args() -> Result<Args> {
         notes,
         author_name,
         nip05,
+        homepage,
+        repository,
         arch,
     })
 }
@@ -168,7 +176,8 @@ fn run() -> Result<()> {
             categories: args.categories.clone(),
             platforms: vec![args.arch.clone()],
             license: None,
-            repository: None,
+            repository: args.repository.clone(),
+            homepage: args.homepage.clone(),
         },
     )?;
 

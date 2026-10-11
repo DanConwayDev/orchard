@@ -2662,24 +2662,8 @@ impl StoreRoot {
                     .text_color(ui::text())
                     .children(description.lines().map(|line| div().w_full().child(line.to_string())))
             }))
-            .children(app.homepage.clone().map(|url| {
-                let open = url.clone();
-                div()
-                    .id("homepage")
-                    .flex()
-                    .items_center()
-                    .gap_1p5()
-                    .cursor_pointer()
-                    .text_size(px(ui::TEXT_SIZE))
-                    .text_color(ui::accent())
-                    .hover(|style| style.text_color(ui::text()))
-                    .on_click(move |_e: &ClickEvent, _window, _cx| {
-                        // host default handler, fire and forget
-                        let _ = std::process::Command::new("xdg-open").arg(&open).spawn();
-                    })
-                    .child(ui::icon("icons/globe.svg", 13., ui::accent()))
-                    .child(url)
-            }))
+            .children(app.homepage.clone().map(|url| project_link("homepage", "icons/globe.svg", url)))
+            .children(app.repository.clone().map(|url| project_link("repository", "icons/git.svg", url)))
             .child(self.render_reviews(&app_id, app.publisher.as_deref(), font.clone(), cx))
             .when_some(sandbox_metadata, |section, metadata| {
                 section.child(
@@ -4418,6 +4402,27 @@ fn human_size(bytes: u64) -> String {
 /// The honest state for an app whose chain exists but builds nothing
 /// for this machine. This one line is the whole arch story: quiet
 /// everywhere else, told in full exactly where it matters.
+/// One clickable project link row: an icon, the URL, the host's
+/// default handler on click. Homepage and repository share the shape.
+fn project_link(id: &'static str, icon: &'static str, url: String) -> impl IntoElement {
+    let open = url.clone();
+    div()
+        .id(SharedString::from(format!("link-{id}")))
+        .flex()
+        .items_center()
+        .gap_1p5()
+        .cursor_pointer()
+        .text_size(px(ui::TEXT_SIZE))
+        .text_color(ui::accent())
+        .hover(|style| style.text_color(ui::text()))
+        .on_click(move |_e: &ClickEvent, _window, _cx| {
+            // host default handler, fire and forget
+            let _ = std::process::Command::new("xdg-open").arg(&open).spawn();
+        })
+        .child(ui::icon(icon, 13., ui::accent()))
+        .child(url)
+}
+
 fn no_build_note(app: &StoreApp) -> String {
     let host = orchard_core::host_ref_arch();
     if app
@@ -5036,6 +5041,8 @@ mod tests {
             location: "oci:/srv/hello".into(),
             digest: Some("sha256:aa".into()),
             metadata: None,
+            repository: None,
+            homepage: None,
             notes: None,
             published_at: 0,
             successor_to: None,

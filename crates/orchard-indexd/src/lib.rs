@@ -568,6 +568,8 @@ mod tests {
                 location: "oci:/tmp/demo".into(),
                 digest: Some("sha256:00".into()),
                 metadata: None,
+                repository: None,
+                homepage: None,
                 notes: None,
                 published_at: 0,
                 successor_to: None,

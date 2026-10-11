@@ -217,6 +217,7 @@ fn run() -> Result<()> {
             platforms: manifest.listing_platforms(),
             license: manifest.app.license.clone(),
             repository: manifest.app.repository.clone(),
+            homepage: manifest.app.homepage.clone(),
         },
     )?;
     let mut signed = vec![asset, release, listing];

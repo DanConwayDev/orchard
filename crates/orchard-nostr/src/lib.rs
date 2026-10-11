@@ -120,6 +120,8 @@ struct Listing {
     icon_url: Option<String>,
     categories: Vec<String>,
     platforms: Vec<String>,
+    repository: Option<String>,
+    homepage: Option<String>,
 }
 
 /// A publisher migration (kind 30066, Orchard-draft): signed by the
@@ -271,6 +273,8 @@ impl Feed {
                 icon_url: parts.tag("icon"),
                 categories: parts.tag_values("t"),
                 platforms,
+                repository: parts.tag("repository"),
+                homepage: parts.tag("h"),
                 event,
             },
         );
@@ -604,6 +608,8 @@ impl Feed {
                 location,
                 digest,
                 metadata: None,
+                repository: listing.repository.clone(),
+                homepage: listing.homepage.clone(),
                 notes: (!release.event.content.is_empty())
                     .then(|| release.event.content.clone()),
                 published_at: release.created_at as i64,
@@ -749,6 +755,8 @@ mod tests {
                 ("icon", "https://example.com/icon.png"),
                 ("t", "Utilities"),
                 ("f", "linux-x86_64"),
+                ("repository", "https://github.com/example/hello"),
+                ("h", "https://hello.example.com"),
             ],
         );
         let asset = signed(
@@ -784,6 +792,11 @@ mod tests {
         assert_eq!(entry.app_id, "com.example.Hello");
         assert_eq!(entry.name, "Hello");
         assert_eq!(entry.summary, "A demo app");
+        assert_eq!(
+            entry.repository.as_deref(),
+            Some("https://github.com/example/hello")
+        );
+        assert_eq!(entry.homepage.as_deref(), Some("https://hello.example.com"));
         assert_eq!(
             entry.description.as_deref(),
             Some("Long description of the demo app.")

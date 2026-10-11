@@ -30,6 +30,8 @@ pub struct AppMeta {
     pub categories: Vec<String>,
     pub license: Option<String>,
     pub repository: Option<String>,
+    /// The project's homepage, published as the `h` tag.
+    pub homepage: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

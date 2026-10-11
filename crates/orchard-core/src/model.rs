@@ -189,6 +189,12 @@ pub struct CatalogApp {
     /// Pinned manifest digest, `sha256:…`. Installs refuse to run on mismatch.
     #[serde(default)]
     pub digest: Option<String>,
+    /// The project's source repository, the listing's `repository` tag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    /// The project's homepage, the listing's `h` tag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub homepage: Option<String>,
     /// Flatpak metadata ini, for the permissions viewer.
     #[serde(default)]
     pub metadata: Option<String>,
@@ -223,8 +229,10 @@ pub struct StoreApp {
     pub version: Option<String>,
     /// Latest release date, `YYYY-MM-DD` (reviewed channel).
     pub release_date: Option<String>,
-    /// Project homepage URL (reviewed channel).
+    /// Project homepage URL (reviewed channel or the listing's `h` tag).
     pub homepage: Option<String>,
+    /// Project source repository URL (publisher channel, `repository` tag).
+    pub repository: Option<String>,
     pub license: Option<String>,
     pub source: Source,
     pub icon_path: Option<std::path::PathBuf>,
@@ -258,6 +266,7 @@ impl StoreApp {
             version: app.version.clone(),
             release_date: app.release_date.clone(),
             homepage: app.homepage.clone(),
+            repository: None,
             license: app.license.clone(),
             source: Source::Reviewed,
             icon_path: app.icon_path.clone(),
@@ -281,7 +290,8 @@ impl StoreApp {
             description: app.description.clone(),
             version: (!app.version.is_empty()).then(|| app.version.clone()),
             release_date: None,
-            homepage: None,
+            homepage: app.homepage.clone(),
+            repository: app.repository.clone(),
             license: None,
             source: Source::Publisher,
             icon_path: None,

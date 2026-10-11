@@ -19,6 +19,8 @@ pub struct Listing {
     pub platforms: Vec<String>,
     pub license: Option<String>,
     pub repository: Option<String>,
+    /// The project's homepage, the `h` tag.
+    pub homepage: Option<String>,
 }
 
 /// One asset (kind 3063): the artifact pin.
@@ -78,7 +80,8 @@ pub fn sign_listing(keys: &Keys, listing: &Listing) -> Result<Event> {
         .tag(tag("summary", &listing.summary))
         .tag_maybe(optional_tag("icon", &listing.icon))
         .tag_maybe(optional_tag("license", &listing.license))
-        .tag_maybe(optional_tag("repository", &listing.repository));
+        .tag_maybe(optional_tag("repository", &listing.repository))
+        .tag_maybe(optional_tag("h", &listing.homepage));
     let builder = listing
         .categories
         .iter()
@@ -166,6 +169,7 @@ mod tests {
                 platforms: vec!["linux-x86_64".into()],
                 license: Some("MIT".into()),
                 repository: None,
+                homepage: None,
             },
         )
         .unwrap();
