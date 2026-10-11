@@ -16,6 +16,8 @@ client, not a gatekeeper.**
 | Metadata protocol | Nostr events (Zapstore-style); Orchard is a client/indexer, never the source of truth |
 | Product surface | Desktop client only (no server-side store) |
 | Flathub | Ingested client-side as a read-only "reviewed" channel |
+| Binaries | Developer-owned OCI registries only (ghcr, quay, self-hosted); Orchard never stores or proxies bytes |
+| Media | Publisher-hosted URLs (their site, forge, or a blob server they pick); no Orchard-run media service |
 | Language / UI | Rust end-to-end; GPUI `0.2` from crates.io |
 | Bootstrap | Client-first MVP; distribute Orchard itself as a `.flatpak` bundle + `orchard://` links |
 | Build | Podman container on the atomic host (see "Build environment") |
@@ -122,9 +124,11 @@ Orchard's additive tags (invisible to Zapstore readers):
 - Asset `runtime`: the flatpak runtime requirement
   (`org.freedesktop.Platform/x86_64/25.08`), needed at install time.
 
-Media (icons, screenshots) ride Blossom blob servers; the blossom URL is configuration,
-with Zapstore's CDN as a default seed. Signing (`orchard-publish`) follows Zapstore's
-`SIGN_WITH` shape: nsec or hex key, NIP-46 bunker for CI, NIP-07 browser extension.
+Media (icons, screenshots) are plain URLs the publisher hosts themselves — their website,
+a forge, or a blob server of their choosing; Orchard runs no media service and proxies no
+bytes. The client already fetches remote images from arbitrary URLs into a disk cache.
+Signing (`orchard-publish`) follows Zapstore's `SIGN_WITH` shape: nsec or hex key, NIP-46
+bunker for CI, NIP-07 browser extension.
 
 **Sandbox permissions are never published in events.** The publisher declares
 `finish-args` in their build manifest; flatpak bakes them into the artifact as commit
@@ -138,9 +142,12 @@ read, as a nicety, not a gate.
 
 Rules:
 
-- relays are dumb mirrors; the client reads several and merges. Default set: Zapstore's
-  relay (their publisher whitelist is just a curation signal to us — we verify
-  cryptographically, not socially) plus generic permissionless relays; user-configurable.
+- relays are dumb mirrors; the client reads several and merges. Publishing to Zapstore's
+  relay is not a plan: their relay whitelists writers (allow list, `zapstore.yaml` repo
+  verification, Vertex reputation), and their catalog is Android APKs anyway. Orchard's
+  default set is an Orchard-run event relay (events only — a few KB per app; binaries
+  live on publisher registries and never touch relays) plus generic permissionless
+  relays; Zapstore's relay stays an optional read source should it serve open reads.
 - curation is published as event lists that users opt into (web of trust, no server ranking)
 - the relay list is itself a published event, plus a hardcoded fallback in the client
 
