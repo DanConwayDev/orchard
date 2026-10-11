@@ -161,9 +161,11 @@ struct Review {
 
 /// The accumulated set of verified NIP-82 events, ready to project into a
 /// catalog. Replaceable semantics: the newest event per `d` wins.
+/// Listings are keyed (app id, publisher): the permissionless case is
+/// two publishers of one app id, and both rows survive.
 #[derive(Default)]
 pub struct Feed {
-    listings: BTreeMap<String, Listing>,
+    listings: BTreeMap<(String, String), Listing>,
     releases: BTreeMap<String, Vec<Release>>,
     assets: BTreeMap<String, Asset>,
     profiles: BTreeMap<String, Profile>,
@@ -222,15 +224,18 @@ impl Feed {
         if !platforms.is_empty() && !platforms.iter().any(|p| p.starts_with("linux-")) {
             return Ok(false);
         }
+        // a publisher replaces their own listing; another publisher's
+        // listing of the same id is a second row, not a challenge
+        let key = (app_id.clone(), parts.pubkey.clone());
         let newer = self
             .listings
-            .get(&app_id)
+            .get(&key)
             .is_none_or(|old| old.created_at <= parts.created_at);
         if !newer {
             return Ok(false);
         }
         self.listings.insert(
-            app_id,
+            key,
             Listing {
                 created_at: parts.created_at,
                 name: parts
@@ -412,14 +417,15 @@ impl Feed {
     /// the real sandbox from the artifact itself.
     pub fn catalog(&self) -> CatalogFile {
         let mut apps: Vec<CatalogApp> = Vec::new();
-        for (app_id, listing) in &self.listings {
-            let author = listing.event.pubkey.to_string();
+        // one row per (app id, publisher): the same app id signed by
+        // two keys projects twice, each against its own release chain
+        for ((app_id, author), listing) in &self.listings {
             // walk releases newest-first; first one with an installable
             // asset from the same publisher wins
             let Some(picked) = self.releases.get(app_id).and_then(|releases| {
                 releases
                     .iter()
-                    .filter(|release| release.event.pubkey.to_string() == author)
+                    .filter(|release| release.event.pubkey.to_string() == *author)
                     // flatpak installs from the stable branch; "main" is
                     // Zapstore's default channel name for the same thing
                     .filter(|release| {
@@ -428,7 +434,7 @@ impl Feed {
                     .find_map(|release| {
                         let asset = release.asset_refs.iter().find_map(|reference| {
                             let asset = self.assets.get(reference)?;
-                            if asset.event.pubkey.to_string() != author {
+                            if asset.event.pubkey.to_string() != *author {
                                 return None;
                             }
                             asset.location.as_ref()?; // nothing installable
@@ -456,7 +462,7 @@ impl Feed {
                 categories: listing.categories.clone(),
                 publisher: Publisher {
                     pubkey: author.clone(),
-                    nip05: self.profiles.get(&author).and_then(|p| p.nip05.clone()),
+                    nip05: self.profiles.get(author).and_then(|p| p.nip05.clone()),
                 },
                 version: release.version.clone(),
                 flatpak_ref: format!("app/{app_id}/{arch}/stable"),
@@ -625,6 +631,89 @@ mod tests {
         assert_eq!(entry.publisher.pubkey, demo_keys().get_public_key().unwrap().to_string());
         assert_eq!(entry.publisher.nip05, None);
         assert!(entry.published_at > 0);
+    }
+
+    /// The permissionless case: a second publisher signs the same app
+    /// id and both listings project, each against its own release
+    /// chain. Neither replaces the other.
+    #[test]
+    fn two_publishers_of_one_app_id_project_twice() {
+        let a = demo_keys();
+        let b = Keys::parse(
+            "a462984d90b5badd1ddef88f19ee6ad74bfcb06f431afc9b7b6ce2f6dbf6af70",
+        )
+        .unwrap();
+        let listing = |keys: &Keys, summary: &str| {
+            signed(
+                keys,
+                KIND_APP,
+                "",
+                vec![
+                    ("d", "com.example.Hello"),
+                    ("name", "Hello"),
+                    ("summary", summary),
+                    ("f", "linux-x86_64"),
+                ],
+            )
+        };
+        let asset = |keys: &Keys| {
+            let asset = signed(
+                keys,
+                KIND_ASSET,
+                "",
+                vec![
+                    ("i", "com.example.Hello"),
+                    ("x", DIGEST),
+                    ("version", "1.0.0"),
+                    ("oci", "oci:/srv/registry/hello"),
+                    ("runtime", "org.freedesktop.Platform/x86_64/25.08"),
+                ],
+            );
+            let release = signed(
+                keys,
+                KIND_RELEASE,
+                "",
+                vec![
+                    ("d", "com.example.Hello@1.0.0"),
+                    ("i", "com.example.Hello"),
+                    ("version", "1.0.0"),
+                    ("c", "stable"),
+                    ("e", asset.id.to_string().as_str()),
+                ],
+            );
+            (asset, release)
+        };
+        let (asset_a, release_a) = asset(&a);
+        let (asset_b, release_b) = asset(&b);
+        let mut feed = Feed::new();
+        absorb_all(
+            &mut feed,
+            &[
+                listing(&a, "first publisher"),
+                asset_a,
+                release_a,
+                // the second publisher's listing arrives LAST, and must
+                // not win the merge: it is a second row
+                listing(&b, "second publisher"),
+                asset_b,
+                release_b,
+            ],
+        );
+        let catalog = feed.catalog();
+        assert_eq!(catalog.apps.len(), 2);
+        let keys: Vec<&str> = catalog
+            .apps
+            .iter()
+            .map(|app| app.publisher.pubkey.as_str())
+            .collect();
+        assert!(keys.contains(&a.get_public_key().unwrap().to_string().as_str()));
+        assert!(keys.contains(&b.get_public_key().unwrap().to_string().as_str()));
+        // each publisher's own summary rode along on their row
+        assert!(catalog.apps.iter().any(|app| app.summary == "first publisher"));
+        assert!(catalog
+            .apps
+            .iter()
+            .any(|app| app.summary == "second publisher"));
     }
 
     #[test]

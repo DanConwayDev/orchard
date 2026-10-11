@@ -139,7 +139,11 @@ impl CatalogDocument for NostrCatalog {
                 apps.push(base_app.clone());
             }
         }
-        apps.sort_by(|a, b| a.app_id.cmp(&b.app_id));
+        apps.sort_by(|a, b| {
+            a.app_id
+                .cmp(&b.app_id)
+                .then_with(|| a.publisher.pubkey.cmp(&b.publisher.pubkey))
+        });
         CatalogFile { version: 1, apps }
     }
 

@@ -411,9 +411,11 @@ opening items because they need the push, the signing secret, and a tag.
       a fetch lands.)
 - [x] Publisher profiles on listings: the publisher's kind 0 name beats the npub
       fallback in "Published by".
-- [ ] Multi-publisher listings: the same app id signed by two publishers is the
-      permissionless case; the page must disambiguate (show both, let the reader
-      choose) instead of whichever row wins the merge.
+- [x] Multi-publisher listings: the same app id signed by two publishers projects
+      twice, each row against its own release chain. A row click names the
+      publisher; the page, digest badge, verify state, and install all key off the
+      clicked twin (bookkeeping keyed app id plus publisher). Rows are named in
+      the list ("by <publisher>") and carry unique element ids per publisher.
 - [ ] Key-continuity pinning: a publisher key that changes for the same app id
       gets a disclosure. Rotation is legitimate; sudden rotation with no history
       is the sybil-shaped case.

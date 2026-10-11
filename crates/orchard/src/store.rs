@@ -87,9 +87,12 @@ pub struct StoreRoot {
     search: String,
     filter: Filter,
     selected: Option<String>,
+    /// The publisher of the row the selection came from, when it came
+    /// from a row click: two publishers of one app id are two rows,
+    /// and only the clicked twin is the page's subject. Keyboard
+    /// selection carries None (the first twin).
+    selected_publisher: Option<String>,
     jobs: HashMap<String, JobState>,
-    /// app_id -> verified manifest digest (publisher channel, post-verify).
-    verified: HashMap<String, String>,
     /// The app awaiting an install confirmation: its button reads
     /// "Sure?" until the second press starts the job, or Escape, page
     /// close, or another install dismisses it.
@@ -112,9 +115,12 @@ pub struct StoreRoot {
     remote_fetching: HashSet<String>,
     /// Publisher-channel page-open artifact checks in flight.
     publisher_fetching: HashSet<String>,
-    /// Failed pre-install digest checks: app id -> why. Security
+    /// Failed pre-install digest checks: app key -> why. Security
     /// relevant, so it shows on the page, not just in the log.
     verify_errors: HashMap<String, String>,
+    /// app id -> verified manifest digest (publisher channel,
+    /// post-verify).
+    verified: HashMap<String, String>,
     /// Reviews from indexd (kind 30065): app id -> newest first.
     reviews: HashMap<String, Vec<orchard_core::Review>>,
     /// The earliest event per reviewer pubkey, from the reviews
@@ -216,6 +222,7 @@ impl StoreRoot {
             search: String::new(),
             filter: Filter::All,
             selected: None,
+            selected_publisher: None,
             jobs: HashMap::new(),
             confirm_install: None,
             verified: HashMap::new(),
@@ -397,7 +404,18 @@ impl StoreRoot {
 
     fn selected_app(&self) -> Option<&StoreApp> {
         let id = self.selected.as_ref()?;
-        self.apps.iter().find(|app| &app.app_id == id)
+        self.find_app(id)
+    }
+
+    /// The app a selection points at: the id, and when the selection
+    /// came from a specific publisher's row, that row's twin only.
+    /// None publisher matches either (keyboard selection, reviewed
+    /// apps).
+    fn find_app(&self, app_id: &str) -> Option<&StoreApp> {
+        self.apps.iter().find(|app| {
+            app.app_id == app_id
+                && self.selected_publisher.as_deref() == app.publisher.as_deref()
+        })
     }
 
     fn refresh_installed(&mut self, cx: &mut Context<Self>) {
@@ -421,6 +439,9 @@ impl StoreRoot {
             return;
         }
         self.selected = Some(app_id.to_string());
+        // keyboard selection aims at the first twin; only a row click
+        // names its publisher
+        self.selected_publisher = None;
         cx.notify();
     }
 
@@ -445,9 +466,7 @@ impl StoreRoot {
         }
         self.page_open = true;
         let urls: Vec<String> = self
-            .apps
-            .iter()
-            .find(|a| a.app_id == app_id)
+            .find_app(app_id)
             .map(|app| {
                 let mut urls = Vec::new();
                 if app.icon_path.is_none() {
@@ -470,7 +489,7 @@ impl StoreRoot {
         // manifest and sizes of the commit that would install; for
         // publisher apps the artifact itself is read (digest check plus
         // sandbox labels in one manifest fetch)
-        let source = self.apps.iter().find(|a| a.app_id == app_id).map(|a| a.source);
+        let source = self.find_app(app_id).map(|a| a.source);
         let not_installed = !self.installed.contains_key(app_id);
         match source {
             Some(Source::Reviewed) if not_installed => self.ensure_remote_data(app_id, cx),
@@ -484,8 +503,9 @@ impl StoreRoot {
     /// Fetch an app's remote commit summary and sandbox manifest
     /// (once per session; failures retry on the next page open).
     fn ensure_remote_data(&mut self, app_id: &str, cx: &mut Context<Self>) {
-        if (self.remote_metadata.contains_key(app_id) && self.remote_sizes.contains_key(app_id))
-            || !self.remote_fetching.insert(app_id.to_string())
+        let key = app_key(app_id, self.selected_publisher.as_deref());
+        if self.remote_metadata.contains_key(&key) && self.remote_sizes.contains_key(&key)
+            || !self.remote_fetching.insert(key.clone())
         {
             return;
         }
@@ -522,12 +542,12 @@ impl StoreRoot {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if let Some(metadata) = metadata {
-                    this.remote_metadata.insert(app_id.clone(), metadata);
+                    this.remote_metadata.insert(key.clone(), metadata);
                 }
                 if let Some(sizes) = sizes {
-                    this.remote_sizes.insert(app_id.clone(), sizes);
+                    this.remote_sizes.insert(key.clone(), sizes);
                 }
-                this.remote_fetching.remove(&app_id);
+                this.remote_fetching.remove(&key);
                 cx.notify();
             });
         })
@@ -569,16 +589,15 @@ impl StoreRoot {
             }
             old_metadata.remove(&app.app_id);
         }
-        // an app that vanished (unpublished, key revoked) closes the page
-        if let Some(selected) = self.selected.clone() {
-            if !incoming.iter().any(|app| app.app_id == selected)
-                && !self.apps.iter().any(|app| app.app_id == selected)
-            {
-                self.selected = None;
-                self.page_open = false;
-            }
-        }
+        // an app that vanished (unpublished, key revoked) closes the
+        // page; so does the selected publisher vanishing while another
+        // keeps the same app id alive
         self.apps.extend(incoming);
+        if self.page_open && self.selected_app().is_none() {
+            self.selected = None;
+            self.selected_publisher = None;
+            self.page_open = false;
+        }
         cx.notify();
     }
 
@@ -588,16 +607,18 @@ impl StoreRoot {
     /// button runs; failures surface on the page and retry on the next
     /// page open.
     fn ensure_publisher_data(&mut self, app_id: &str, cx: &mut Context<Self>) {
-        if self.verified.contains_key(app_id)
-            || self.verify_errors.contains_key(app_id)
-            || !self.publisher_fetching.insert(app_id.to_string())
+        let key = app_key(app_id, self.selected_publisher.as_deref());
+        if self.verified.contains_key(&key)
+            || self.verify_errors.contains_key(&key)
+            || !self.publisher_fetching.insert(key.clone())
         {
             return;
         }
-        let Some(app) = self.apps.iter().find(|a| a.app_id == app_id) else {
-            self.publisher_fetching.remove(app_id);
+        let Some(app) = self.find_app(app_id).cloned() else {
+            self.publisher_fetching.remove(&key);
             return;
         };
+        let publisher = app.publisher.clone();
         let location = match app
             .location
             .as_deref()
@@ -605,7 +626,7 @@ impl StoreRoot {
         {
             Some(location) => location,
             None => {
-                self.publisher_fetching.remove(app_id);
+                self.publisher_fetching.remove(&key);
                 return;
             }
         };
@@ -617,16 +638,18 @@ impl StoreRoot {
                 .spawn(async move { oci::verify(&location, pinned.as_deref()) })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.publisher_fetching.remove(&app_id);
+                this.publisher_fetching.remove(&key);
                 match report {
                     Ok(report) => {
-                        this.verified.insert(app_id.clone(), report.digest.clone());
-                        if let Some(app) = this.apps.iter_mut().find(|a| a.app_id == app_id) {
+                        this.verified.insert(key.clone(), report.digest.clone());
+                        if let Some(app) = this.apps.iter_mut().find(|a| {
+                            a.app_id == app_id && a.publisher == publisher
+                        }) {
                             if app.metadata.is_none() {
                                 app.metadata = report.metadata.clone();
                             }
                             this.remote_sizes.insert(
-                                app_id.clone(),
+                                key.clone(),
                                 (
                                     Some(human_size(report.download_size)),
                                     report.installed_size.map(human_size),
@@ -639,7 +662,7 @@ impl StoreRoot {
                         // unreadable: show it, and keep retrying on the
                         // next page open
                         this.verify_errors
-                            .insert(app_id.clone(), format!("{err:#}"));
+                            .insert(key.clone(), format!("{err:#}"));
                     }
                 }
                 cx.notify();
@@ -1188,13 +1211,22 @@ impl StoreRoot {
 
     fn install(&mut self, app_id: &str, cx: &mut Context<Self>) {
         self.confirm_install = None;
-        let Some(app) = self.apps.iter().find(|a| a.app_id == app_id) else {
+        // the selection's publisher names the twin: two publishers of
+        // one app id install from different artifacts
+        let Some(app) = self
+            .apps
+            .iter()
+            .find(|a| {
+                a.app_id == app_id
+                    && a.publisher.as_deref() == self.selected_publisher.as_deref()
+            })
+            .cloned()
+        else {
             return;
         };
         if self.jobs.contains_key(app_id) {
             return;
         }
-        let app = app.clone();
         match app.source {
             Source::Reviewed => {
                 let cmd = orchard_flatpak::install_ref(&app.app_id, FLATHUB_REMOTE);
@@ -1260,7 +1292,7 @@ impl StoreRoot {
                 match verified {
                     Ok((flatpak_ref, digest, metadata)) => {
                         this.verified
-                            .insert(app.app_id.clone(), digest.clone());
+                            .insert(app_key(&app.app_id, app.publisher.as_deref()), digest.clone());
                         // Prefer the image's own metadata for the viewer.
                         if app.metadata.is_none() {
                             app.metadata = metadata;
@@ -1553,6 +1585,7 @@ impl StoreRoot {
                     self.cursor = 0;
                 } else if self.selected.is_some() {
                     self.selected = None;
+                    self.selected_publisher = None;
                 }
             }
             "up" | "down" => {
@@ -1567,8 +1600,20 @@ impl StoreRoot {
                     .selected
                     .as_deref()
                     .and_then(|id| {
+                        // prefer the selected twin's own row; a publisher
+                        // may be filtered out entirely, so fall back to
+                        // the first row of the id
                         rows.iter()
-                            .position(|&ix| self.apps[ix].app_id == id)
+                            .position(|&ix| {
+                                let app = &self.apps[ix];
+                                app.app_id == id
+                                    && self.selected_publisher.as_deref()
+                                        == app.publisher.as_deref()
+                            })
+                            .or_else(|| {
+                                rows.iter()
+                                    .position(|&ix| self.apps[ix].app_id == id)
+                            })
                     });
                 let next = match (current, key) {
                     (Some(ix), "down") => (ix + 1).min(rows.len() - 1),
@@ -1954,18 +1999,33 @@ impl StoreRoot {
                 let app = &self.apps[app_ix];
                 let app_id = app.app_id.clone();
                 let action_id = app_id.clone();
-                let is_selected = selected == Some(app.app_id.as_str());
+                let row_publisher = app.publisher.clone();
+                // the row's bookkeeping key: two publishers of one app
+                // id keep separate digests
+                let row_key = app_key(&app.app_id, row_publisher.as_deref());
+                // unique element ids: twin rows share the app id, and
+                // duplicate ids collapse hover and state
+                let row_id = format!(
+                    "app-row-{app_id}-{}",
+                    row_publisher.as_deref().unwrap_or("")
+                );
+                let is_selected = selected == Some(app.app_id.as_str())
+                    && self.selected_publisher.as_deref() == app.publisher.as_deref();
                 let is_installed = self.installed.contains_key(&app.app_id);
                 let outdated = self
                     .installed
                     .get(app.app_id.as_str())
                     .is_some_and(|info| update_available(app, info));
                 let job = self.jobs.get(&app.app_id).map(|job| job.label().to_string());
-                let verified_digest = self.verified.get(&app.app_id).cloned();
+                let verified_digest = self.verified.get(&row_key).cloned();
                 let row_update_id = app_id.clone();
+                // one publisher clone per closure: two move closures
+                // cannot share the original
+                let click_publisher = row_publisher.clone();
+                let install_publisher = row_publisher.clone();
 
                 div()
-                    .id(SharedString::from(format!("app-row-{app_id}")))
+                    .id(SharedString::from(row_id))
                     .h(px(ROW_HEIGHT))
                     .w_full()
                     .flex()
@@ -1978,9 +2038,11 @@ impl StoreRoot {
                     .hover(|style| style.bg(ui::surface()))
                     .when(is_selected, |row| row.bg(ui::row_selected()))
                     .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
+                        // a twin row names its publisher: the page is
+                        // about THIS row, not the first same-id row
+                        this.selected_publisher = click_publisher.clone();
                         this.open_page(&app_id, cx);
-                    }))
-                    .child(app_icon(app.icon_path.as_deref(), &app.name, 40.))
+                    }))                    .child(app_icon(app.icon_path.as_deref(), &app.name, 40.))
                     .child(
                         div()
                             .flex_1()
@@ -2018,7 +2080,27 @@ impl StoreRoot {
                                     .text_color(ui::text_dim())
                                     .overflow_hidden()
                                     .whitespace_nowrap()
-                                    .child(app.summary.clone()),
+                                    // a second publisher of the same app
+                                    // id is a second row: name them in
+                                    // the list, quiet by default
+                                    .child(match app.source {
+                                        Source::Publisher => {
+                                            let who = app
+                                                .publisher
+                                                .as_deref()
+                                                .and_then(|pubkey| {
+                                                    self.profiles.get(pubkey)
+                                                })
+                                                .and_then(|p| p.name.clone())
+                                                .unwrap_or_else(|| {
+                                                    short_npub(
+                                                        app.publisher.as_deref().unwrap_or(""),
+                                                    )
+                                                });
+                                            format!("by {who} \u{b7} {}", app.summary)
+                                        }
+                                        Source::Reviewed => app.summary.clone(),
+                                    }),
                             ),
                     )
                     .child(match job {
@@ -2040,7 +2122,7 @@ impl StoreRoot {
                                 badge("Installed", ui::risk_color(orchard_core::Risk::Low))
                             })
                             .child(ui::small_button(
-                                format!("row-open-{action_id}"),
+                                format!("row-open-{action_id}-{}", row_publisher.as_deref().unwrap_or("")),
                                 Some("icons/play.svg"),
                                 "Open",
                                 false,
@@ -2053,7 +2135,10 @@ impl StoreRoot {
                                 let update_id = row_update_id.clone();
                                 slot.child(
                                     ui::small_button(
-                                        format!("row-update-{update_id}"),
+                                        format!(
+                                            "row-update-{update_id}-{}",
+                                            row_publisher.as_deref().unwrap_or("")
+                                        ),
                                         Some("icons/update.svg"),
                                         "Update",
                                         false,
@@ -2078,18 +2163,19 @@ impl StoreRoot {
                                 .gap_2()
                                 .children(app.version.as_deref().map(|v| badge(v, ui::text_dim())))
                                 .child(
-                                    // the row's primary action wears the
-                                    // accent, like the details page's
-                                    // install; the dim secondary style left
-                                    // it barely legible
                                     ui::small_button(
-                                        format!("row-install-{action_id}"),
+                                        format!(
+                                            "row-install-{action_id}-{}",
+                                            row_publisher.as_deref().unwrap_or("")
+                                        ),
                                         Some("icons/plus.svg"),
                                         if confirming { "Sure?" } else { "Install" },
                                         true,
                                     )
                                     .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
                                         cx.stop_propagation();
+                                        // the twin this row stands for
+                                        this.selected_publisher = install_publisher.clone();
                                         if confirming {
                                             this.install(action_id.as_str(), cx);
                                         } else {
@@ -2112,9 +2198,12 @@ impl StoreRoot {
     /// bar stays pinned while the content scrolls.
     fn render_page(&mut self, app: StoreApp, font: gpui::Font, cx: &mut Context<Self>) -> AnyElement {
         let app_id = app.app_id.clone();
+        // the page's bookkeeping key: the selected twin's publisher
+        // names which digest, sizes, and verify error belong here
+        let page_key = app_key(&app_id, app.publisher.as_deref());
         let installed = self.installed.contains_key(&app_id);
         let job = self.jobs.get(&app_id).cloned();
-        let verified = self.verified.get(&app_id).cloned();
+        let verified = self.verified.get(&page_key).cloned();
 
         // the permissions source, in order: catalog metadata (Orchard
         // channel), the deploy's ini (installed apps), the remote's
@@ -2127,7 +2216,7 @@ impl StoreRoot {
                     .get(&app_id)
                     .and_then(|info| info.metadata.clone())
             })
-            .or_else(|| self.remote_metadata.get(&app_id).cloned());
+            .or_else(|| self.remote_metadata.get(&page_key).cloned());
 
         // the header icon: cached AppStream PNG, or a disk-cache fetch
         // of the remote icon, or the initials tile
@@ -2142,7 +2231,7 @@ impl StoreRoot {
 
         // the quiet provenance line: what the user is relying on,
         // without cryptographic jargon by default
-        let digest_failed = self.verify_errors.get(&app_id).cloned();
+        let digest_failed = self.verify_errors.get(&page_key).cloned();
         let digest_badge = if digest_failed.is_none() {
             verified.clone().map(|digest| {
                 let short = &digest[..digest.len().min(12)];
@@ -2303,7 +2392,7 @@ impl StoreRoot {
                                         .map(|size| div().child(format!("· {size}"))),
                                     None => self
                                         .remote_sizes
-                                        .get(&app_id)
+                                        .get(&page_key)
                                         .and_then(|(download, installed)| {
                                             download
                                                 .clone()
@@ -2439,11 +2528,11 @@ impl StoreRoot {
             .when(!has_sandbox, |section| {
                 // no sandbox data yet: it is being fetched from the
                 // artifact or the remote, or flatpak could not produce it
-                let note = if self.verify_errors.contains_key(&app_id) {
+                let note = if self.verify_errors.contains_key(&page_key) {
                     "Sandbox info unavailable: the artifact did not pass its digest check."
-                } else if self.publisher_fetching.contains(&app_id) {
+                } else if self.publisher_fetching.contains(&page_key) {
                     "Reading the sandbox manifest from the artifact…"
-                } else if self.remote_fetching.contains(&app_id) {
+                } else if self.remote_fetching.contains(&page_key) {
                     "Reading the sandbox manifest from flathub…"
                 } else {
                     "Flatpak apps run in a sandbox; this app's permissions appear here once its manifest is available."
@@ -4005,8 +4094,9 @@ fn orchard_fingerprint(rows: &[StoreApp]) -> String {
     for app in rows {
         let _ = writeln!(
             fingerprint,
-            "{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}",
+            "{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}",
             app.app_id,
+            app.publisher.as_deref().unwrap_or(""),
             app.version.as_deref().unwrap_or(""),
             app.pinned_digest.as_deref().unwrap_or(""),
             app.name,
@@ -4014,6 +4104,13 @@ fn orchard_fingerprint(rows: &[StoreApp]) -> String {
         );
     }
     fingerprint
+}
+
+/// The per-publisher bookkeeping key: two publishers of one app id
+/// keep separate digests, fetch states, and verify errors. Reviewed
+/// apps have no publisher; their key is the bare id's shape.
+fn app_key(app_id: &str, publisher: Option<&str>) -> String {
+    format!("{app_id}\u{1}{}", publisher.unwrap_or(""))
 }
 
 /// Human byte count, flatpak-style SI units: `9.8 MB`, `1.2 GB`.
