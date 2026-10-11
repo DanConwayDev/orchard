@@ -138,6 +138,10 @@ struct Release {
     event: Event,
     created_at: u64,
     version: String,
+    /// The platform this release was built for, from the `f` tag.
+    /// None: a legacy release from before the tag existed; it stays
+    /// installable on any host.
+    platform: Option<String>,
     channel: Option<String>,
     asset_refs: Vec<String>,
 }
@@ -148,6 +152,9 @@ struct Release {
 struct Asset {
     event: Event,
     created_at: u64,
+    /// The platform this artifact was built for, from the `f` tag.
+    /// None: a legacy asset from before the tag existed.
+    platform: Option<String>,
     digest: Option<String>,
     location: Option<String>,
     // the runtime requirement and asset version surface on the app page
@@ -297,11 +304,22 @@ impl Feed {
         let Some(d) = parts.tag("d") else {
             bail!("release without d tag");
         };
-        let Some((app_id, version)) = d.rsplit_once('@') else {
-            bail!("release d tag must be <app-id>@<version>, got {d:?}");
+        // d names the release: <app-id>@<version> for legacy events,
+        // <app-id>@<version>@<platform> once releases grew a platform.
+        // Per-arch identity keeps one arch's republish from replacing
+        // the other's on a relay, which keys replaceability on d.
+        let pieces: Vec<&str> = d.split('@').collect();
+        let (app_id, version, platform) = match pieces.as_slice() {
+            [app_id, version] => (app_id.to_string(), version.to_string(), None),
+            [app_id, version, platform] => (
+                app_id.to_string(),
+                version.to_string(),
+                Some(platform.to_string()),
+            ),
+            _ => bail!("release d tag must be <app-id>@<version>[@<platform>], got {d:?}"),
         };
-        if app_id.is_empty() || version.is_empty() {
-            bail!("release d tag must be <app-id>@<version>, got {d:?}");
+        if app_id.is_empty() || version.is_empty() || platform.as_deref() == Some("") {
+            bail!("release d tag must be <app-id>@<version>[@<platform>], got {d:?}");
         }
         // the i tag must agree with the d tag's app id when present
         if let Some(i) = parts.tag("i") {
@@ -325,7 +343,8 @@ impl Feed {
             position,
             Release {
                 created_at: parts.created_at,
-                version: version.to_string(),
+                version,
+                platform,
                 channel: parts.tag("c"),
                 asset_refs: parts.tag_values("e"),
                 event,
@@ -345,6 +364,7 @@ impl Feed {
             parts.id.clone(),
             Asset {
                 created_at: parts.created_at,
+                platform: parts.tag("f"),
                 digest,
                 location,
                 runtime: parts.tag("runtime"),
@@ -457,6 +477,15 @@ impl Feed {
     /// become rows. `metadata` is deliberately `None`: the client reads
     /// the real sandbox from the artifact itself.
     pub fn catalog(&self) -> CatalogFile {
+        self.catalog_for(&orchard_core::host_platform())
+    }
+
+    /// The catalog projected for one platform: releases built for
+    /// other machines do not win, and a listing whose chain exists
+    /// only for other platforms still projects (empty version, the
+    /// claimed platforms attached) so the client can say so instead
+    /// of offering an install that cannot work.
+    pub fn catalog_for(&self, platform: &str) -> CatalogFile {
         let mut apps: Vec<CatalogApp> = Vec::new();
         // one row per (app id, publisher): the same app id signed by
         // two keys projects twice, each against its own release chain
@@ -478,38 +507,85 @@ impl Feed {
             if superseded {
                 continue;
             }
-            // walk releases newest-first; first one with an installable
-            // asset from the same publisher wins
-            let Some(picked) = self.releases.get(app_id).and_then(|releases| {
+            // an installable asset of one release: same publisher,
+            // pinned somewhere, built for this platform. An asset from
+            // before the platform tag existed stays installable
+            // anywhere; it is the fallback after an exact match.
+            let same_publisher = |reference: &String| {
+                self.assets
+                    .get(reference)
+                    .filter(|asset| asset.event.pubkey.to_string() == *author)
+                    .filter(|asset| asset.location.is_some())
+            };
+            let installable = |release: &Release| {
+                release
+                    .asset_refs
+                    .iter()
+                    .filter_map(same_publisher)
+                    .find(|asset| asset.platform.as_deref() == Some(platform))
+                    .or_else(|| {
+                        release
+                            .asset_refs
+                            .iter()
+                            .filter_map(same_publisher)
+                            .find(|asset| asset.platform.is_none())
+                    })
+            };
+            // walk releases newest-first; first one with an
+            // installable asset for this machine wins
+            fn stable<'a>(
+                releases: &'a [Release],
+                author: &'a str,
+            ) -> impl Iterator<Item = &'a Release> + 'a {
                 releases
                     .iter()
-                    .filter(|release| release.event.pubkey.to_string() == *author)
+                    .filter(move |release| release.event.pubkey.to_string() == author)
                     // flatpak installs from the stable branch; "main" is
                     // Zapstore's default channel name for the same thing
                     .filter(|release| {
                         matches!(release.channel.as_deref(), None | Some("stable") | Some("main"))
                     })
-                    .find_map(|release| {
-                        let asset = release.asset_refs.iter().find_map(|reference| {
-                            let asset = self.assets.get(reference)?;
-                            if asset.event.pubkey.to_string() != *author {
-                                return None;
-                            }
-                            asset.location.as_ref()?; // nothing installable
-                            Some(asset)
-                        })?;
-                        Some((release, asset))
+            }
+            let picked = self.releases.get(app_id).and_then(|releases| {
+                stable(releases, author)
+                    .filter(|release| {
+                        release.platform.as_deref().is_none_or(|built| built == platform)
                     })
-            }) else {
+                    .find_map(|release| Some((release, Some(installable(release)?))))
+            });
+            // the chain exists but builds nothing for this machine:
+            // project the row with no install, so the page can say
+            // what was built. A chain with no releases at all still
+            // stays invisible, as before.
+            let picked = picked.or_else(|| {
+                self.releases.get(app_id).and_then(|releases| {
+                    stable(releases, author)
+                        .filter(|release| {
+                            release
+                                .asset_refs
+                                .iter()
+                                .filter_map(same_publisher)
+                                .next()
+                                .is_some()
+                        })
+                        .next()
+                        .map(|release| (release, None))
+                })
+            });
+            let Some((release, asset)) = picked else {
                 continue;
             };
-            let (release, asset) = picked;
-            let arch = listing
-                .platforms
-                .iter()
-                .find_map(|platform| platform.strip_prefix("linux-"))
-                .unwrap_or("x86_64")
-                .to_string();
+            let (version, digest, location) = match asset {
+                Some(asset) => (
+                    release.version.clone(),
+                    asset.digest.clone(),
+                    asset.location.clone().unwrap_or_default(),
+                ),
+                // nothing for this machine: no version, no pin, no
+                // install. The claimed platforms ride the row.
+                None => (String::new(), None, String::new()),
+            };
+            let ref_arch = platform.strip_prefix("linux-").unwrap_or(platform);
             apps.push(CatalogApp {
                 app_id: app_id.clone(),
                 name: listing.name.clone(),
@@ -522,10 +598,11 @@ impl Feed {
                     pubkey: author.clone(),
                     nip05: self.profiles.get(author).and_then(|p| p.nip05.clone()),
                 },
-                version: release.version.clone(),
-                flatpak_ref: format!("app/{app_id}/{arch}/stable"),
-                location: asset.location.clone().unwrap_or_default(),
-                digest: asset.digest.clone(),
+                version,
+                platforms: listing.platforms.clone(),
+                flatpak_ref: format!("app/{app_id}/{ref_arch}/stable"),
+                location,
+                digest,
                 metadata: None,
                 notes: (!release.event.content.is_empty())
                     .then(|| release.event.content.clone()),
@@ -720,6 +797,131 @@ mod tests {
         assert_eq!(entry.publisher.pubkey, demo_keys().get_public_key().unwrap().to_string());
         assert_eq!(entry.publisher.nip05, None);
         assert!(entry.published_at > 0);
+    }
+
+    /// Two arches of one version are two releases (per-arch `d`, so a
+    /// relay keeps both) and each host picks its own chain.
+    #[test]
+    fn catalog_picks_the_release_built_for_the_host() {
+        let keys = demo_keys();
+        let chain = |platform: &str, version: &str| {
+            let asset = signed(
+                &keys,
+                KIND_ASSET,
+                "",
+                vec![
+                    ("i", "com.example.Hello"),
+                    ("x", DIGEST),
+                    ("version", version),
+                    ("f", platform),
+                    ("oci", "oci:/srv/registry/hello"),
+                ],
+            );
+            let asset_id = asset.id.to_string();
+            let d = format!("com.example.Hello@{version}@{platform}");
+            let release = signed(
+                &keys,
+                KIND_RELEASE,
+                "",
+                vec![
+                    ("d", &d),
+                    ("i", "com.example.Hello"),
+                    ("version", version),
+                    ("f", platform),
+                    ("c", "stable"),
+                    ("e", &asset_id),
+                ],
+            );
+            vec![asset, release]
+        };
+        let listing = signed(
+            &keys,
+            KIND_APP,
+            "",
+            vec![
+                ("d", "com.example.Hello"),
+                ("name", "Hello"),
+                ("summary", "A demo app"),
+                ("f", "linux-x86_64"),
+                ("f", "linux-aarch64"),
+            ],
+        );
+        let mut events = vec![listing];
+        events.extend(chain("linux-x86_64", "1.0.0"));
+        events.extend(chain("linux-aarch64", "1.0.0"));
+        let mut feed = Feed::new();
+        absorb_all(&mut feed, &events);
+        let x86 = feed.catalog_for("linux-x86_64");
+        assert_eq!(x86.apps.len(), 1);
+        assert_eq!(x86.apps[0].version, "1.0.0");
+        assert_eq!(x86.apps[0].flatpak_ref, "app/com.example.Hello/x86_64/stable");
+        let arm = feed.catalog_for("linux-aarch64");
+        assert_eq!(arm.apps.len(), 1);
+        assert_eq!(arm.apps[0].version, "1.0.0");
+        assert_eq!(arm.apps[0].flatpak_ref, "app/com.example.Hello/aarch64/stable");
+        // the listing's coverage rides both rows
+        assert_eq!(arm.apps[0].platforms, vec!["linux-x86_64", "linux-aarch64"]);
+    }
+
+    /// A chain that exists only for another platform still projects:
+    /// no version, no pin, the claimed platforms attached, so the
+    /// page can say what was built instead of offering an install
+    /// that cannot work.
+    #[test]
+    fn foreign_arch_projects_without_an_install() {
+        let keys = demo_keys();
+        let listing = signed(
+            &keys,
+            KIND_APP,
+            "",
+            vec![
+                ("d", "com.example.Hello"),
+                ("name", "Hello"),
+                ("summary", "A demo app"),
+                ("f", "linux-aarch64"),
+            ],
+        );
+        let asset = signed(
+            &keys,
+            KIND_ASSET,
+            "",
+            vec![
+                ("i", "com.example.Hello"),
+                ("x", DIGEST),
+                ("version", "1.0.0"),
+                ("f", "linux-aarch64"),
+                ("oci", "oci:/srv/registry/hello"),
+            ],
+        );
+        let asset_id = asset.id.to_string();
+        let release = signed(
+            &keys,
+            KIND_RELEASE,
+            "",
+            vec![
+                ("d", "com.example.Hello@1.0.0@linux-aarch64"),
+                ("i", "com.example.Hello"),
+                ("version", "1.0.0"),
+                ("f", "linux-aarch64"),
+                ("c", "stable"),
+                ("e", &asset_id),
+            ],
+        );
+        let mut feed = Feed::new();
+        absorb_all(&mut feed, &[listing, asset, release]);
+        let x86 = feed.catalog_for("linux-x86_64");
+        assert_eq!(x86.apps.len(), 1);
+        assert_eq!(x86.apps[0].version, "");
+        assert_eq!(x86.apps[0].location, "");
+        assert_eq!(x86.apps[0].digest, None);
+        assert_eq!(x86.apps[0].platforms, vec!["linux-aarch64"]);
+        // the machine it was built for installs normally
+        let arm = feed.catalog_for("linux-aarch64");
+        assert_eq!(arm.apps[0].version, "1.0.0");
+        assert_eq!(
+            arm.apps[0].digest.as_deref(),
+            Some(format!("sha256:{DIGEST}").as_str())
+        );
     }
 
     /// The permissionless case: a second publisher signs the same app

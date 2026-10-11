@@ -37,9 +37,17 @@ pub struct ReleaseMeta {
     pub version: String,
     #[serde(default = "default_channel")]
     pub channel: String,
-    /// Flatpak arch tag, e.g. `linux-x86_64`.
+    /// Flatpak arch tag, e.g. `linux-x86_64`. The build target and
+    /// the identity of the asset and release this run signs. The
+    /// `--arch` flag overrides it for CI matrix legs.
     #[serde(default = "default_arch")]
     pub arch: String,
+    /// Platform tags the LISTING claims coverage for, one per built
+    /// platform, e.g. `["linux-x86_64", "linux-aarch64"]`. Every arch
+    /// leg publishes the same listing, so the tags must list them
+    /// all. Default: just [`ReleaseMeta::arch`].
+    #[serde(default)]
+    pub platforms: Vec<String>,
     pub notes: Option<String>,
     /// Runtime requirement recorded on the asset event, e.g.
     /// `org.freedesktop.Platform/x86_64/25.08`.
@@ -84,6 +92,31 @@ fn default_tag() -> String {
 }
 
 impl Manifest {
+    /// The platform tags the listing claims: the declared list, or
+    /// the build arch alone when none were listed.
+    pub fn listing_platforms(&self) -> Vec<String> {
+        if self.release.platforms.is_empty() {
+            vec![self.release.arch.clone()]
+        } else {
+            self.release.platforms.clone()
+        }
+    }
+
+    /// The runtime requirement for this build's arch: a runtime ref
+    /// is `<id>/<arch>/<branch>` and the arch segment follows the
+    /// build, so one TOML serves every CI leg. A runtime that is not
+    /// three segments passes through untouched.
+    pub fn runtime_for_build(&self) -> Option<String> {
+        self.release.runtime.as_ref().map(|runtime| {
+            let mut pieces: Vec<String> =
+                runtime.split('/').map(str::to_string).collect();
+            if pieces.len() == 3 {
+                pieces[1] = self.ref_arch();
+            }
+            pieces.join("/")
+        })
+    }
+
     /// Flatpak ref architecture (`linux-x86_64` to `x86_64`).
     pub fn ref_arch(&self) -> String {
         self.release

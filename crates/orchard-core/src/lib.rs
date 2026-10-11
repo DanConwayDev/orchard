@@ -14,3 +14,17 @@ pub use appstream::*;
 pub use model::*;
 pub use oci::*;
 pub use permissions::*;
+
+/// The platform tag of the machine we run on, e.g. `linux-x86_64`.
+/// This is the resolution key for releases and assets: a listing may
+/// declare coverage for many platforms, and the device picks the
+/// artifact built for its own.
+pub fn host_platform() -> String {
+    format!("linux-{}", std::env::consts::ARCH)
+}
+
+/// The host architecture alone (`x86_64`, `aarch64`), as it appears
+/// inside a flatpak ref.
+pub fn host_ref_arch() -> String {
+    std::env::consts::ARCH.to_string()
+}

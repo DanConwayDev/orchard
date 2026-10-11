@@ -140,6 +140,7 @@ fn run() -> Result<()> {
         &Asset {
             app_id: args.app_id.clone(),
             version: args.version.clone(),
+            platform: args.arch.clone(),
             digest: args.digest.clone(),
             location: args.location.clone(),
             runtime: args.runtime.clone(),
@@ -150,6 +151,7 @@ fn run() -> Result<()> {
         &Release {
             app_id: args.app_id.clone(),
             version: args.version.clone(),
+            platform: args.arch.clone(),
             channel: args.channel.clone(),
             notes: args.notes.clone(),
             asset_id: asset.id.to_string(),
@@ -164,7 +166,7 @@ fn run() -> Result<()> {
             description: args.description.clone(),
             icon: args.icon.clone(),
             categories: args.categories.clone(),
-            arch: args.arch.clone(),
+            platforms: vec![args.arch.clone()],
             license: None,
             repository: None,
         },

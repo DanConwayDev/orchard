@@ -35,6 +35,7 @@ struct Args {
     relays: Option<Vec<String>>,
     nsec: Option<String>,
     out: Option<PathBuf>,
+    arch: Option<String>,
     skip_relays: bool,
     skip_push: bool,
 }
@@ -48,6 +49,7 @@ fn parse_args() -> Result<Args> {
     let mut out = None;
     let mut skip_relays = false;
     let mut skip_push = false;
+    let mut arch = None;
     while let Some(flag) = values.next() {
         let mut next = || {
             values.next().ok_or_else(|| anyhow::anyhow!("missing value for {flag}"))
@@ -66,6 +68,7 @@ fn parse_args() -> Result<Args> {
             }
             "--nsec" => nsec = Some(next()?),
             "--out" => out = Some(PathBuf::from(next()?)),
+            "--arch" => arch = Some(next()?),
             "--skip-relays" => skip_relays = true,
             "--skip-push" => skip_push = true,
             other if other.starts_with('-') => bail!("unknown flag {other:?}"),
@@ -83,6 +86,7 @@ fn parse_args() -> Result<Args> {
         relays,
         nsec,
         out,
+        arch,
         skip_relays,
         skip_push,
     })
@@ -97,6 +101,12 @@ fn run() -> Result<()> {
         if !from_env.trim().is_empty() {
             manifest.release.version = from_env.trim().to_string();
         }
+    }
+    // CI's arch legs override the manifest's build arch: the
+    // artifact, asset, and release of this run are for that machine,
+    // while the listing keeps its full declared coverage
+    if let Some(arch) = &args.arch {
+        manifest.release.arch = arch.clone();
     }
     let app_id = &manifest.app.id;
     let version = &manifest.release.version;
@@ -169,15 +179,19 @@ fn run() -> Result<()> {
         _ => format!("oci:{}", built.layout.display()),
     };
 
-    // sign: asset first so the release can reference its id
+    // sign: asset first so the release can reference its id. The
+    // asset and release carry this run's arch (the --arch override
+    // for CI matrix legs); the listing carries the full declared
+    // coverage, identical from every leg.
     let asset = events::sign_asset(
         &keys,
         &Asset {
             app_id: app_id.clone(),
             version: version.clone(),
+            platform: manifest.release.arch.clone(),
             digest: built.manifest_digest.clone(),
             location: location.clone(),
-            runtime: manifest.release.runtime.clone(),
+            runtime: manifest.runtime_for_build(),
         },
     )?;
     let release = events::sign_release(
@@ -185,6 +199,7 @@ fn run() -> Result<()> {
         &Release {
             app_id: app_id.clone(),
             version: version.clone(),
+            platform: manifest.release.arch.clone(),
             channel: manifest.release.channel.clone(),
             notes: manifest.release.notes.clone(),
             asset_id: asset.id.to_string(),
@@ -199,7 +214,7 @@ fn run() -> Result<()> {
             description: manifest.app.description.clone(),
             icon: manifest.app.icon.clone(),
             categories: manifest.app.categories.clone(),
-            arch: manifest.release.arch.clone(),
+            platforms: manifest.listing_platforms(),
             license: manifest.app.license.clone(),
             repository: manifest.app.repository.clone(),
         },

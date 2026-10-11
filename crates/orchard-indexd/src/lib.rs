@@ -563,6 +563,7 @@ mod tests {
                     nip05: None,
                 },
                 version: "1.0.0".into(),
+                platforms: Vec::new(),
                 flatpak_ref: "app/com.orchard.Hello/x86_64/stable".into(),
                 location: "oci:/tmp/demo".into(),
                 digest: Some("sha256:00".into()),

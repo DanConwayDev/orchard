@@ -176,6 +176,12 @@ pub struct CatalogApp {
     pub categories: Vec<String>,
     pub publisher: Publisher,
     pub version: String,
+    /// Platform tags the listing claims coverage for, e.g.
+    /// `linux-x86_64`. A version of `""` means the chain exists but
+    /// nothing installable for this machine; the platforms say what
+    /// was built.
+    #[serde(default)]
+    pub platforms: Vec<String>,
     /// Full flatpak ref, e.g. `app/com.example.Hello/x86_64/stable`.
     pub flatpak_ref: String,
     /// Artifact location: `oci:<dir>` or `docker://<registry>/<repo>:<tag>`.
@@ -237,6 +243,9 @@ pub struct StoreApp {
     /// The previous publisher key that designated this row's
     /// publisher (publisher channel only).
     pub successor_to: Option<String>,
+    /// Platform tags the listing claims (publisher channel only).
+    /// Empty: unknown or reviewed channel.
+    pub platforms: Vec<String>,
 }
 
 impl StoreApp {
@@ -260,6 +269,7 @@ impl StoreApp {
             location: None,
             pinned_digest: None,
             successor_to: None,
+            platforms: Vec::new(),
         }
     }
 
@@ -269,7 +279,7 @@ impl StoreApp {
             name: app.name.clone(),
             summary: app.summary.clone(),
             description: app.description.clone(),
-            version: Some(app.version.clone()),
+            version: (!app.version.is_empty()).then(|| app.version.clone()),
             release_date: None,
             homepage: None,
             license: None,
@@ -283,6 +293,7 @@ impl StoreApp {
             location: Some(app.location.clone()),
             pinned_digest: app.digest.clone(),
             successor_to: app.successor_to.clone(),
+            platforms: app.platforms.clone(),
         }
     }
 }

@@ -109,9 +109,9 @@ matching the draft NIP keeps Zapstore publishers readable on Orchard day one.
 | Event | Kind | `d` tag | Tags | Content |
 |---|---|---|---|---|
 | Publisher profile | 0 | (none) | standard NIP-01 | name, nip05, about |
-| App listing | 32267 | `<app-id>` | `name`, `summary`, `icon`, `image` (screenshots), `t` (categories), `f` (platform), `license`, `repository`, `h` | full description |
-| Release | 30063 | `<app-id>@<version>` | `i` (app id), `version`, `c` (channel: stable/beta), `e` (asset refs) | changelog |
-| Asset | 3063 | — | `i`, `x` (sha256), `version`, `url`, `m`, `size`, `f`, **`oci`**, **`runtime`** | — |
+| App listing | 32267 | `<app-id>` | `name`, `summary`, `icon`, `image` (screenshots), `t` (categories), `f` (platform, one per claimed arch), `license`, `repository`, `h` | full description |
+| Release | 30063 | `<app-id>@<version>@<platform>` | `i` (app id), `version`, `f` (platform), `c` (channel: stable/beta), `e` (asset refs) | changelog |
+| Asset | 3063 | — | `i`, `x` (sha256), `version`, `url`, `m`, `size`, `f` (platform), **`oci`**, **`runtime`** | — |
 | Review | 30065 | `<app-id>` | rating, text (Orchard-draft until NIP-82 grows one; M6) | review text |
 | Publisher migration | 30066 | `<app-id>` | `p` (successor key, hex; omit to revoke) | note (Orchard-draft) |
 
@@ -454,9 +454,19 @@ opening items because they need the push, the signing secret, and a tag.
       never renders as a name.
       Dev fixture: the Hello manifest claims `orchard@localhost:8443`, answered
       by the same TLS cert the demo registry uses.
+- [x] aarch64: second arch, resolved the Flathub way — one listing, one button,
+      the device picks. Releases are per-arch (`d` = `<app-id>@<version>@<platform>`,
+      so a relay keeps both arches of one version) and carry an `f` tag; assets
+      carry `f` too. The catalog projects per host platform: a chain that exists
+      only for another platform still shows, with no version or pin and the
+      claimed platforms attached ("no aarch64 build yet"), instead of an install
+      that cannot work. orchard-publish takes `--arch` for CI legs and derives the
+      per-arch runtime from the build; the listing's `platforms` list names the
+      full coverage and is identical from every leg. Self-publish runs a two-leg
+      matrix (ubuntu-latest + ubuntu-24.04-arm). Legacy events without the tags
+      stay installable on any host.
 - [ ] Client relay configuration: a settings surface over the rendezvous set
       instead of env vars.
-- [ ] aarch64: second arch for the bundle (runner, runtime, ref arch plumbing).
 
 ## Risks / open questions
 

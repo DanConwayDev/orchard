@@ -26,7 +26,6 @@ use crate::ui::{self, app_icon, badge, button};
 pub const INDEXD_PORT: u16 = 7780;
 
 const FLATHUB_REMOTE: &str = "flathub";
-const APPSTREAM_ARCH: &str = "x86_64";
 
 /// Lifecycle of a per-app operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2265,6 +2264,15 @@ impl StoreRoot {
                                 )
                             })
                             .into_any_element(),
+                        None if app.version.is_none() && app.source == Source::Publisher => {
+                            // the chain exists but nothing built for
+                            // this machine: the honest note replaces
+                            // an install that cannot work
+                            div()
+                                .flex_none()
+                                .child(badge(&no_build_note(app), ui::text_dim()))
+                                .into_any_element()
+                        }
                         None => {
                             // two-press install: the first press arms
                             // the button, the second starts the job
@@ -2799,6 +2807,12 @@ impl StoreRoot {
                                             }),
                                         )
                                         .into_any_element(),
+                                );
+                            } else if app.version.is_none() && app.source == Source::Publisher {
+                                // the honest note replaces an install
+                                // that cannot work
+                                buttons.push(
+                                    badge(&no_build_note(&app), ui::text_dim()).into_any_element(),
                                 );
                             } else {
                                 let install_id = app_id.clone();
@@ -4415,8 +4429,25 @@ fn human_size(bytes: u64) -> String {
     format!("{bytes} B")
 }
 
+/// The honest state for an app whose chain exists but builds nothing
+/// for this machine: what the platform story is, in one line.
+fn no_build_note(app: &StoreApp) -> String {
+    let host = orchard_core::host_ref_arch();
+    if app
+        .platforms
+        .iter()
+        .any(|platform| platform == &format!("linux-{host}"))
+    {
+        "no installable build for this machine yet".to_string()
+    } else {
+        format!("no {host} build yet")
+    }
+}
+
 fn load_flathub() -> Vec<StoreApp> {
-    for path in orchard_core::appstream::appstream_paths(FLATHUB_REMOTE, APPSTREAM_ARCH) {
+    for path in
+        orchard_core::appstream::appstream_paths(FLATHUB_REMOTE, &orchard_core::host_ref_arch())
+    {
         if !path.exists() {
             continue;
         }
@@ -5003,6 +5034,7 @@ mod tests {
                 nip05: None,
             },
             version: "1.0.0".into(),
+            platforms: vec!["linux-x86_64".into()],
             flatpak_ref: "app/com.example.Hello/x86_64/stable".into(),
             location: "oci:/srv/hello".into(),
             digest: Some("sha256:aa".into()),

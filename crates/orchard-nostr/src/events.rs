@@ -14,7 +14,9 @@ pub struct Listing {
     pub description: Option<String>,
     pub icon: Option<String>,
     pub categories: Vec<String>,
-    pub arch: String,
+    /// Platform tags the listing claims coverage for, one `f` tag
+    /// each, e.g. `linux-x86_64`, `linux-aarch64`.
+    pub platforms: Vec<String>,
     pub license: Option<String>,
     pub repository: Option<String>,
 }
@@ -23,6 +25,8 @@ pub struct Listing {
 pub struct Asset {
     pub app_id: String,
     pub version: String,
+    /// The platform this artifact was built for, e.g. `linux-x86_64`.
+    pub platform: String,
     /// `sha256:<hex>` of the artifact manifest.
     pub digest: String,
     /// `oci:/path` or `docker://registry/repo@sha256:<hex>`.
@@ -30,11 +34,14 @@ pub struct Asset {
     pub runtime: Option<String>,
 }
 
-/// One release (kind 30063). `d` is `<app-id>@<version>`; `e` refs the
-/// signed asset event.
+/// One release (kind 30063). `d` is `<app-id>@<version>@<platform>`
+/// (per-arch identity: two arches of one version are two releases and
+/// must not replace each other); `e` refs the signed asset event.
 pub struct Release {
     pub app_id: String,
     pub version: String,
+    /// The platform this release was built for, e.g. `linux-x86_64`.
+    pub platform: String,
     pub channel: String,
     pub notes: Option<String>,
     /// Hex id of the signed asset event.
@@ -71,12 +78,15 @@ pub fn sign_listing(keys: &Keys, listing: &Listing) -> Result<Event> {
         .tag(tag("summary", &listing.summary))
         .tag_maybe(optional_tag("icon", &listing.icon))
         .tag_maybe(optional_tag("license", &listing.license))
-        .tag_maybe(optional_tag("repository", &listing.repository))
-        .tag(tag("f", &listing.arch));
+        .tag_maybe(optional_tag("repository", &listing.repository));
     let builder = listing
         .categories
         .iter()
         .fold(builder, |builder, category| builder.tag(tag("t", category)));
+    let builder = listing
+        .platforms
+        .iter()
+        .fold(builder, |builder, platform| builder.tag(tag("f", platform)));
     Ok(builder.finalize(keys)?)
 }
 
@@ -85,6 +95,7 @@ pub fn sign_asset(keys: &Keys, asset: &Asset) -> Result<Event> {
         .tag(tag("i", &asset.app_id))
         .tag(tag("x", &asset.digest))
         .tag(tag("version", &asset.version))
+        .tag(tag("f", &asset.platform))
         .tag(tag("oci", &asset.location))
         .tag_maybe(optional_tag("runtime", &asset.runtime));
     Ok(builder.finalize(keys)?)
@@ -95,9 +106,13 @@ pub fn sign_release(keys: &Keys, release: &Release) -> Result<Event> {
         Kind::Custom(crate::KIND_RELEASE as u16),
         release.notes.as_deref().unwrap_or(""),
     )
-    .tag(tag("d", &format!("{}@{}", release.app_id, release.version)))
+    .tag(tag(
+        "d",
+        &format!("{}@{}@{}", release.app_id, release.version, release.platform),
+    ))
     .tag(tag("i", &release.app_id))
     .tag(tag("version", &release.version))
+    .tag(tag("f", &release.platform))
     .tag(tag("c", &release.channel))
     .tag(tag("e", &release.asset_id));
     Ok(builder.finalize(keys)?)
@@ -148,7 +163,7 @@ mod tests {
                 description: Some("Long description.".into()),
                 icon: Some("https://example.com/icon.png".into()),
                 categories: vec!["Utilities".into()],
-                arch: "linux-x86_64".into(),
+                platforms: vec!["linux-x86_64".into()],
                 license: Some("MIT".into()),
                 repository: None,
             },
@@ -159,6 +174,7 @@ mod tests {
             &Asset {
                 app_id: "com.example.Hello".into(),
                 version: "1.0.0".into(),
+                platform: "linux-x86_64".into(),
                 digest: format!("sha256:{}", "ab".repeat(32)),
                 location: "oci:/srv/hello".into(),
                 runtime: Some("org.freedesktop.Platform/x86_64/25.08".into()),
@@ -170,6 +186,7 @@ mod tests {
             &Release {
                 app_id: "com.example.Hello".into(),
                 version: "1.0.0".into(),
+                platform: "linux-x86_64".into(),
                 channel: "stable".into(),
                 notes: Some("First.".into()),
                 asset_id: asset.id.to_string(),

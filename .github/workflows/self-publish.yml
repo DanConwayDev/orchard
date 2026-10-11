@@ -4,6 +4,12 @@
 # in the publish manifest. Orchard then lists Orchard; updating
 # Orchard is its own update path.
 #
+# One listing, both architectures: each runner builds its own arch
+# and signs its own asset and release (per-arch `d`), while the
+# listing declaring coverage for both is identical from either leg.
+# The asset pins the artifact by digest, so the client on any machine
+# pulls the artifact built for it.
+#
 # Required repository secret:
 #   ORCHARD_NSEC  the publisher identity's secret key (nsec hex)
 # The relay list is publishing policy, versioned in
@@ -23,7 +29,15 @@ permissions:
 
 jobs:
   publish:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: linux-x86_64
+            runner: ubuntu-latest
+          - arch: linux-aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
 
@@ -45,4 +59,5 @@ jobs:
           # v1.2.3 becomes 1.2.3
           export ORCHARD_PUBLISH_VERSION="${GITHUB_REF_NAME#v}"
           target/release/orchard-publish self/orchard.publish.toml \
+            --arch "${{ matrix.arch }}" \
             --registry "ghcr.io/${GITHUB_REPOSITORY,,}"
