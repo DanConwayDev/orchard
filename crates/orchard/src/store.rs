@@ -18,7 +18,7 @@ use gpui::{
     TextLayout, TextRun, UniformListScrollHandle, Window,
 };
 
-use orchard_core::{oci, permissions, CatalogFile, Risk, Source, StoreApp};
+use orchard_core::{oci, permissions, CatalogApp, CatalogFile, Publisher, Risk, Source, StoreApp};
 
 use crate::ui::{self, app_icon, badge, button};
 
@@ -174,9 +174,27 @@ impl StoreRoot {
                 .spawn(async move { load_orchard_catalog() })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.apps.extend(orchard_apps);
-                cx.notify();
+                this.apply_orchard_apps(orchard_apps, cx);
             });
+        })
+        .detach();
+
+        // Orchard channel refresh: indexd merges relay events as they
+        // arrive, so a publisher's new release appears here without a
+        // restart. Cheap no-op when the document has not changed.
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(30))
+                    .await;
+                let orchard_apps = cx
+                    .background_executor()
+                    .spawn(async move { load_orchard_catalog() })
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    this.apply_orchard_apps(orchard_apps, cx);
+                });
+            }
         })
         .detach();
 
@@ -378,6 +396,54 @@ impl StoreRoot {
             });
         })
         .detach();
+    }
+
+    /// Replace the publisher-channel rows with a fresh read of the
+    /// merged catalog (indexd). A no-op when nothing changed, so the
+    /// periodic refresh never disturbs list state. Sandbox metadata
+    /// read earlier in the session (from the artifact) is transplanted:
+    /// that fetch already happened and the pin has not moved.
+    fn apply_orchard_apps(&mut self, incoming: Vec<StoreApp>, cx: &mut Context<Self>) {
+        let before = orchard_fingerprint(
+            &self
+                .apps
+                .iter()
+                .filter(|app| app.source == Source::Publisher)
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
+        let after = orchard_fingerprint(&incoming);
+        if before == after {
+            return;
+        }
+        let old_rows: Vec<StoreApp> = self
+            .apps
+            .extract_if(.., |app: &mut StoreApp| app.source == Source::Publisher)
+            .collect();
+        let mut old_metadata: HashMap<String, Option<String>> = old_rows
+            .into_iter()
+            .map(|app| (app.app_id.clone(), app.metadata))
+            .collect();
+        let mut incoming = incoming;
+        for app in &mut incoming {
+            if app.metadata.is_none() {
+                if let Some(Some(metadata)) = old_metadata.get(&app.app_id) {
+                    app.metadata = Some(metadata.clone());
+                }
+            }
+            old_metadata.remove(&app.app_id);
+        }
+        // an app that vanished (unpublished, key revoked) closes the page
+        if let Some(selected) = self.selected.clone() {
+            if !incoming.iter().any(|app| app.app_id == selected)
+                && !self.apps.iter().any(|app| app.app_id == selected)
+            {
+                self.selected = None;
+                self.page_open = false;
+            }
+        }
+        self.apps.extend(incoming);
+        cx.notify();
     }
 
     /// Pre-install artifact check for publisher apps: one manifest fetch
@@ -2044,6 +2110,26 @@ impl Render for StoreRoot {
 // ----- catalog loaders (background) -----
 
 /// Flathub channel: parse the local AppStream for the system install.
+/// Session-stability fingerprint of the publisher rows: any change in
+/// identity, version, pin, or listing text should re-render; anything
+/// else is an idle refresh.
+fn orchard_fingerprint(rows: &[StoreApp]) -> String {
+    use std::fmt::Write as _;
+    let mut fingerprint = String::new();
+    for app in rows {
+        let _ = writeln!(
+            fingerprint,
+            "{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}",
+            app.app_id,
+            app.version.as_deref().unwrap_or(""),
+            app.pinned_digest.as_deref().unwrap_or(""),
+            app.name,
+            app.summary,
+        );
+    }
+    fingerprint
+}
+
 /// Human byte count, flatpak-style SI units: `9.8 MB`, `1.2 GB`.
 fn human_size(bytes: u64) -> String {
     const UNITS: [(&str, u64); 4] = [
@@ -2206,5 +2292,37 @@ mod tests {
         // trailing numeric components mean the remote moved ahead
         assert!(version_outdated("1.2", "1.2.1"));
         assert!(!version_outdated("1.2.1", "1.2"));
+    }
+
+    #[test]
+    fn orchard_fingerprint_changes_with_updates() {
+        let mut app = StoreApp::from_catalog(&CatalogApp {
+            app_id: "com.example.Hello".into(),
+            name: "Hello".into(),
+            summary: "A demo app".into(),
+            description: None,
+            icon_url: None,
+            categories: Vec::new(),
+            publisher: Publisher {
+                pubkey: "k".into(),
+                nip05: None,
+            },
+            version: "1.0.0".into(),
+            flatpak_ref: "app/com.example.Hello/x86_64/stable".into(),
+            location: "oci:/srv/hello".into(),
+            digest: Some("sha256:aa".into()),
+            metadata: None,
+            notes: None,
+            published_at: 0,
+        });
+        let same = orchard_fingerprint(std::slice::from_ref(&app));
+        assert_eq!(same, orchard_fingerprint(std::slice::from_ref(&app)));
+        // a new release changes the fingerprint (row + page must refresh)
+        let mut updated = app.clone();
+        updated.version = Some("1.1.0".into());
+        assert_ne!(same, orchard_fingerprint(std::slice::from_ref(&updated)));
+        // so does a listing edit
+        app.summary = "Edited summary".into();
+        assert_ne!(same, orchard_fingerprint(std::slice::from_ref(&app)));
     }
 }
