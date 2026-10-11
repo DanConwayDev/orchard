@@ -2999,6 +2999,10 @@ impl StoreRoot {
                         MouseButton::Left,
                         cx.listener(|this, _e: &MouseDownEvent, _w, cx| {
                             this.close_signin();
+                            // swallow the down: the Sign in button
+                            // under the modal never sees it, so its
+                            // click cannot reopen what this closed
+                            cx.stop_propagation();
                             cx.notify();
                         }),
                     ),
@@ -3438,6 +3442,12 @@ impl Render for StoreRoot {
             .flex_col()
             .bg(ui::inset())
             .text_color(ui::text())
+            // the dropdown click-away overlays paint behind everything,
+            // so their close handler runs after every content handler
+            // in the bubble chain: a trigger's own toggle (which stops
+            // propagation) wins, instead of losing to the close and
+            // reopening
+            .children(self.render_menu_overlays(cx))
             // top bar: the mark, the search centered across the full
             // window width, channel and account controls on the right
             .child(
@@ -3696,23 +3706,22 @@ impl StoreRoot {
         self.channel_menu.is_some() || self.account_menu.is_some() || self.signin_modal
     }
 
-    /// The window-level layers, if any. The wrapper carries no
-    /// hitbox of its own; each layer is a click-away overlay with the
-    /// panel as a later sibling, so clicks on the panel stay the
-    /// panel's and every click outside closes the layer. The panel
-    /// must swallow mouse down for exactly this reason: the overlay's
-    /// close would unmount the panel between the user's down and up,
-    /// and a click whose element is gone before the up never fires.
+    /// The window-level layers, if any: the dropdown panels and the
+    /// sign-in modal, painted after everything (the lightbox
+    /// included). The click-away overlays they pair with live behind
+    /// the content instead (render_menu_overlays). The panel must
+    /// swallow mouse down for exactly this reason: the behind-overlay's
+    /// close would otherwise fire after the panel's own handlers and
+    /// unmount the panel between the user's down and up, and a click
+    /// whose element is gone before the up never fires.
     /// The modal paints last: it covers the dropdowns too.
     fn render_layers(&mut self, font: gpui::Font, cx: &mut Context<Self>) -> gpui::AnyElement {
         let mut layers = div().absolute().inset_0();
         if self.channel_menu.is_some() {
-            let (overlay, panel) = self.render_channel_menu(cx);
-            layers = layers.child(overlay).child(panel);
+            layers = layers.child(self.render_channel_menu(cx));
         }
         if self.account_menu.is_some() {
-            let (overlay, panel) = self.render_account_menu(cx);
-            layers = layers.child(overlay).child(panel);
+            layers = layers.child(self.render_account_menu(cx));
         }
         if self.signin_modal {
             layers = layers.child(self.render_signin_modal(font, cx));
@@ -3720,29 +3729,38 @@ impl StoreRoot {
         layers.into_any_element()
     }
 
+    /// The click-away overlay for the open dropdowns, painted behind
+    /// everything: transparent, full-window, and last in the bubble
+    /// chain. Any click the content does not stop lands here and
+    /// closes the dropdowns.
+    fn render_menu_overlays(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        if self.channel_menu.is_none() && self.account_menu.is_none() {
+            return None;
+        }
+        Some(
+            div()
+                .id("menu-overlay")
+                .absolute()
+                .inset_0()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _e: &MouseDownEvent, _w, cx| {
+                        this.channel_menu = None;
+                        this.account_menu = None;
+                        cx.notify();
+                    }),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// The channel dropdown: filter options with the active one marked.
-    /// The channel dropdown: filter options with the active one
-    /// marked. Two siblings, overlay then panel; the panel stops
-    /// mouse down so its items' clicks survive to the up.
-    fn render_channel_menu(
-        &mut self,
-        cx: &mut Context<Self>,
-    ) -> (gpui::AnyElement, gpui::AnyElement) {
+    /// The panel stops mouse down so its items' clicks survive to the
+    /// up, out of reach of the behind-everything overlay.
+    fn render_channel_menu(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let anchor = self.channel_menu.unwrap_or_default();
         let left = (anchor.x - px(60.)).max(px(8.));
-        let overlay = div()
-            .id("channel-menu-overlay")
-            .absolute()
-            .inset_0()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _e: &MouseDownEvent, _w, cx| {
-                    this.channel_menu = None;
-                    cx.notify();
-                }),
-            )
-            .into_any_element();
-        let panel = div()
+        div()
             .absolute()
             .left(left)
             .top(anchor.y + px(6.))
@@ -3792,17 +3810,14 @@ impl StoreRoot {
                         .children(active.then(|| "✓".to_string()))
                 }),
             )
-            .into_any_element();
-        (overlay, panel)
+            .into_any_element()
     }
 
-    /// The account dropdown: the signed-in session and sign-out. Two
-    /// siblings, overlay then panel, same as the channel menu: the
-    /// panel stops mouse down so Sign out's click survives to the up.
-    fn render_account_menu(
-        &mut self,
-        cx: &mut Context<Self>,
-    ) -> (gpui::AnyElement, gpui::AnyElement) {
+    /// The account dropdown: the signed-in session and sign-out. The
+    /// panel stops mouse down, same as the channel menu: Sign out's
+    /// click survives to the up, out of reach of the behind-everything
+    /// overlay.
+    fn render_account_menu(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let anchor = self.account_menu.unwrap_or_default();
         let left = (anchor.x - px(170.)).max(px(8.));
         let display = self
@@ -3810,19 +3825,7 @@ impl StoreRoot {
             .as_ref()
             .map(|reviewer| reviewer.display())
             .unwrap_or_default();
-        let overlay = div()
-            .id("account-menu-overlay")
-            .absolute()
-            .inset_0()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _e: &MouseDownEvent, _w, cx| {
-                    this.account_menu = None;
-                    cx.notify();
-                }),
-            )
-            .into_any_element();
-        let panel = div()
+        div()
             .absolute()
             .left(left)
             .top(anchor.y + px(6.))
@@ -3853,19 +3856,20 @@ impl StoreRoot {
                     .py_1()
                     .cursor_pointer()
                     .text_size(px(ui::TEXT_SIZE))
-                    .text_color(ui::text())
-                    .hover(|style| style.bg(ui::surface()))
+                    .text_color(ui::text())                    .hover(|style| style.bg(ui::surface()))
                     .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
                         this.account_menu = None;
                         this.sign_out(cx);
                     }))
                     .child("Sign out"),
             )
-            .into_any_element();
-        (overlay, panel)
+            .into_any_element()
     }
 
     /// The channel dropdown trigger: the active filter with a chevron.
+    /// Mouse down, not click: the toggle stops propagation, so the
+    /// behind-everything overlay never closes what the trigger just
+    /// opened, and a second press closes instead of reopening.
     fn render_channel_trigger(&mut self, filter: Filter, cx: &mut Context<Self>) -> gpui::AnyElement {
         div()
             .id("channel-trigger")
@@ -3879,11 +3883,16 @@ impl StoreRoot {
             .text_size(px(ui::TEXT_SIZE))
             .text_color(ui::text())
             .hover(|style| style.bg(ui::surface()))
-            .on_click(cx.listener(|this, event: &ClickEvent, _w, cx| {
-                this.account_menu = None;
-                this.channel_menu = Some(event.position());
-                cx.notify();
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _w, cx| {
+                    let open = this.channel_menu.is_some();
+                    this.account_menu = None;
+                    this.channel_menu = if open { None } else { Some(event.position) };
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
             .child(filter.label().to_string())
             .child(ui::icon("icons/chevron_down.svg", 11., ui::text_dim()))
             .into_any_element()
@@ -3918,11 +3927,20 @@ impl StoreRoot {
                     .rounded_sm()
                     .cursor_pointer()
                     .hover(|style| style.bg(ui::surface()))
-                    .on_click(cx.listener(|this, event: &ClickEvent, _w, cx| {
-                        this.channel_menu = None;
-                        this.account_menu = Some(event.position());
-                        cx.notify();
-                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &MouseDownEvent, _w, cx| {
+                            let open = this.account_menu.is_some();
+                            this.channel_menu = None;
+                            this.account_menu = if open {
+                                None
+                            } else {
+                                Some(event.position)
+                            };
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    )
                     .child(avatar(path, 14., ui::text()))
                     .child(ui::icon("icons/chevron_down.svg", 11., ui::text_dim()))
                     .into_any_element()
@@ -4212,16 +4230,18 @@ impl Reviewer {
 /// there is none (or the fetch has not landed yet).
 fn avatar(path: Option<&std::path::Path>, size: f32, fallback: gpui::Rgba) -> gpui::AnyElement {
     match path {
+        // the radius must sit on the img itself: gpui does not clip
+        // children to the parent's rounded corners, so a rounded
+        // wrapper alone leaves a square picture
         Some(path) => div()
             .flex_none()
             .w(px(size))
             .h(px(size))
-            .overflow_hidden()
-            .rounded_full()
             .child(
                 gpui::img(path)
                     .size_full()
-                    .object_fit(gpui::ObjectFit::Cover),
+                    .object_fit(gpui::ObjectFit::Cover)
+                    .rounded_full(),
             )
             .into_any_element(),
         None => ui::icon("icons/person.svg", size * 0.85, fallback),

@@ -307,20 +307,29 @@ absolute layer spanning the bar), and two controls on the right: the channel
 dropdown (All / Flathub / Orchard / Installed replace the chip row; it stays
 visible on app pages) and the account control ("Sign in" when signed out; a person
 icon when signed in, the profile picture once avatars are fetched; the name still
-shows in the session menu). Dropdowns are window-level layers painted after
-everything: a click-away
-overlay with the panel as a later sibling, anchored at the click point. Sign-in is a
+shows in the session menu). Dropdowns are window-level layers, split by paint
+order: the click-away overlay paints BEHIND the content (its close handler runs
+after every content handler in the bubble chain) and the panel paints after
+everything, anchored at the click point, swallowing the mouse down so the
+behind-overlay's close never reaches it. Triggers toggle on mouse down with
+`stop_propagation`, so a second press closes instead of losing a race against the
+overlay's close and reopening (the old all-after-content overlay closed the menu
+and the trigger's click reopened it, a visible close-then-open). Sign-in is a
 window-level modal (dimmed backdrop, centered panel): the panel swallows the mouse
-down (`stop_propagation`) so clicks on it never reach the backdrop's close, a lesson
-the dropdowns never exposed because closing was their click behavior anyway.
-Sign-in from the header does not open the review composer; from the reviews flow it
+down (`stop_propagation`) so clicks on it never reach the backdrop's close, and the
+backdrop swallows its own close for the same reason (the Sign in button behind it
+cannot click-reopen the modal). Sign-in from the header does not open the review
+composer; from the reviews flow it
 drops into the composer after the pairing completes. Tooltips hide during window
 prepaint, and gpui registers its repaint-on-hover-change listener only for elements
 with a hover style: a tooltip target without any hover style never learns the pointer
 left and the tooltip sticks. Every tooltip target carries a no-op hover style and a
 unique element id per row (the review rows' sprout and circle glyphs): the tooltip
 state lives under the element's global id, so duplicate ids across a list collapse
-every row's tooltip onto one slot and only one row's tooltip works.
+every row's tooltip onto one slot and only one row's tooltip works. Rounded
+images carry the radius on the `img` itself, not the wrapper: gpui does not clip
+children to the parent's rounded corners, so an `overflow_hidden` + `rounded_full`
+wrapper alone still shows a square picture.
 
 **M6, circle slice (built).** The personal web of trust, Zapstore's own answer
 (reviews constrained to the reader's graph), starts at distance 1: at sign-in and at
