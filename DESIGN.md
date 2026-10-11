@@ -1,6 +1,6 @@
 # Orchard design
 
-**Status:** draft v0.1 · 2026-10-10
+**Status:** draft v0.2 · 2026-10-11
 
 **Pitch:** Orchard is a permissionless Flatpak store. Developers publish apps directly to
 their own OCI registries; Nostr carries discovery, identity, releases, and reviews; the
@@ -97,21 +97,50 @@ client learned from Nostr. Consequences:
   remote (standard flatpakref behavior) so runtimes are shared, not duplicated per app.
   Self-contained images are an explicit opt-in in the publish manifest.
 
-## Nostr protocol (draft; reconcile with zapstore's `spec/` folder)
+## Nostr protocol — NIP-82 draft / Zapstore-compatible
 
-All payload events are addressable-replaceable (NIP-01 kinds 30000–39999), content is a
-JSON document, tags stay minimal (`d`, `alt`).
+All payload events follow the NIP-82 draft ("software applications"): kind **32267** app
+listing, **30063** release, **3063** asset, plus NIP-01 kind **0** publisher profiles.
+This replaces the earlier 30063/30064 draft — 30063 already means *release* to Zapstore;
+matching the draft NIP keeps Zapstore publishers readable on Orchard day one.
 
-| Event | Kind | `d` tag | Carries |
-|---|---|---|---|
-| Publisher profile | 0 | (none) | name, nip05, about (standard NIP-01) |
-| App listing | 30063 | `<app-id>` | name, summary, description, icon/screenshots (`imeta`), categories |
-| Release | 30064 | `<app-id>@<version>` | artifact ref (registry/repo/tag/**digest**), changelog, finish-args snapshot, runtime requirement |
-| Review | 30065 | `<app-id>` | rating, text, zap-receipt refs |
+| Event | Kind | `d` tag | Tags | Content |
+|---|---|---|---|---|
+| Publisher profile | 0 | (none) | standard NIP-01 | name, nip05, about |
+| App listing | 32267 | `<app-id>` | `name`, `summary`, `icon`, `image` (screenshots), `t` (categories), `f` (platform), `license`, `repository`, `h` | full description |
+| Release | 30063 | `<app-id>@<version>` | `i` (app id), `version`, `c` (channel: stable/beta), `e` (asset refs) | changelog |
+| Asset | 3063 | — | `i`, `x` (sha256), `version`, `url`, `m`, `size`, `f`, **`oci`**, **`runtime`** | — |
+| Review | 30065 | `<app-id>` | rating, text (Orchard-draft until NIP-82 grows one; M6) | review text |
+
+Orchard's additive tags (invisible to Zapstore readers):
+
+- `f` values are flatpak arches: `linux-x86_64`, `linux-aarch64` (Zapstore uses
+  `android-*`).
+- Asset `oci`: the artifact ref `registry/repo@sha256:<digest>`. The `x` tag keeps its
+  NIP-82 role — sha256 verified before install — and for Orchard it is the OCI *manifest*
+  digest, the same pin `orchard-core::oci` checks (M0 path).
+- Asset `runtime`: the flatpak runtime requirement
+  (`org.freedesktop.Platform/x86_64/25.08`), needed at install time.
+
+Media (icons, screenshots) ride Blossom blob servers; the blossom URL is configuration,
+with Zapstore's CDN as a default seed. Signing (`orchard-publish`) follows Zapstore's
+`SIGN_WITH` shape: nsec or hex key, NIP-46 bunker for CI, NIP-07 browser extension.
+
+**Sandbox permissions are never published in events.** The publisher declares
+`finish-args` in their build manifest; flatpak bakes them into the artifact as commit
+metadata (`xa.metadata`, carried by OCI config labels — required byte-exact since M0).
+The client reads the *real* sandbox from the artifact at page open, the same way it reads
+Flathub's via `flatpak remote-info`. Because the release event pins the digest, the
+permissions shown on the page are byte-identical to what install verifies — no
+declared-vs-actual gap to trust anyone about. A risk grader (low/medium/high, already
+implemented in `orchard-core::permissions`) can warn the publisher how their app will
+read, as a nicety, not a gate.
 
 Rules:
 
-- relays are dumb mirrors; the client reads several and merges
+- relays are dumb mirrors; the client reads several and merges. Default set: Zapstore's
+  relay (their publisher whitelist is just a curation signal to us — we verify
+  cryptographically, not socially) plus generic permissionless relays; user-configurable.
 - curation is published as event lists that users opt into (web of trust, no server ranking)
 - the relay list is itself a published event, plus a hardcoded fallback in the client
 
@@ -123,9 +152,9 @@ Rules:
    warning, not a silent accept.
 3. **Provenance badge (Orchard's own):** GitHub Actions OIDC → cosign keyless signature →
    "built by CI from `owner/repo`": permissionless provenance.
-4. **Honest permissions:** `finish-args` → human-readable grants with risk levels
-   (`orchard-core::permissions`). The sandbox is the mitigation for permissionlessness;
-   make "permissionless store, explicit permissions" the brand.
+4. **Honest permissions:** read from the artifact itself (see above); human-readable
+   grants with risk levels (`orchard-core::permissions`). The sandbox is the mitigation
+   for permissionlessness; make "permissionless store, explicit permissions" the brand.
 5. **Moderation reality:** relays and clients can filter; artifacts persist elsewhere.
    Nothing is ranked for sale.
 
@@ -189,8 +218,11 @@ for real). Registry-with-TLS and the native ostree-summary remote are follow-ups
 page, install with progress via the `orchard-flatpak` seam. (Built: `crates/orchard`,
 AppStream parser validated against the real flathub file: 4788 apps in ~190 ms.)
 
-**M3: Nostr read path.** Relay fetch, publisher profiles, listings, releases; digest
-verification before install.
+**M3: Nostr read path — vertical slice.** `orchard-nostr` crate: relay connect
+(configurable list + fallback), fetch kind 0 / 32267 / 30063 / 3063, verify signatures,
+merge into the publisher channel. Closed by a hand-rolled test publisher (a script
+signing real events for the demo app) so the whole loop — event → catalog row → digest
+verify → install — is proven with one app before any tooling investment.
 
 **M4: permissions viewer + `orchard://` scheme handler** (the signature feature).
 
@@ -202,16 +234,17 @@ bundle; dogfood the update path by updating Orchard through Orchard.
 
 ## Risks / open questions
 
-- Exact OCI index endpoints and annotation keys, confirmed in M0. Ground truth:
-  `common/flatpak-oci-registry.c` in the flatpak repo; see Harbor issue 22997 and the Pulp
-  docs (`/index/dynamic`) for prior art.
 - GPUI on Linux is its youngest backend; API churns. Pin `0.2.x`; watch signatures.
 - Sandboxed-client networking: a port bound inside the flatpak sandbox should be reachable
   from the host (network namespace shared by default), verified in M2.
-- Event kinds must be finalized against zapstore's spec for possible compatibility.
 - Review spam / sybil resistance in the web of trust.
 - aarch64 day-one or later?
-- License: workspace currently declares `MIT OR Apache-2.0`, confirm before first release.
+
+**Resolved 2026-10-11:** event kinds reconciled with Zapstore's `zsp` reference
+implementation (NIP-82 draft: 32267/30063/3063 — see "Nostr protocol"); license settled
+to MIT-only; OCI index endpoints and annotation keys confirmed in M0 (ground truth:
+`common/flatpak-oci-registry.c` in the flatpak repo; Harbor issue 22997 and the Pulp
+docs for prior art).
 
 ## References
 
