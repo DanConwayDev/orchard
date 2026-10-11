@@ -7,6 +7,9 @@
 use std::time::Instant;
 
 fn main() -> anyhow::Result<()> {
+    if std::env::args().nth(3).is_some() {
+        return probe(&std::env::args().nth(1).unwrap(), &std::env::args().nth(3).unwrap().trim_start_matches("--"));
+    }
     let path = std::env::args()
         .nth(1)
         .expect("usage: appstream_dump <appstream.xml.gz>");
@@ -27,6 +30,20 @@ fn main() -> anyhow::Result<()> {
     );
     for app in apps.iter().take(5) {
         println!("  {}: {} - {} ({:?})", app.id, app.name, app.summary, app.version);
+    }
+    Ok(())
+}
+
+// quick probe: print one app's description lines verbatim
+fn probe(path: &str, id: &str) -> anyhow::Result<()> {
+    use std::path::Path;
+    let path = Path::new(path);
+    let icons = path.parent().unwrap().join("icons");
+    let apps = orchard_core::appstream::load(path, &icons)?;
+    let app = apps.iter().find(|a| a.id == id).ok_or_else(|| anyhow::anyhow!("no {id}"))?;
+    println!("version={:?} date={:?} home={:?}", app.version, app.release_date, app.homepage);
+    for line in app.description.as_deref().unwrap_or("").lines() {
+        println!("LINE| {line}");
     }
     Ok(())
 }

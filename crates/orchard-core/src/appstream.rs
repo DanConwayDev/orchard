@@ -97,9 +97,10 @@ pub fn load(path: &Path, icons_root: &Path) -> Result<Vec<AppstreamApp>> {
                         current = Some(Component::default());
                     }
                     b"description" => {
-                        // subtree_text consumes the whole balanced subtree
-                        // including this element's End tag, so the depth
-                        // counter must not count this Start either.
+                        // description_text consumes the whole balanced
+                        // subtree including this element's End tag, so
+                        // the depth counter must not count this Start
+                        // either.
                         if let Some(c) = current.as_mut() {
                             if c.description.is_none() {
                                 let text = description_text(&mut reader, &mut buf)?;
@@ -323,12 +324,15 @@ fn description_text(
     buf: &mut Vec<u8>,
 ) -> Result<String> {
     fn flush_run(run: &mut String, lines: &mut Vec<String>, item: bool) {
-        let trimmed = run.trim();
-        if !trimmed.is_empty() {
+        // XML source newlines and indentation live inside runs; squash
+        // every whitespace run to single spaces
+        let words: Vec<&str> = run.split_whitespace().collect();
+        if !words.is_empty() {
+            let line = words.join(" ");
             if item {
-                lines.push(format!("\u{2022} {trimmed}"));
+                lines.push(format!("\u{2022} {line}"));
             } else {
-                lines.push(trimmed.to_string());
+                lines.push(line);
             }
         }
         run.clear();

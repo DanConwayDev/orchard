@@ -12,9 +12,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gpui::{
-    div, prelude::*, px, uniform_list, AnyElement, AnimationExt, ClickEvent, Context, FocusHandle,
-    KeyDownEvent, ParentElement, Point, Render, ScrollHandle, ScrollStrategy, ScrollWheelEvent,
-    SharedString, Styled, UniformListScrollHandle, Window,
+    div, prelude::*, px, uniform_list, AnyElement, AnimationExt, ClickEvent, ClipboardItem,
+    Context, FocusHandle, Hsla, KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Point,
+    Render, ScrollHandle, ScrollStrategy, ScrollWheelEvent, SharedString, Styled, StyledText,
+    TextLayout, TextRun, UniformListScrollHandle, Window,
 };
 
 use orchard_core::{oci, permissions, CatalogFile, Risk, Source, StoreApp};
@@ -71,6 +72,8 @@ impl Filter {
 pub struct InstalledInfo {
     /// Human size from `flatpak info`, e.g. `1.0 GB`.
     pub size: Option<String>,
+    /// Sandbox metadata ini read from the deploy, for the permissions view.
+    pub metadata: Option<String>,
 }
 
 pub struct StoreRoot {
@@ -95,6 +98,14 @@ pub struct StoreRoot {
     page_open: bool,
     /// Active browse category (None = all).
     category: Option<String>,
+    /// Text cursor position, byte index into `search`.
+    cursor: usize,
+    /// Selection anchor (byte index); None = plain caret, no selection.
+    anchor: Option<usize>,
+    /// Layout handle for the search text: maps byte indices to pixels
+    /// for the caret and mouse positioning. None until the first
+    /// frame's text has been laid out.
+    search_layout: Option<TextLayout>,
     /// Scroll handle for the screenshot strip (wheel capture).
     shot_handle: ScrollHandle,
     /// Scroll handle for the virtualized list (keyboard reveal).
@@ -118,6 +129,9 @@ impl StoreRoot {
             fetching: HashSet::new(),
             page_open: false,
             category: None,
+            cursor: 0,
+            anchor: None,
+            search_layout: None,
             shot_handle: ScrollHandle::new(),
             list_handle: UniformListScrollHandle::new(),
         };
@@ -478,24 +492,77 @@ impl StoreRoot {
     // ----- keyboard -----
 
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if event.keystroke.modifiers.modified() {
-            return;
-        }
-        let key = event.keystroke.key.as_str();
+        let keystroke = &event.keystroke;
+        let key = keystroke.key.as_str();
+        let shift = keystroke.modifiers.shift;
+        let ctrl = keystroke.modifiers.control || keystroke.modifiers.platform;
         match key {
+            // ----- search editing: the input is always live -----
+            "left" => self.move_cursor(false, shift),
+            "right" => self.move_cursor(true, shift),
+            "home" => {
+                self.cursor = 0;
+                if !shift {
+                    self.anchor = None;
+                }
+            }
+            "end" => {
+                self.cursor = self.search.len();
+                if !shift {
+                    self.anchor = None;
+                }
+            }
+            "a" if ctrl => {
+                self.anchor = Some(0);
+                self.cursor = self.search.len();
+            }
+            "c" if ctrl => {
+                let (start, end) = self.selection();
+                if start != end {
+                    cx.write_to_clipboard(ClipboardItem::new_string(
+                        self.search[start..end].to_string(),
+                    ));
+                }
+            }
+            "x" if ctrl => {
+                let (start, end) = self.selection();
+                if start != end {
+                    cx.write_to_clipboard(ClipboardItem::new_string(
+                        self.search[start..end].to_string(),
+                    ));
+                    self.delete_text(false);
+                }
+            }
+            "v" if ctrl => {
+                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                    if self.page_open {
+                        self.close_page(cx);
+                    }
+                    self.insert_text(&text.replace(['\n', '\r'], " "));
+                }
+            }
             "backspace" => {
                 if self.page_open {
                     self.close_page(cx);
-                } else {
-                    self.search.pop();
                 }
+                self.delete_text(true);
             }
-            "escape" => {
-                // back out one level: page first, then search text
+            "delete" => {
                 if self.page_open {
                     self.close_page(cx);
+                }
+                self.delete_text(false);
+            }
+            "escape" => {
+                // back out one level: page, then selection, then text,
+                // then row selection
+                if self.page_open {
+                    self.close_page(cx);
+                } else if self.anchor.is_some() {
+                    self.anchor = None;
                 } else if !self.search.is_empty() {
                     self.search.clear();
+                    self.cursor = 0;
                 } else if self.selected.is_some() {
                     self.selected = None;
                 }
@@ -547,17 +614,75 @@ impl StoreRoot {
                     // typing means back to the list
                     self.close_page(cx);
                 }
-                self.search.push(' ');
+                self.insert_text(" ");
             }
-            other if other.chars().count() == 1 => {
+            other if other.chars().count() == 1 && !ctrl => {
                 if self.page_open {
                     self.close_page(cx);
                 }
-                self.search.push_str(other);
+                self.insert_text(other);
             }
             _ => return,
         }
         cx.notify();
+    }
+
+    /// Insert text at the cursor, replacing any selection.
+    fn insert_text(&mut self, text: &str) {
+        let (start, end) = self.selection();
+        self.search.replace_range(start..end, text);
+        self.cursor = start + text.len();
+        self.anchor = None;
+    }
+
+    /// Delete the selection, or one char before the cursor
+    /// (`backspace`) / after it (`delete`).
+    fn delete_text(&mut self, backspace: bool) {
+        let (start, end) = self.selection();
+        if start != end {
+            self.search.replace_range(start..end, "");
+            self.cursor = start;
+            self.anchor = None;
+            return;
+        }
+        if backspace && start > 0 {
+            let prev = self.search[..start]
+                .chars()
+                .next_back()
+                .map_or(0, |c| c.len_utf8());
+            self.search.replace_range(start - prev..start, "");
+            self.cursor = start - prev;
+        } else if !backspace && end < self.search.len() {
+            let next = self.search[end..].chars().next().map_or(0, |c| c.len_utf8());
+            self.search.replace_range(end..end + next, "");
+        }
+        self.anchor = None;
+    }
+
+    /// Move the cursor one char, extending the selection with shift.
+    fn move_cursor(&mut self, right: bool, extend: bool) {
+        self.cursor = if right {
+            self.search[self.cursor..]
+                .chars()
+                .next()
+                .map_or(self.cursor, |c| self.cursor + c.len_utf8())
+        } else {
+            self.search[..self.cursor]
+                .chars()
+                .next_back()
+                .map_or(0, |c| self.cursor - c.len_utf8())
+        };
+        if !extend {
+            self.anchor = None;
+        }
+    }
+
+    /// The selected byte range, ordered. `(cursor, cursor)` when empty.
+    fn selection(&self) -> (usize, usize) {
+        match self.anchor {
+            Some(anchor) => (anchor.min(self.cursor), anchor.max(self.cursor)),
+            None => (self.cursor, self.cursor),
+        }
     }
 
     /// Scroll the virtualized list so row `ix` is visible (keyboard
@@ -608,6 +733,7 @@ impl StoreRoot {
                 .justify_center()
                 .gap_2()
                 .bg(ui::inset())
+                .child(ui::icon("icons/search.svg", 20., ui::text_dim()))
                 .child(
                     div()
                         .text_size(px(ui::TEXT_SIZE_EMPHASIS))
@@ -631,6 +757,7 @@ impl StoreRoot {
                 .justify_center()
                 .gap_2()
                 .bg(ui::inset())
+                .child(ui::icon("icons/search.svg", 20., ui::text_dim()))
                 .child(
                     div()
                         .text_size(px(ui::TEXT_SIZE_EMPHASIS))
@@ -848,11 +975,16 @@ impl StoreRoot {
                                 "Installed",
                                 ui::risk_color(orchard_core::Risk::Low),
                             ))
-                            .child(ui::small_button(format!("row-open-{action_id}"), "Open", false)
-                                .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
-                                    cx.stop_propagation();
-                                    this.open(action_id.as_str(), cx);
-                                })))
+                            .child(ui::small_button(
+                                format!("row-open-{action_id}"),
+                                Some("icons/play.svg"),
+                                "Open",
+                                false,
+                            )
+                            .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
+                                cx.stop_propagation();
+                                this.open(action_id.as_str(), cx);
+                            })))
                             .into_any_element(),
                         None => div()
                             .flex()
@@ -862,6 +994,7 @@ impl StoreRoot {
                             .child(
                                 ui::small_button(
                                     format!("row-install-{action_id}"),
+                                    Some("icons/plus.svg"),
                                     "Install",
                                     false,
                                 )
@@ -883,6 +1016,14 @@ impl StoreRoot {
     /// bar stays pinned while the content scrolls.
     fn render_page(&self, app: StoreApp, cx: &mut Context<Self>) -> AnyElement {
         let app_id = app.app_id.clone();
+        let mut app = app;
+        // installed apps carry their sandbox metadata in the deploy;
+        // the catalog does not know it
+        if app.metadata.is_none() {
+            if let Some(info) = self.installed.get(&app_id) {
+                app.metadata = info.metadata.clone();
+            }
+        }
         let installed = self.installed.contains_key(&app_id);
         let job = self.jobs.get(&app_id);
         let verified = self.verified.get(&app_id).cloned();
@@ -938,6 +1079,7 @@ impl StoreRoot {
 
         let mut content = div()
             .w_full()
+            .min_w_0()
             .max_w(px(760.))
             .px_8()
             .py_6()
@@ -947,13 +1089,17 @@ impl StoreRoot {
             .child(
                 div()
                     .id("back")
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
                     .cursor_pointer()
                     .text_color(ui::accent())
                     .hover(|style| style.text_color(ui::text()))
                     .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
                         this.close_page(cx);
                     }))
-                    .child("← All apps"),
+                    .child(ui::icon("icons/arrow_left.svg", 13., ui::accent()))
+                    .child("All apps"),
             )
             .child(
                 // identity header
@@ -979,7 +1125,6 @@ impl StoreRoot {
                                 .gap_2()
                                 .text_size(px(ui::TEXT_SIZE_SMALL))
                                 .text_color(ui::text_dim())
-                                .overflow_hidden()
                                 .child(div().child(app.app_id.clone()))
                                 .children(app.version.clone().map(|v| div().child(format!("· {v}"))))
                                 .children(
@@ -1050,19 +1195,23 @@ impl StoreRoot {
             )
             .children(app.description.clone().map(|description| {
                 // block text: one line per div so paragraphs and bullet
-                // lists keep their structure
+                // lists keep their structure; full contrast for reading
                 div()
                     .flex()
                     .flex_col()
                     .gap_1()
+                    .w_full()
                     .text_size(px(ui::TEXT_SIZE))
-                    .text_color(ui::text_dim())
-                    .children(description.lines().map(|line| div().child(line.to_string())))
+                    .text_color(ui::text())
+                    .children(description.lines().map(|line| div().w_full().child(line.to_string())))
             }))
             .children(app.homepage.clone().map(|url| {
                 let open = url.clone();
                 div()
                     .id("homepage")
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
                     .cursor_pointer()
                     .text_size(px(ui::TEXT_SIZE))
                     .text_color(ui::accent())
@@ -1071,6 +1220,7 @@ impl StoreRoot {
                         // host default handler, fire and forget
                         let _ = std::process::Command::new("xdg-open").arg(&open).spawn();
                     })
+                    .child(ui::icon("icons/globe.svg", 13., ui::accent()))
                     .child(url)
             }))
             .when(
@@ -1083,9 +1233,13 @@ impl StoreRoot {
                             .gap_2()
                             .child(
                                 div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1p5()
                                     .text_size(px(ui::TEXT_SIZE_EMPHASIS - 1.))
                                     .font_weight(gpui::FontWeight::MEDIUM)
                                     .text_color(ui::text())
+                                    .child(ui::icon("icons/shield.svg", 13., ui::text()))
                                     .child("What it can access"),
                             )
                             .child(render_permissions_static(&app)),
@@ -1098,8 +1252,12 @@ impl StoreRoot {
                     // no sandbox data locally until flatpak installs it
                     section.child(
                         div()
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
                             .text_size(px(ui::TEXT_SIZE))
-                            .text_color(ui::text_dim())
+                            .text_color(ui::text())
+                            .child(ui::icon("icons/shield.svg", 13., ui::text_dim()))
                             .child(
                                 "Flatpak apps run in a sandbox; this app's specific permissions appear here once installed.",
                             ),
@@ -1136,19 +1294,23 @@ impl StoreRoot {
                             if installed {
                                 let open_id = app_id.clone();
                                 buttons.push(
-                                    button("btn-open", "Open", false).on_click(
-                                        cx.listener(move |this, _e: &ClickEvent, _w, cx| {
-                                            this.open(open_id.as_str(), cx);
-                                        }),
-                                    ).into_any_element(),
+                                    button("btn-open", Some("icons/play.svg"), "Open", false)
+                                        .on_click(
+                                            cx.listener(move |this, _e: &ClickEvent, _w, cx| {
+                                                this.open(open_id.as_str(), cx);
+                                            }),
+                                        )
+                                        .into_any_element(),
                                 );
                                 let remove_id = app_id.clone();
                                 buttons.push(
-                                    button("btn-remove", "Remove", false).on_click(
-                                        cx.listener(move |this, _e: &ClickEvent, _w, cx| {
-                                            this.uninstall(remove_id.as_str(), cx);
-                                        }),
-                                    ).into_any_element(),
+                                    button("btn-remove", Some("icons/trash.svg"), "Remove", false)
+                                        .on_click(
+                                            cx.listener(move |this, _e: &ClickEvent, _w, cx| {
+                                                this.uninstall(remove_id.as_str(), cx);
+                                            }),
+                                        )
+                                        .into_any_element(),
                                 );
                             } else {
                                 let install_id = app_id.clone();
@@ -1158,11 +1320,13 @@ impl StoreRoot {
                                     "Install"
                                 };
                                 buttons.push(
-                                    button("btn-install", label, true).on_click(
-                                        cx.listener(move |this, _e: &ClickEvent, _w, cx| {
-                                            this.install(install_id.as_str(), cx);
-                                        }),
-                                    ).into_any_element(),
+                                    button("btn-install", Some("icons/plus.svg"), label, true)
+                                        .on_click(
+                                            cx.listener(move |this, _e: &ClickEvent, _w, cx| {
+                                                this.install(install_id.as_str(), cx);
+                                            }),
+                                        )
+                                        .into_any_element(),
                                 );
                             }
                             buttons
@@ -1302,11 +1466,63 @@ impl Render for StoreRoot {
                             .text_color(ui::accent())
                             .child("Orchard"),
                     )
-                    .child(
+                    .child({
+                        // The search input: a real caret and selection.
+                        // StyledText carries the selection as a styled
+                        // run; the layout handle maps byte indices to
+                        // pixels (caret x, click position). The caret
+                        // queries last frame's handle: one frame stale,
+                        // invisible at 120fps.
+                        let display: String = if self.search.is_empty() {
+                            "Type to search…".to_string()
+                        } else {
+                            self.search.clone()
+                        };
+                        let font = window.text_style().font();
+                        let mut styled = StyledText::new(display.clone());
+                        if !self.search.is_empty() {
+                            let (start, end) = self.selection();
+                            let plain: Hsla = ui::text().into();
+                            let mut highlighted: Hsla = ui::accent().into();
+                            highlighted.a = 0.35;
+                            let mut runs: Vec<TextRun> = Vec::new();
+                            let make_run = |len: usize, bg: Option<Hsla>| TextRun {
+                                len,
+                                font: font.clone(),
+                                color: plain,
+                                background_color: bg,
+                                underline: None,
+                                strikethrough: None,
+                            };
+                            if start > 0 {
+                                runs.push(make_run(start, None));
+                            }
+                            if end > start {
+                                runs.push(make_run(end - start, Some(highlighted)));
+                            }
+                            if end < self.search.len() {
+                                runs.push(make_run(self.search.len() - end, None));
+                            }
+                            styled = styled.with_runs(runs);
+                        }
+                        let prev_layout = self.search_layout.clone();
+                        let live_layout = styled.layout().clone();
+                        self.search_layout = Some(live_layout.clone());
+
+                        // the caret queries last frame's handle; it has
+                        // been measured by now
+                        let caret_x = prev_layout.and_then(|layout| {
+                            layout
+                                .position_for_index(self.cursor.min(self.search.len()))
+                                .map(|pos| pos.x - layout.bounds().origin.x)
+                        });
+
                         div()
                             .id("search-box")
                             .flex_1()
                             .max_w(px(360.))
+                            .flex()
+                            .items_center()
                             .px_3()
                             .py_1()
                             .rounded_sm()
@@ -1323,12 +1539,43 @@ impl Render for StoreRoot {
                             } else {
                                 ui::text()
                             })
-                            .child(if self.search.is_empty() {
-                                "Type to search…".to_string()
-                            } else {
-                                format!("{}|", self.search)
-                            }),
-                    )
+                            .child(ui::icon("icons/search.svg", 13., ui::text_dim()))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, event: &MouseDownEvent, _window, _cx| {
+                                    // place the caret where clicked; one
+                                    // frame of layout lag, invisible in
+                                    // practice
+                                    let local = event.position - live_layout.bounds().origin;
+                                    let ix = match live_layout.index_for_position(local) {
+                                        Ok(ix) | Err(ix) => ix,
+                                    };
+                                    let ix = ix.min(this.search.len()).max(0);
+                                    if event.modifiers.shift && this.anchor.is_some() {
+                                        this.cursor = ix;
+                                    } else {
+                                        this.cursor = ix;
+                                        this.anchor = None;
+                                    }
+                                }),
+                            )
+                            .child(
+                                div()
+                                    .relative()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(styled)
+                                    .children(caret_x.map(|x| {
+                                        div()
+                                            .absolute()
+                                            .left(x)
+                                            .top(px(4.))
+                                            .w(px(1.5))
+                                            .h(px(15.))
+                                            .bg(ui::accent())
+                                    })),
+                            )
+                    })
                     .child(div().flex_1())
                     // source filters are a browse concern; the page
                     // hides them
@@ -1473,7 +1720,13 @@ fn list_installed() -> HashMap<String, InstalledInfo> {
             }
             let _version = fields.next().map(|f| f.trim().to_string());
             let _origin = fields.next().map(|f| f.trim().to_string());
-            Some((app_id.clone(), InstalledInfo { size: installed_size(&app_id) }))
+            Some((
+                app_id.clone(),
+                InstalledInfo {
+                    size: installed_size(&app_id),
+                    metadata: orchard_flatpak::installed_metadata(&app_id),
+                },
+            ))
         })
         .collect()
 }

@@ -246,17 +246,38 @@ pub fn badge(text: &str, fg: Rgba) -> Div {
         .child(text.to_string())
 }
 
+/// An inline SVG icon tinted by the given color. Paths resolve through
+/// the asset source (`icons/…svg`); the glyph follows the text color.
+pub fn icon(path: &'static str, size: f32, color: Rgba) -> gpui::AnyElement {
+    gpui::svg()
+        .path(path)
+        .size(px(size))
+        .text_color(color)
+        .into_any_element()
+}
+
 /// A button. `accent` styles the primary action: solid accent with
 /// dark text, matching the active filter chips. Secondary buttons are
-/// quiet surfaces with a border that brightens on hover.
-pub fn button(id: impl Into<SharedString>, label: &str, accent: bool) -> gpui::Stateful<Div> {
+/// quiet surfaces with a border that brightens on hover. `icon` is an
+/// optional leading glyph (`icons/…svg`).
+pub fn button(
+    id: impl Into<SharedString>,
+    glyph: Option<&'static str>,
+    label: &str,
+    accent: bool,
+) -> gpui::Stateful<Div> {
     let base = div()
         .id(id.into())
+        .flex()
+        .items_center()
+        .gap_1p5()
         .px_3()
         .py_1()
         .rounded_sm()
         .text_size(px(TEXT_SIZE))
         .cursor_pointer();
+    let fg = if accent { accent_text() } else { text() };
+    let base = base.children(glyph.map(|path| icon(path, 13., fg)));
     if accent {
         base.bg(get(&ACCENT))
             .text_color(accent_text())
@@ -313,14 +334,24 @@ pub fn app_icon(icon_path: Option<&std::path::Path>, name: &str, size: f32) -> g
 }
 
 /// A compact quiet button for inline row actions.
-pub fn small_button(id: impl Into<SharedString>, label: &str, accent: bool) -> gpui::Stateful<Div> {
+pub fn small_button(
+    id: impl Into<SharedString>,
+    glyph: Option<&'static str>,
+    label: &str,
+    accent: bool,
+) -> gpui::Stateful<Div> {
     let base = div()
         .id(id.into())
+        .flex()
+        .items_center()
+        .gap_1()
         .px_2()
         .py_0p5()
         .rounded_sm()
         .text_size(px(TEXT_SIZE_SMALL))
         .cursor_pointer();
+    let fg = if accent { accent_text() } else { text_dim() };
+    let base = base.children(glyph.map(|path| icon(path, 11., fg)));
     if accent {
         base.bg(get(&ACCENT))
             .text_color(accent_text())

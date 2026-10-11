@@ -118,6 +118,24 @@ pub fn info(app_id: &str) -> Command {
     cmd
 }
 
+/// The sandbox metadata ini of an installed app, read straight from the
+/// deploy (`app/<id>/current/active/metadata`). System install first,
+/// then user. This is what powers the permissions view for apps that
+/// came from a remote rather than an Orchard catalog.
+pub fn installed_metadata(app_id: &str) -> Option<String> {
+    let mut roots = vec![std::path::PathBuf::from("/var/lib/flatpak/app")];
+    if let Some(home) = std::env::var_os("HOME") {
+        roots.push(
+            std::path::PathBuf::from(home)
+                .join(".local/share/flatpak/app"),
+        );
+    }
+    roots
+        .iter()
+        .map(|root| root.join(app_id).join("current/active/metadata"))
+        .find_map(|path| std::fs::read_to_string(path).ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
