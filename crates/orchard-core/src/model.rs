@@ -137,6 +137,8 @@ pub struct StoreApp {
     pub icon_path: Option<std::path::PathBuf>,
     pub icon_url: Option<String>,
     pub categories: Vec<String>,
+    /// Screenshot image URLs, best first (reviewed channel).
+    pub screenshots: Vec<String>,
     /// Publisher pubkey (publisher channel only).
     pub publisher: Option<String>,
     /// Flatpak metadata ini (publisher channel only).
@@ -160,6 +162,7 @@ impl StoreApp {
             icon_path: app.icon_path.clone(),
             icon_url: app.icon_url.clone(),
             categories: app.categories.clone(),
+            screenshots: app.screenshots.clone(),
             publisher: None,
             metadata: None,
             location: None,
@@ -179,6 +182,7 @@ impl StoreApp {
             icon_path: None,
             icon_url: app.icon_url.clone(),
             categories: Vec::new(),
+            screenshots: Vec::new(),
             publisher: Some(app.publisher.pubkey.clone()),
             metadata: app.metadata.clone(),
             location: Some(app.location.clone()),

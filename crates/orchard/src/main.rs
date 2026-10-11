@@ -97,6 +97,9 @@ fn main() {
     }
 
     Application::new().run(|cx: &mut App| {
+        // Establish the palette seam: defaults today, wallpaper-derived
+        // palettes later swap this wholesale.
+        crate::ui::apply_palette(&crate::ui::Palette::default());
         let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);
         cx.open_window(
             WindowOptions {

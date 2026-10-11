@@ -14,7 +14,7 @@ use gpui::{
 
 use orchard_core::{oci, permissions, CatalogFile, Risk, Source, StoreApp};
 
-use crate::ui::{self, badge, button, color, icon_tile};
+use crate::ui::{self, app_icon, badge, button};
 
 /// Port the in-process indexd listens on. The client is the remote.
 pub const INDEXD_PORT: u16 = 7780;
@@ -410,7 +410,7 @@ impl StoreRoot {
             .flex_1()
             .min_w_0()
             .overflow_y_scroll()
-            .bg(color(ui::BG))
+            .bg(ui::inset())
             .children(apps.into_iter().map(|app| {
                 let app_id = app.app_id.clone();
                 let is_selected = selected.as_deref() == Some(app.app_id.as_str());
@@ -426,15 +426,20 @@ impl StoreRoot {
                     .px_4()
                     .py_2()
                     .border_b_1()
-                    .border_color(color(ui::BORDER))
+                    .border_color(ui::divider_soft())
                     .cursor_pointer()
-                    .hover(|style| style.bg(color(ui::PANEL)))
-                    .when(is_selected, |row| row.bg(color(ui::PANEL)))
+                    .hover(|style| style.bg(ui::surface()))
+                    .when(is_selected, |row| row.bg(ui::row_selected()))
                     .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
                         this.selected = Some(app_id.clone());
                         cx.notify();
                     }))
-                    .child(icon_tile(&app.app_id, &app.name))
+                    .child(app_icon(
+                        app.icon_path.as_deref(),
+                        app.icon_url.as_deref(),
+                        &app.name,
+                        36.,
+                    ))
                     .child(
                         div()
                             .flex_1()
@@ -449,36 +454,40 @@ impl StoreRoot {
                                     .gap_2()
                                     .child(
                                         div()
-                                            .text_size(px(14.))
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .text_size(px(ui::TEXT_SIZE_EMPHASIS))
+                                            .font_weight(gpui::FontWeight::MEDIUM)
+                                            .text_color(ui::text())
                                             .child(app.name.clone()),
                                     )
                                     .child(match app.source {
-                                        Source::Reviewed => badge("Flathub", color(ui::MUTED)),
-                                        Source::Publisher => {
-                                            badge("Orchard", color(ui::ACCENT))
-                                        }
+                                        Source::Reviewed => badge("Flathub", ui::text_dim()),
+                                        Source::Publisher => badge("Orchard", ui::accent()),
                                     })
                                     .when(verified_digest.is_some(), |row| {
-                                        row.child(badge("digest ok", color(ui::GREEN)))
+                                        row.child(badge("digest ok", ui::risk_color(
+                                            orchard_core::Risk::Low,
+                                        )))
                                     }),
                             )
                             .child(
                                 div()
-                                    .text_size(px(12.))
-                                    .text_color(color(ui::MUTED))
+                                    .text_size(px(ui::TEXT_SIZE))
+                                    .text_color(ui::text_dim())
                                     .overflow_hidden()
                                     .whitespace_nowrap()
                                     .child(app.summary.clone()),
                             ),
                     )
                     .child(match job {
-                        Some(label) => badge(&label, color(ui::YELLOW)),
+                        Some(label) => badge(&label, ui::risk_color(orchard_core::Risk::Medium)),
                         None => {
                             if is_installed {
-                                badge("Installed", color(ui::GREEN))
+                                badge("Installed", ui::risk_color(orchard_core::Risk::Low))
                             } else {
-                                badge(app.version.as_deref().unwrap_or(""), color(ui::MUTED))
+                                badge(
+                                    app.version.as_deref().unwrap_or(""),
+                                    ui::text_dim(),
+                                )
                             }
                         }
                     })
@@ -486,7 +495,8 @@ impl StoreRoot {
             .when(is_empty, |list| {
                 list.items_center().justify_center().child(
                     div()
-                        .text_color(color(ui::MUTED))
+                        .text_color(ui::text_dim())
+                        .text_size(px(ui::TEXT_SIZE))
                         .child(if self.flathub_loading {
                             "Loading Flathub catalog…".to_string()
                         } else {
@@ -507,9 +517,9 @@ impl StoreRoot {
             .h_full()
             .flex()
             .flex_col()
-            .bg(color(ui::PANEL))
+            .bg(ui::panel())
             .border_l_1()
-            .border_color(color(ui::BORDER))
+            .border_color(ui::divider())
             .child(
                 // header
                 div()
@@ -519,33 +529,42 @@ impl StoreRoot {
                     .px_4()
                     .py_3()
                     .border_b_1()
-                    .border_color(color(ui::BORDER))
+                    .border_color(ui::divider())
                     .child(
                         div()
                             .id("back")
                             .cursor_pointer()
-                            .text_color(color(ui::ACCENT))
+                            .text_color(ui::accent())
+                            .hover(|style| style.text_color(ui::text()))
                             .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
                                 this.selected = None;
                                 cx.notify();
                             }))
                             .child("← Back"),
                     )
-                    .child(icon_tile(&app.app_id, &app.name))
+                    .child(app_icon(
+                        app.icon_path.as_deref(),
+                        app.icon_url.as_deref(),
+                        &app.name,
+                        40.,
+                    ))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .child(
                                 div()
-                                    .text_size(px(16.))
-                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_size(px(ui::TEXT_SIZE_EMPHASIS))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(ui::text())
                                     .child(app.name.clone()),
                             )
                             .child(
                                 div()
-                                    .text_size(px(12.))
-                                    .text_color(color(ui::MUTED))
+                                    .text_size(px(ui::TEXT_SIZE_LABEL + 0.5))
+                                    .text_color(ui::text_dim())
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
                                     .child(app.app_id.clone()),
                             ),
                     ),
@@ -562,44 +581,60 @@ impl StoreRoot {
                     .gap_3()
                     .child(
                         // badges row
-                        div().flex().items_center().gap_2().child(match app.source {
-                            Source::Reviewed => badge("Reviewed on Flathub", color(ui::MUTED)),
+                        div().flex().flex_wrap().items_center().gap_2().child(match app.source {
+                            Source::Reviewed => badge("Reviewed on Flathub", ui::text_dim()),
                             Source::Publisher => {
-                                badge("Publisher-verified", color(ui::ACCENT))
+                                badge("Publisher-verified", ui::accent())
                             }
                         })
                         .when(app.source == Source::Publisher, |row| {
                             row.children(verified.clone().map(|digest| {
-                                badge(
-                                    &format!("digest {digest}"),
-                                    color(ui::GREEN),
-                                )
+                                badge(&format!("digest {digest}"), ui::risk_color(Risk::Low))
                             }))
                         })
-                        .children(app.version.clone().map(|v| badge(&v, color(ui::FG))))
+                        .children(app.version.clone().map(|v| badge(&v, ui::text())))
                         .children(
                             app.license
                                 .clone()
-                                .map(|license| badge(&license, color(ui::MUTED))),
+                                .map(|license| badge(&license, ui::text_dim())),
                         ),
                     )
+                    .when(!app.screenshots.is_empty(), |section| {
+                        section.child(
+                            div()
+                                .id("screenshots")
+                                .flex()
+                                .gap_2()
+                                .overflow_x_scroll()
+                                .children(app.screenshots.iter().take(4).map(|url| {
+                                    gpui::img(url.clone())
+                                        .w(px(176.))
+                                        .h(px(108.))
+                                        .flex_none()
+                                        .object_fit(gpui::ObjectFit::Cover)
+                                        .rounded_sm()
+                                        .border_1()
+                                        .border_color(ui::divider())
+                                })),
+                        )
+                    })
                     .child(
                         div()
-                            .text_size(px(13.))
-                            .text_color(color(ui::FG))
+                            .text_size(px(ui::TEXT_SIZE_EMPHASIS - 0.5))
+                            .text_color(ui::text())
                             .child(app.summary.clone()),
                     )
                     .children(app.description.clone().map(|description| {
                         div()
-                            .text_size(px(12.5))
-                            .text_color(color(ui::MUTED))
+                            .text_size(px(ui::TEXT_SIZE))
+                            .text_color(ui::text_dim())
                             .child(description)
                     }))
                     .when(app.source == Source::Publisher, |section| {
                         section.children(app.publisher.clone().map(|publisher| {
                             div()
-                                .text_size(px(12.))
-                                .text_color(color(ui::MUTED))
+                                .text_size(px(ui::TEXT_SIZE))
+                                .text_color(ui::text_dim())
                                 .child(format!("Publisher key: {}", publisher))
                         }))
                     })
@@ -620,9 +655,13 @@ impl StoreRoot {
                     .px_4()
                     .py_3()
                     .border_t_1()
-                    .border_color(color(ui::BORDER))
+                    .border_color(ui::divider())
                     .children(match job {
-                        Some(state) => vec![badge(state.label(), color(ui::YELLOW)).into_any_element()],
+                        Some(state) => vec![badge(
+                            state.label(),
+                            ui::risk_color(Risk::Medium),
+                        )
+                        .into_any_element()],
                         None => {
                             let mut buttons: Vec<gpui::AnyElement> = Vec::new();
                             if installed {
@@ -682,19 +721,22 @@ fn render_permissions_static(app: &StoreApp) -> gpui::AnyElement {
         .flex_col()
         .gap_2()
         .p_3()
-        .rounded_lg()
-        .bg(color(ui::PANEL))
+        .rounded_sm()
+        .bg(ui::inset())
+        .border_1()
+        .border_color(ui::divider_soft())
         .child(
             div()
-                .text_size(px(13.))
-                .font_weight(gpui::FontWeight::BOLD)
+                .text_size(px(ui::TEXT_SIZE_EMPHASIS))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(ui::text())
                 .child("Permissions"),
         )
         .when(grants.is_empty(), |section| {
             section.child(
                 div()
-                    .text_size(px(12.))
-                    .text_color(color(ui::MUTED))
+                    .text_size(px(ui::TEXT_SIZE))
+                    .text_color(ui::text_dim())
                     .child("No sandbox grants declared (app runs with flatpak defaults)."),
             )
         })
@@ -703,14 +745,14 @@ fn render_permissions_static(app: &StoreApp) -> gpui::AnyElement {
                 .flex()
                 .items_center()
                 .gap_2()
-                .text_size(px(12.))
+                .text_size(px(ui::TEXT_SIZE))
                 .child(badge(risk_label(grant.risk), ui::risk_color(grant.risk)))
                 .child(
                     div()
-                        .text_color(color(ui::FG))
+                        .text_color(ui::text())
                         .child(grant.summary.clone()),
                 )
-                .child(div().text_color(color(ui::MUTED)).child(grant.arg.clone()))
+                .child(div().text_color(ui::text_dim()).child(grant.arg.clone()))
         }))
         .into_any_element()
 }
@@ -729,8 +771,8 @@ impl Render for StoreRoot {
             .size_full()
             .flex()
             .flex_col()
-            .bg(color(ui::BG))
-            .text_color(color(ui::FG))
+            .bg(ui::inset())
+            .text_color(ui::text())
             // top bar
             .child(
                 div()
@@ -740,13 +782,13 @@ impl Render for StoreRoot {
                     .px_4()
                     .py_2()
                     .border_b_1()
-                    .border_color(color(ui::BORDER))
-                    .bg(color(ui::PANEL))
+                    .border_color(ui::divider())
+                    .bg(ui::panel())
                     .child(
                         div()
-                            .text_size(px(17.))
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(color(ui::ACCENT))
+                            .text_size(px(ui::TEXT_SIZE_EMPHASIS))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(ui::accent())
                             .child("Orchard"),
                     )
                     .child(
@@ -756,15 +798,15 @@ impl Render for StoreRoot {
                             .max_w(px(360.))
                             .px_3()
                             .py_1()
-                            .rounded_md()
-                            .bg(color(ui::BG))
+                            .rounded_sm()
+                            .bg(ui::inset())
                             .border_1()
-                            .border_color(color(ui::BORDER))
-                            .text_size(px(13.))
+                            .border_color(ui::divider())
+                            .text_size(px(ui::TEXT_SIZE))
                             .text_color(if self.search.is_empty() {
-                                color(ui::MUTED)
+                                ui::text_dim()
                             } else {
-                                color(ui::FG)
+                                ui::text()
                             })
                             .child(if self.search.is_empty() {
                                 "Type to search…".to_string()
@@ -787,15 +829,15 @@ impl Render for StoreRoot {
                                 .id(("filter", *f as usize))
                                 .px_2()
                                 .py_1()
-                                .rounded_md()
-                                .text_size(px(12.))
+                                .rounded_sm()
+                                .text_size(px(ui::TEXT_SIZE))
                                 .cursor_pointer()
                                 .when(active, |chip| {
-                                    chip.bg(color(ui::ACCENT)).text_color(color(0x14_1a_21))
+                                    chip.bg(ui::accent()).text_color(ui::accent_text())
                                 })
                                 .when(!active, |chip| {
-                                    chip.text_color(color(ui::MUTED)).hover(|style| {
-                                        style.bg(color(ui::PANEL_BRIGHT))
+                                    chip.text_color(ui::text_dim()).hover(|style| {
+                                        style.bg(ui::surface())
                                     })
                                 })
                                 .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
@@ -824,10 +866,10 @@ impl Render for StoreRoot {
                     .px_4()
                     .py_1()
                     .border_t_1()
-                    .border_color(color(ui::BORDER))
-                    .bg(color(ui::PANEL))
-                    .text_size(px(11.5))
-                    .text_color(color(ui::MUTED))
+                    .border_color(ui::divider())
+                    .bg(ui::panel())
+                    .text_size(px(ui::TEXT_SIZE_SMALL))
+                    .text_color(ui::text_dim())
                     .child(match self.flathub_loading {
                         true => format!("{total} apps (loading Flathub…) · {installed_count} installed"),
                         false => format!("{total} apps · {installed_count} installed"),
@@ -835,7 +877,7 @@ impl Render for StoreRoot {
                     .child(div().flex_1())
                     .children(self.error.clone().map(|error| {
                         div()
-                            .text_color(color(ui::RED))
+                            .text_color(ui::urgent())
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .child(format!("⚠ {error}"))
