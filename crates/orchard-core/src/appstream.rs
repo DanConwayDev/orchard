@@ -102,7 +102,16 @@ pub fn load(path: &Path, icons_root: &Path) -> Result<Vec<AppstreamApp>> {
                         // the depth counter must not count this Start
                         // either.
                         if let Some(c) = current.as_mut() {
-                            if c.description.is_none() {
+                            if is_translation(e) {
+                                // Per-language variant: appstream ships
+                                // one <description> element per language
+                                // (Lutris alone has twenty); the app's
+                                // own wording is the untranslated one.
+                                let text = description_text(&mut reader, &mut buf)?;
+                                if c.description.is_none() && c.description_fallback.is_none() {
+                                    c.description_fallback = Some(text.into_boxed_str());
+                                }
+                            } else if c.description.is_none() {
                                 let text = description_text(&mut reader, &mut buf)?;
                                 c.description = Some(text.into_boxed_str());
                             } else {
@@ -506,6 +515,9 @@ struct Component {
     name: Option<Box<str>>,
     summary: Option<Box<str>>,
     description: Option<Box<str>>,
+    /// First per-language description element seen, kept only for
+    /// components that ship no default (untranslated) one.
+    description_fallback: Option<Box<str>>,
     license: Option<Box<str>>,
     version: Option<Box<str>>,
     release_date: Option<Box<str>>,
@@ -524,6 +536,11 @@ impl Component {
         let summary = self.summary.take()?.into_string();
         if id.is_empty() || name.is_empty() {
             return None;
+        }
+        // Components that ship only per-language description elements
+        // still get their first one rather than nothing.
+        if self.description.is_none() {
+            self.description = self.description_fallback.take();
         }
         let icon_path = self
             .cached_icon_name
@@ -755,6 +772,61 @@ mod tests {
         // A unix timestamp release date renders as a civil date.
         assert_eq!(quoted.version.as_deref(), Some("0.9.0"));
         assert_eq!(quoted.release_date.as_deref(), Some("2023-11-14"));
+    }
+
+    #[test]
+    fn description_skips_per_language_elements() {
+        // Lutris-style appstream: one <description> element per
+        // language, the untranslated one not first. The app's own
+        // wording wins over whatever translation comes first.
+        let apps = parse_doc(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<components version="0.8" origin="test">
+  <component type="desktop-application">
+    <id>com.example.Multi</id>
+    <name>Multi</name>
+    <summary>Does things</summary>
+    <description xml:lang="ar">وصف بالعربية</description>
+    <description xml:lang="de">Beschreibung auf Deutsch</description>
+    <description><p>The real description.</p></description>
+  </component>
+</components>"#,
+        );
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0].description.as_deref(), Some("The real description."));
+    }
+
+    #[test]
+    fn description_falls_back_to_first_language() {
+        // No default description element at all: better to show a
+        // translation than nothing.
+        let apps = parse_doc(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<components version="0.8" origin="test">
+  <component type="desktop-application">
+    <id>com.example.Translated</id>
+    <name>Translated</name>
+    <summary>Does things</summary>
+    <description xml:lang="ar">وصف بالعربية</description>
+    <description xml:lang="de">Beschreibung auf Deutsch</description>
+  </component>
+</components>"#,
+        );
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0].description.as_deref(), Some("وصف بالعربية"));
+    }
+
+    /// Parse one appstream document through the same path `load` uses
+    /// (gzip file), returning its components.
+    fn parse_doc(doc: &str) -> Vec<AppstreamApp> {
+        let dir = std::env::temp_dir().join("orchard-appstream-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let xml_path = dir.join("appstream-test.xml.gz");
+        let file = std::fs::File::create(&xml_path).unwrap();
+        let mut gz = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        std::io::Write::write_all(&mut gz, doc.as_bytes()).unwrap();
+        gz.finish().unwrap();
+        load(&xml_path, &dir.join("icons")).unwrap()
     }
 
     #[test]
