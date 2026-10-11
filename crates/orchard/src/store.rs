@@ -2662,8 +2662,24 @@ impl StoreRoot {
                     .text_color(ui::text())
                     .children(description.lines().map(|line| div().w_full().child(line.to_string())))
             }))
-            .children(app.homepage.clone().map(|url| project_link("homepage", "icons/globe.svg", url)))
-            .children(app.repository.clone().map(|url| project_link("repository", "icons/git.svg", url)))
+            .child(
+                // the project links share one tight group: they are
+                // one block of text, not two sections
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .children(
+                        app.homepage
+                            .clone()
+                            .map(|url| project_link("homepage", "icons/globe.svg", url)),
+                    )
+                    .children(
+                        app.repository
+                            .clone()
+                            .map(|url| project_link("repository", "icons/git.svg", url)),
+                    ),
+            )
             .child(self.render_reviews(&app_id, app.publisher.as_deref(), font.clone(), cx))
             .when_some(sandbox_metadata, |section, metadata| {
                 section.child(

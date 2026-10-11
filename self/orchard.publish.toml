@@ -14,7 +14,6 @@ summary = "A permissionless Flatpak store"
 description = "Install and update Flatpak apps without gatekeepers. Publishers sign their own releases as Nostr events; reviews are real events too, so trust comes from the people who use the app rather than from a curator. Orchard is published through Orchard, updates included."
 categories = ["Utility"]
 repository = "https://github.com/Letdown2491/orchard"
-homepage = "https://github.com/Letdown2491/orchard"
 
 [release]
 version = "0.1.0"
