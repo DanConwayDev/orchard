@@ -2782,7 +2782,7 @@ impl StoreRoot {
                                 .hover(|style| style.bg(gpui::transparent_black()))
                                 .tooltip(|_window, cx| {
                                     cx.new(|_| {
-                                        TextTooltip("In your circle: you follow this reviewer")
+                                        TextTooltip("You follow this reviewer")
                                     })
                                     .into()
                                 })
@@ -2790,22 +2790,20 @@ impl StoreRoot {
                         }))
                         .children(in_circle2.then(|| {
                             // the two-hop glyph: a reviewer someone in
-                            // the circle follows. Dimmer than the
-                            // circle glyph on purpose: one step
-                            // further from you. Same hover rules.
+                            // the circle follows. A second hue rather
+                            // than a dimmed accent: the two distances
+                            // read apart at a glance. Same hover rules.
                             div()
                                 .id(SharedString::from(format!("circle2-{index}")))
                                 .flex_none()
                                 .hover(|style| style.bg(gpui::transparent_black()))
                                 .tooltip(|_window, cx| {
                                     cx.new(|_| {
-                                        TextTooltip(
-                                            "In your circle's circle: followed by someone you follow",
-                                        )
+                                        TextTooltip("Followed by someone you follow")
                                     })
                                     .into()
                                 })
-                                .child(ui::icon("icons/person.svg", 11., ui::text_dim()))
+                                .child(ui::icon("icons/person.svg", 11., ui::circle2()))
                         })),
                 );
                 if !review.content.is_empty() {

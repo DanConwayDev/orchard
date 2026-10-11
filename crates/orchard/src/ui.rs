@@ -212,6 +212,11 @@ pub fn hsl_to_rgb(h: f32, s: f32, l: f32) -> u32 {
 pub const RISK_LOW: u32 = 0xA6E3A1;
 /// Mocha's yellow (medium risk / in-progress).
 pub const RISK_MED: u32 = 0xF9E2AF;
+/// Mocha's mauve: the second web-of-trust hue. The one-hop circle
+/// glyph wears the accent (blue or green by theme); the two-hop glyph
+/// wears this, a sibling hue that stays distinct under either theme
+/// without borrowing the risk colors' warn/danger meanings.
+pub const CIRCLE2: u32 = 0xCBA6F7;
 
 /// Risk color for permission badges.
 pub fn risk_color(risk: Risk) -> Rgba {
@@ -220,6 +225,11 @@ pub fn risk_color(risk: Risk) -> Rgba {
         Risk::Medium => rgb(RISK_MED),
         Risk::High => get(&URGENT),
     }
+}
+
+/// The two-hop web-of-trust color.
+pub fn circle2() -> Rgba {
+    rgb(CIRCLE2)
 }
 
 // ---------- type scale (kuma-shell: 12 body, 11 small, 10 label) ----------
