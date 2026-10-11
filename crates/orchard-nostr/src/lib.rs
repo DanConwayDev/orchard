@@ -475,6 +475,16 @@ impl Feed {
         events.sort_by(|a, b| a.0.cmp(&b.0));
         events.into_iter().map(|(_, json)| json).collect()
     }
+
+    /// The latest kind 0 metadata per pubkey, as the raw JSON the
+    /// author signed. Clients merge against this before republishing a
+    /// profile: kind 0 is replaceable, a subset would drop fields.
+    pub fn profile_raws(&self) -> std::collections::BTreeMap<String, String> {
+        self.profiles
+            .iter()
+            .map(|(pubkey, profile)| (pubkey.clone(), profile.event.content.clone()))
+            .collect()
+    }
 }
 
 /// When the location embeds its own digest (`docker://…@sha256:…`), it must

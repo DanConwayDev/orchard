@@ -95,6 +95,14 @@ pub trait CatalogDocument: Send + Sync + 'static {
             reviews: Vec::new(),
         }
     }
+
+    /// The raw kind 0 metadata per pubkey. Static files carry none.
+    fn profiles(&self) -> orchard_core::ProfilesFile {
+        orchard_core::ProfilesFile {
+            version: 1,
+            profiles: std::collections::BTreeMap::new(),
+        }
+    }
 }
 
 impl CatalogDocument for CatalogFile {
@@ -126,6 +134,17 @@ impl CatalogDocument for NostrCatalog {
     fn reviews(&self) -> orchard_core::ReviewsFile {
         self.feed.lock().expect("feed lock poisoned").reviews()
     }
+
+    fn profiles(&self) -> orchard_core::ProfilesFile {
+        orchard_core::ProfilesFile {
+            version: 1,
+            profiles: self
+                .feed
+                .lock()
+                .expect("feed lock poisoned")
+                .profile_raws(),
+        }
+    }
 }
 
 /// Shared server state: the catalog document (and the OCI index derived
@@ -151,6 +170,7 @@ pub fn router(state: ServerState) -> Router {
         .route("/index/{arch}", get(index))
         .route("/v1/catalog", get(catalog))
         .route("/v1/reviews", get(reviews))
+        .route("/v1/profiles", get(profiles))
         .with_state(state)
 }
 
@@ -158,7 +178,7 @@ async fn root() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "service": "orchard-indexd",
         "description": "Orchard's local catalog service",
-        "endpoints": ["/v1/catalog", "/index/{arch}"]
+        "endpoints": ["/v1/catalog", "/v1/reviews", "/v1/profiles", "/index/{arch}"]
     }))
 }
 
@@ -197,6 +217,11 @@ async fn catalog(State(state): State<ServerState>) -> Json<CatalogFile> {
 /// The reviews document, straight from the live feed.
 async fn reviews(State(state): State<ServerState>) -> Json<orchard_core::ReviewsFile> {
     Json(state.document.reviews())
+}
+
+/// The raw kind 0 metadata per pubkey, straight from the live feed.
+async fn profiles(State(state): State<ServerState>) -> Json<orchard_core::ProfilesFile> {
+    Json(state.document.profiles())
 }
 
 /// Bind and serve. The port is reachable from the host even when Orchard runs
@@ -369,6 +394,16 @@ mod tests {
             index.manifests[0].flatpak_ref(),
             Some("app/com.orchard.Hello/x86_64/stable")
         );
+
+        // a static catalog carries no profiles: the endpoint exists and
+        // serves an empty document rather than a 404
+        let profiles: orchard_core::ProfilesFile = agent
+            .get(&format!("http://{addr}/v1/profiles"))
+            .call()
+            .unwrap()
+            .into_json()
+            .unwrap();
+        assert!(profiles.profiles.is_empty());
 
         server.abort();
     }

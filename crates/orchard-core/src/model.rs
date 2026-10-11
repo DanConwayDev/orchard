@@ -113,6 +113,17 @@ pub struct ReviewsFile {
     pub reviews: Vec<Review>,
 }
 
+/// The profiles transport: the raw kind 0 metadata each author last
+/// signed, served by `orchard-indexd` at `/v1/profiles`. Raw on
+/// purpose: kind 0 is replaceable, so a client that republishes a
+/// subset of the fields would drop the rest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfilesFile {
+    pub version: u32,
+    /// pubkey -> the metadata JSON as signed.
+    pub profiles: std::collections::BTreeMap<String, String>,
+}
+
 /// One published app in the MVP catalog: a [Listing] plus its latest [Release].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CatalogApp {

@@ -111,6 +111,14 @@ pub fn sign_profile(keys: &Keys, profile: &Profile) -> Result<Event> {
     Ok(EventBuilder::new(Kind::Metadata, metadata.to_string()).finalize(keys)?)
 }
 
+/// Publish a metadata document verbatim. The client merges against the
+/// author's latest kind 0 and republishes the whole object: kind 0 is
+/// replaceable, so a partial publish would silently drop every field
+/// not resent.
+pub fn sign_profile_raw(keys: &Keys, raw_metadata: &str) -> Result<Event> {
+    Ok(EventBuilder::new(Kind::Metadata, raw_metadata).finalize(keys)?)
+}
+
 pub fn sign_review(keys: &Keys, review: &Review) -> Result<Event> {
     let builder = EventBuilder::new(Kind::Custom(crate::KIND_REVIEW as u16), review.content.as_str())
         .tag(tag("d", &review.app_id));

@@ -257,19 +257,31 @@ trust.
 review text, `rating` = optional 0.0 to 5.0 one-decimal tag. Replaceable per (pubkey,
 app id), so editing is republishing and one identity holds one review per app; a
 malformed rating is a hard error like any other protocol violation. indexd serves the
-merged document at `/v1/reviews`; the client fetches on page open and while a page is
-open on the refresh tick. Posting requires a real Nostr sign-in: step one takes the
-secret key (nsec1 bech32 or hex, pasted or freshly generated, masked on screen), step
-two an optional display name published as a kind 0 profile (best effort, so relay
-downtime cannot block sign-in; the publish is a total overwrite, a known limitation
-until profile management is a real thing). The key persists at
-`$XDG_DATA_HOME/orchard/identity.json` (mode 0600) and reloads on launch; sign out
-ends the session but keeps the key on the device. The reviews section is collapsed by
-default; its header (count and one-decimal average, aligned with the other section
-headers) toggles it, and rows sit flush with the other page fields. Compose is a mode
-(r, or click "Write a review"): keystrokes go to the draft instead of the search box,
-digits 1 to 5 rate, Enter posts, Escape leaves compose before it closes the page.
-Sybil resistance and the web of trust stay open.
+merged document at `/v1/reviews` and the raw kind 0 metadata per pubkey at
+`/v1/profiles`; the client fetches on page open and while a page is open on the
+refresh tick. Posting requires a real Nostr sign-in: step one takes the secret key
+(nsec1 bech32 or hex, pasted or freshly generated, masked on screen), step two an
+optional display name. Publishing a name is proper profile management: the client
+merges against the author's latest kind 0 (`/v1/profiles`) and republishes the whole
+object, so fields the author already published survive; when indexd cannot answer,
+it publishes nothing rather than guess and says so in the status bar. The key
+persists at `$XDG_DATA_HOME/orchard/identity.json` (mode 0600) and reloads on
+launch; sign out ends the session but keeps the key on the device. The reviews
+section is collapsed by default; its header (count and one-decimal average, aligned
+with the other section headers) toggles it, and rows sit flush with the other page
+fields. Compose is a mode (r, or click "Write a review"): keystrokes go to the draft
+instead of the search box, digits 1 to 5 rate, Enter posts, Escape leaves compose
+before it closes the page. Sybil resistance and the web of trust stay open.
+
+**M6, header slice (built).** The top bar is the mark (a single-color orchard tree,
+the wordmark dropped), the search box centered across the full window width (an
+absolute layer spanning the bar), and two controls on the right: the channel
+dropdown (All / Flathub / Orchard / Installed replace the chip row; it stays
+visible on app pages) and the account control ("Sign in" or the reviewer's display
+name). Dropdowns are window-level layers painted after everything: a click-away
+overlay with the panel as a later sibling, anchored at the click point. The account
+control opens the same two-step sign-in form floating over the window; sign-in from
+the header does not open the review composer.
 
 **M6: reviews + web of trust; self-distribution.** CI builds Orchard's own `.flatpak`
 bundle; dogfood the update path by updating Orchard through Orchard.

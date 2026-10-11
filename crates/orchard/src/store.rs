@@ -127,10 +127,19 @@ pub struct StoreRoot {
     /// for an optional published name.
     signin_open: bool,
     signin_step: SigninStep,
+    /// Where the sign-in form shows: the header account panel or the
+    /// reviews section of the open page.
+    signin_origin: SigninOrigin,
+    /// The header sign-in panel's anchor (the click point).
+    signin_anchor: Option<gpui::Point<gpui::Pixels>>,
     /// The key parsed in step one, signed in at the end of step two.
     pending_keys: Option<nostr::prelude::Keys>,
     /// The nsec of a freshly generated key, shown once for backup.
     new_key_notice: Option<String>,
+    /// The channel dropdown is open, anchored at the click point.
+    channel_menu: Option<gpui::Point<gpui::Pixels>>,
+    /// The account dropdown is open, anchored at the click point.
+    account_menu: Option<gpui::Point<gpui::Pixels>>,
     /// Compose mode: keystrokes go to the review draft, not the search
     /// box or the page's type-to-close. Entered by clicking the compose
     /// box or pressing r on a page; left by Escape or a successful post.
@@ -200,8 +209,12 @@ impl StoreRoot {
             reviewer: load_reviewer(),
             signin_open: false,
             signin_step: SigninStep::Key,
+            signin_origin: SigninOrigin::Reviews,
+            signin_anchor: None,
             pending_keys: None,
             new_key_notice: None,
+            channel_menu: None,
+            account_menu: None,
             composing: false,
             review_draft: (None, String::new()),
             review_cursor: 0,
@@ -219,6 +232,13 @@ impl StoreRoot {
             lightbox: None,
             list_handle: UniformListScrollHandle::new(),
         };
+
+        // a saved reviewer signs back in automatically; their profile
+        // name resolves in the background when the local record is
+        // missing one
+        if this.reviewer.is_some() {
+            this.resolve_reviewer_name(cx);
+        }
 
         // Orchard channel: read the catalog over HTTP from the in-process
         // indexd (the client is the remote), fall back to the file. Blocking
@@ -365,16 +385,8 @@ impl StoreRoot {
             self.lightbox = None;
             // a half-written review belongs to the app it was for
             self.composing = false;
-            self.signin_open = false;
-            self.signin_step = SigninStep::Key;
-            self.pending_keys = None;
-            self.new_key_notice = None;
             self.reviews_expanded = false;
-            self.review_draft = (None, String::new());
-            self.review_cursor = 0;
-            self.review_anchor = None;
-            self.review_layout = None;
-            self.review_error = None;
+            self.close_signin();
         }
         if self.page_open {
             return;
@@ -673,15 +685,26 @@ impl StoreRoot {
         if self.reviewer.is_some() {
             self.composing = true;
         } else {
+            self.close_signin();
             self.signin_open = true;
-            self.signin_step = SigninStep::Key;
-            self.pending_keys = None;
-            self.new_key_notice = None;
-            self.review_draft = (None, String::new());
-            self.review_cursor = 0;
-            self.review_anchor = None;
-            self.review_layout = None;
+            self.signin_origin = SigninOrigin::Reviews;
         }
+        cx.notify();
+    }
+
+    /// Open the header account panel: the sign-in form when signed
+    /// out, a session menu when not. Any open dropdown closes first.
+    fn open_account_menu(&mut self, anchor: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
+        self.channel_menu = None;
+        if self.reviewer.is_some() {
+            self.account_menu = Some(anchor);
+            cx.notify();
+            return;
+        }
+        self.close_signin();
+        self.signin_open = true;
+        self.signin_origin = SigninOrigin::Header;
+        self.signin_anchor = Some(anchor);
         cx.notify();
     }
 
@@ -742,41 +765,102 @@ impl StoreRoot {
         };
         let name = self.review_draft.1.trim().to_string();
         let name = (!name.is_empty()).then_some(name);
+        let from_reviews = self.signin_origin == SigninOrigin::Reviews;
         cx.spawn(async move |this, cx| {
             use nostr::key::GetPublicKey as _;
             let done = cx.background_executor().spawn(async move {
                 save_reviewer(&keys, name.as_deref())?;
+                let pubkey = keys.get_public_key()?.to_string();
+                let mut warning = None;
                 if let Some(published) = &name {
-                    // best effort: a review still reads fine as a
-                    // pubkey until the profile propagates
-                    if let Err(err) = announce_reviewer(&keys, published) {
-                        eprintln!("profile announce failed: {err:#}");
+                    // proper profile management: merge against the
+                    // author's latest kind 0 so every field they ever
+                    // published survives; when indexd cannot answer,
+                    // publish nothing rather than guess
+                    match fetch_profile_raws() {
+                        Ok(raws) => {
+                            let merged = merge_profile_raw(
+                                raws.get(&pubkey).map(String::as_str),
+                                published,
+                            );
+                            if let Err(err) = send_profile(&keys, &merged) {
+                                warning = Some(format!("profile publish failed: {err:#}"));
+                            }
+                        }
+                        Err(err) => {
+                            warning = Some(format!(
+                                "could not read your existing profile ({err:#}); \
+                                 the name is kept on this device only"
+                            ));
+                        }
                     }
                 }
-                Ok::<_, anyhow::Error>(Reviewer {
-                    pubkey: keys.get_public_key()?.to_string(),
-                    name,
-                    keys,
-                })
+                Ok::<_, anyhow::Error>((
+                    Reviewer {
+                        pubkey,
+                        name,
+                        keys,
+                    },
+                    warning,
+                ))
             }).await;
             let _ = this.update(cx, |this, cx| {
                 match done {
-                    Ok(reviewer) => {
+                    Ok((reviewer, warning)) => {
+                        let named_locally = reviewer.name.is_some();
                         this.reviewer = Some(reviewer);
                         this.signin_open = false;
+                        this.signin_anchor = None;
                         this.new_key_notice = None;
-                        this.composing = true;
+                        this.composing = from_reviews;
                         this.review_draft = (None, String::new());
                         this.review_cursor = 0;
                         this.review_anchor = None;
                         this.review_layout = None;
                         this.review_error = None;
+                        if let Some(warning) = warning {
+                            this.error = Some(warning);
+                        }
+                        if !named_locally {
+                            // an established key: their name comes from
+                            // the profile they already published
+                            this.resolve_reviewer_name(cx);
+                        }
                         // past reviews by this key pick up the new
                         // name once the profile propagates
                         this.ensure_reviews(cx);
                     }
                     Err(err) => {
                         this.review_error = Some(format!("{err:#}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Fill the signed-in reviewer's display name from their kind 0
+    /// profile when it was not chosen locally. Runs in the background;
+    /// a missing or unreachable profile leaves the pubkey fragment.
+    fn resolve_reviewer_name(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let raws = cx
+                .background_executor()
+                .spawn(async move { fetch_profile_raws() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if let Ok(raws) = raws {
+                    if let Some(reviewer) = this.reviewer.as_mut() {
+                        if reviewer.name.is_none() {
+                            if let Some(raw) = raws.get(&reviewer.pubkey) {
+                                let value: serde_json::Value =
+                                    serde_json::from_str(raw).unwrap_or_default();
+                                if let Some(name) = value["name"].as_str() {
+                                    reviewer.name = Some(name.to_string());
+                                }
+                            }
+                        }
                     }
                 }
                 cx.notify();
@@ -793,14 +877,30 @@ impl StoreRoot {
         cx.notify();
     }
 
+    /// Close the sign-in form wherever it shows, dropping any
+    /// half-entered key. The reviews draft resets with it: the shared
+    /// input belongs to whatever form opens next.
+    fn close_signin(&mut self) {
+        self.signin_open = false;
+        self.signin_anchor = None;
+        self.signin_step = SigninStep::Key;
+        self.pending_keys = None;
+        self.new_key_notice = None;
+        self.review_draft = (None, String::new());
+        self.review_cursor = 0;
+        self.review_anchor = None;
+        self.review_layout = None;
+        self.review_error = None;
+    }
+
     /// Close the detail page. Selection survives so keyboard
     /// navigation resumes where it left off.
     fn close_page(&mut self, cx: &mut Context<Self>) {
         self.page_open = false;
         self.lightbox = None;
         self.composing = false;
-        self.signin_open = false;
         self.reviews_expanded = false;
+        self.close_signin();
         cx.notify();
     }
 
@@ -1041,19 +1141,23 @@ impl StoreRoot {
         let shift = keystroke.modifiers.shift;
         let ctrl = keystroke.modifiers.control || keystroke.modifiers.platform;
 
+        // ----- dropdown menus: an open menu swallows everything but
+        // Escape; a click away closes it through the overlay -----
+        if self.channel_menu.is_some() || self.account_menu.is_some() {
+            if key == "escape" {
+                self.channel_menu = None;
+                self.account_menu = None;
+                cx.notify();
+            }
+            return;
+        }
+
         // ----- sign-in form: keystrokes go to the shared input (the
         // nsec on step one, the optional name on step two) -----
         if self.signin_open {
             match key {
                 "escape" => {
-                    self.signin_open = false;
-                    self.pending_keys = None;
-                    self.new_key_notice = None;
-                    self.review_draft = (None, String::new());
-                    self.review_cursor = 0;
-                    self.review_anchor = None;
-                    self.review_layout = None;
-                    self.review_error = None;
+                    self.close_signin();
                 }
                 "enter" => match self.signin_step {
                     SigninStep::Key => self.accept_nsec(cx),
@@ -1092,8 +1196,7 @@ impl StoreRoot {
                     // compose first, page second: a stray Escape does
                     // not throw the reader out of the app
                     self.composing = false;
-                }
-                "enter" => {
+                }"enter" => {
                     if !self.review_posting {
                         let app_id = self.selected.clone().unwrap_or_default();
                         self.post_review(&app_id, cx);
@@ -2288,8 +2391,9 @@ impl StoreRoot {
                 section = section.child(row);
             }
 
-            // compose or sign-in, depending on session state
-            if self.signin_open {
+            // compose or sign-in, depending on session state (the
+            // header hosts its own sign-in panel)
+            if self.signin_open && self.signin_origin == SigninOrigin::Reviews {
                 section = section.child(self.render_review_signin(font.clone(), cx));
             } else if self.composing {
                 section = section.child(self.render_review_compose(app_id, font.clone(), cx));
@@ -2747,25 +2851,33 @@ impl Render for StoreRoot {
             .flex_col()
             .bg(ui::inset())
             .text_color(ui::text())
-            // top bar
+            // top bar: the mark, the search centered across the full
+            // window width, channel and account controls on the right
             .child(
                 div()
+                    .relative()
+                    .h(px(46.))
                     .flex()
                     .items_center()
                     .gap_3()
                     .px_4()
-                    .py_2()
                     .border_b_1()
                     .border_color(ui::divider())
                     .bg(ui::panel())
+                    .child(ui::icon("icons/orchard.svg", 22., ui::accent()))
+                    // the search, centered on the window width: an
+                    // absolute layer spanning the bar, content centered
                     .child(
                         div()
-                            .text_size(px(ui::TEXT_SIZE_EMPHASIS))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(ui::accent())
-                            .child("Orchard"),
-                    )
-                    .child({
+                            .absolute()
+                            .left_0()
+                            .right_0()
+                            .top_0()
+                            .bottom_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child({
                         // The search input: a real caret and selection.
                         // StyledText carries the selection as a styled
                         // run; the layout handle maps byte indices to
@@ -2825,8 +2937,8 @@ impl Render for StoreRoot {
 
                         div()
                             .id("search-box")
+                            .max_w(px(460.))
                             .flex_1()
-                            .max_w(px(360.))
                             .flex()
                             .items_center()
                             .px_3()
@@ -2899,44 +3011,13 @@ impl Render for StoreRoot {
                                             .bg(ui::accent())
                                     })),
                             )
-                    })
-                    .child(div().flex_1())
-                    // source filters are a browse concern; the page
-                    // hides them
-                    .when(!page_open, |bar| {
-                        bar.child(div().flex().gap_1().children(
-                            [
-                                Filter::All,
-                                Filter::Reviewed,
-                                Filter::Publisher,
-                                Filter::Installed,
-                            ]
-                            .iter()
-                            .map(|f| {
-                                let active = *f == filter;
-                                div()
-                                    .id(("filter", *f as usize))
-                                    .px_2()
-                                    .py_1()
-                                    .rounded_sm()
-                                    .text_size(px(ui::TEXT_SIZE))
-                                    .cursor_pointer()
-                                    .when(active, |chip| {
-                                        chip.bg(ui::accent()).text_color(ui::accent_text())
-                                    })
-                                    .when(!active, |chip| {
-                                        chip.text_color(ui::text_dim()).hover(|style| {
-                                            style.bg(ui::surface())
-                                        })
-                                    })
-                                    .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
-                                        this.filter = *f;
-                                        cx.notify();
-                                    }))
-                                    .child(f.label().to_string())
-                            }),
-                        ))
                     }),
+                    )
+                    // the flex_1 keeps the right-hand controls at the
+                    // edge; the absolute layer above centers the search
+                    .child(div().flex_1())
+                    .child(self.render_channel_trigger(filter, cx))
+                    .child(self.render_account_trigger(cx)),
             )
             // body: browse (category chips + virtualized list) or the
             // full app page
@@ -3008,11 +3089,259 @@ impl Render for StoreRoot {
                         ),
                 )
             })
+            // dropdown panels and the header sign-in panel paint after
+            // everything (the lightbox included)
+            .when(self.any_layer_open(), |root| {
+                root.child(self.render_layers(window.text_style().font(), cx))
+            })
             .id("store-root")
             .on_click(cx.listener(|this, _e: &ClickEvent, window, _cx| {
                 // Keep the keyboard attached to the search context.
                 window.focus(&this.focus_handle);
             }))
+    }
+}
+
+impl StoreRoot {
+    /// Is any window-level layer (channel dropdown, account dropdown,
+    /// header sign-in panel) showing?
+    fn any_layer_open(&self) -> bool {
+        self.channel_menu.is_some()
+            || self.account_menu.is_some()
+            || (self.signin_open && self.signin_origin == SigninOrigin::Header)
+    }
+
+    /// The window-level layers, if any. The wrapper carries no
+    /// hitbox of its own; each layer is a click-away overlay with the
+    /// panel as a later sibling, so clicks on the panel stay the
+    /// panel's and every click outside closes the layer.
+    fn render_layers(&mut self, font: gpui::Font, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let mut layers = div().absolute().inset_0();
+        if self.channel_menu.is_some() {
+            layers = layers.child(self.render_channel_menu(cx));
+        }
+        if self.account_menu.is_some() {
+            layers = layers.child(self.render_account_menu(cx));
+        }
+        if self.signin_open && self.signin_origin == SigninOrigin::Header {
+            layers = layers.child(self.render_header_signin(font, cx));
+        }
+        layers.into_any_element()
+    }
+
+    /// The channel dropdown: filter options with the active one marked.
+    fn render_channel_menu(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let anchor = self.channel_menu.unwrap_or_default();
+        let left = (anchor.x - px(60.)).max(px(8.));
+        div()
+            .id("channel-menu-overlay")
+            .absolute()
+            .inset_0()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseDownEvent, _w, cx| {
+                    this.channel_menu = None;
+                    cx.notify();
+                }),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(left)
+                    .top(anchor.y + px(6.))
+                    .w(px(180.))
+                    .flex()
+                    .flex_col()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(ui::divider())
+                    .bg(ui::panel())
+                    .py_1()
+                    .children(
+                        [
+                            Filter::All,
+                            Filter::Reviewed,
+                            Filter::Publisher,
+                            Filter::Installed,
+                        ]
+                        .iter()
+                        .map(|f| {
+                            let active = *f == self.filter;
+                            div()
+                                .id(SharedString::from(format!("channel-item-{}", f.label())))
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .px_3()
+                                .py_1()
+                                .cursor_pointer()
+                                .text_size(px(ui::TEXT_SIZE))
+                                .text_color(if active {
+                                    ui::accent()
+                                } else {
+                                    ui::text()
+                                })
+                                .hover(|style| style.bg(ui::surface()))
+                                .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
+                                    this.filter = *f;
+                                    this.channel_menu = None;
+                                    cx.notify();
+                                }))
+                                .child(f.label().to_string())
+                                .children(active.then(|| "✓".to_string()))
+                        }),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// The account dropdown: the signed-in session and sign-out.
+    fn render_account_menu(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let anchor = self.account_menu.unwrap_or_default();
+        let left = (anchor.x - px(170.)).max(px(8.));
+        let display = self
+            .reviewer
+            .as_ref()
+            .map(|reviewer| reviewer.display())
+            .unwrap_or_default();
+        div()
+            .id("account-menu-overlay")
+            .absolute()
+            .inset_0()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseDownEvent, _w, cx| {
+                    this.account_menu = None;
+                    cx.notify();
+                }),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(left)
+                    .top(anchor.y + px(6.))
+                    .w(px(220.))
+                    .flex()
+                    .flex_col()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(ui::divider())
+                    .bg(ui::panel())
+                    .py_1()
+                    .child(
+                        div()
+                            .px_3()
+                            .py_1()
+                            .text_size(px(ui::TEXT_SIZE_LABEL))
+                            .text_color(ui::text_dim())
+                            .child(format!("Signed in as {display}")),
+                    )
+                    .child(
+                        div()
+                            .id("account-sign-out")
+                            .px_3()
+                            .py_1()
+                            .cursor_pointer()
+                            .text_size(px(ui::TEXT_SIZE))
+                            .text_color(ui::text())
+                            .hover(|style| style.bg(ui::surface()))
+                            .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
+                                this.account_menu = None;
+                                this.sign_out(cx);
+                            }))
+                            .child("Sign out (key stays on device)"),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// The header sign-in panel: the same two-step form the reviews
+    /// section uses, floating over the window.
+    fn render_header_signin(&mut self, font: gpui::Font, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let anchor = self.signin_anchor.unwrap_or_default();
+        let left = (anchor.x - px(280.)).max(px(8.));
+        div()
+            .id("signin-overlay")
+            .absolute()
+            .inset_0()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseDownEvent, _w, cx| {
+                    this.close_signin();
+                    cx.notify();
+                }),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(left)
+                    .top(anchor.y + px(6.))
+                    .w(px(320.))
+                    .child(self.render_review_signin(font, cx)),
+            )
+            .into_any_element()
+    }
+
+    /// The channel dropdown trigger: the active filter with a chevron.
+    fn render_channel_trigger(&mut self, filter: Filter, cx: &mut Context<Self>) -> gpui::AnyElement {
+        div()
+            .id("channel-trigger")
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .cursor_pointer()
+            .text_size(px(ui::TEXT_SIZE))
+            .text_color(ui::text())
+            .hover(|style| style.bg(ui::surface()))
+            .on_click(cx.listener(|this, event: &ClickEvent, _w, cx| {
+                this.account_menu = None;
+                this.close_signin();
+                this.channel_menu = Some(event.position());
+                cx.notify();
+            }))
+            .child(filter.label().to_string())
+            .child(ui::icon("icons/chevron_down.svg", 11., ui::text_dim()))
+            .into_any_element()
+    }
+
+    /// The account control: the sign-in entry point when signed out,
+    /// the session menu trigger when not.
+    fn render_account_trigger(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        match self.reviewer.as_ref() {
+            Some(reviewer) => {
+                let display = reviewer.display();
+                let label: String = display.chars().take(24).collect();
+                div()
+                    .id("account-trigger")
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .text_size(px(ui::TEXT_SIZE))
+                    .text_color(ui::text())
+                    .hover(|style| style.bg(ui::surface()))
+                    .on_click(cx.listener(|this, event: &ClickEvent, _w, cx| {
+                        this.channel_menu = None;
+                        this.close_signin();
+                        this.account_menu = Some(event.position());
+                        cx.notify();
+                    }))
+                    .child(label)
+                    .child(ui::icon("icons/chevron_down.svg", 11., ui::text_dim()))
+                    .into_any_element()
+            }
+            None => button("btn-sign-in-header", None, "Sign in", false)
+                .on_click(cx.listener(|this, event: &ClickEvent, _w, cx| {
+                    this.open_account_menu(event.position(), cx);
+                }))
+                .into_any_element(),
+        }
     }
 }
 
@@ -3100,9 +3429,34 @@ fn load_orchard_catalog() -> Vec<StoreApp> {
         .unwrap_or_default()
 }
 
-/// Reviews from indexd, grouped by app id (newest first within an app).
-fn load_reviews() -> anyhow::Result<HashMap<String, Vec<orchard_core::Review>>> {
+/// The raw kind 0 metadata per pubkey from indexd, for merging a new
+/// display name against the author's existing profile.
+fn fetch_profile_raws() -> anyhow::Result<std::collections::BTreeMap<String, String>> {
     let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(5))
+        .build();
+    let file: orchard_core::ProfilesFile = agent
+        .get(&format!("http://127.0.0.1:{INDEXD_PORT}/v1/profiles"))
+        .call()?
+        .into_json()?;
+    Ok(file.profiles)
+}
+
+/// Merge a new display name into the author's existing kind 0
+/// metadata. Kind 0 is replaceable, so the merge must round-trip every
+/// field the author ever published; a non-object payload (empty or
+/// corrupt) starts a fresh object.
+fn merge_profile_raw(existing: Option<&str>, name: &str) -> String {
+    let mut value: serde_json::Value = existing
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .filter(|value| value.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
+    value["name"] = serde_json::Value::String(name.to_string());
+    value.to_string()
+}
+
+/// Reviews from indexd, grouped by app id (newest first within an app).
+fn load_reviews() -> anyhow::Result<HashMap<String, Vec<orchard_core::Review>>> {    let agent = ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(5))
         .build();
     let file: orchard_core::ReviewsFile = agent
@@ -3159,6 +3513,15 @@ fn review_relays() -> Vec<String> {
 enum SigninStep {
     Key,
     Name,
+}
+
+/// Which surface hosts the sign-in form: the header account panel or
+/// the reviews section. The form state is shared; the origin decides
+/// where it renders and what a successful sign-in does next.
+#[derive(Clone, Copy, PartialEq)]
+enum SigninOrigin {
+    Header,
+    Reviews,
 }
 
 /// The signed-in reviewer: the Nostr key the reviews are signed with,
@@ -3218,19 +3581,10 @@ fn save_reviewer(keys: &nostr::prelude::Keys, name: Option<&str>) -> anyhow::Res
     Ok(())
 }
 
-/// Publish the reviewer's kind 0 profile so review authors resolve to
-/// names. Best effort: a review still reads fine as a pubkey until the
-/// profile propagates. Note: kind 0 is replaceable, so this overwrite
-/// is total; a key with an established profile loses fields not sent
-/// here (known limitation until profile management is a real thing).
-fn announce_reviewer(keys: &nostr::prelude::Keys, name: &str) -> anyhow::Result<()> {
-    let event = orchard_nostr::events::sign_profile(
-        keys,
-        &orchard_nostr::events::Profile {
-            name: Some(name.to_string()),
-            nip05: None,
-        },
-    )?;
+/// Sign and send one kind 0 metadata document (the merged profile) to
+/// the review relays. Blocking: runs on the background pool.
+fn send_profile(keys: &nostr::prelude::Keys, raw_metadata: &str) -> anyhow::Result<()> {
+    let event = orchard_nostr::events::sign_profile_raw(keys, raw_metadata)?;
     for url in review_relays() {
         orchard_nostr::relay::send(&url, std::slice::from_ref(&event))?;
     }
@@ -3330,8 +3684,7 @@ mod tests {
     use orchard_core::{CatalogApp, Publisher};
 
     #[test]
-    fn version_outdated_numeric_compare() {
-        assert!(version_outdated("0.5.21", "0.5.22"));
+    fn version_outdated_numeric_compare() {        assert!(version_outdated("0.5.21", "0.5.22"));
         assert!(version_outdated("1.2.9", "1.2.10"));
         assert!(!version_outdated("0.5.22", "0.5.22"));
         assert!(!version_outdated("0.5.23", "0.5.22"));
@@ -3345,6 +3698,31 @@ mod tests {
         // trailing numeric components mean the remote moved ahead
         assert!(version_outdated("1.2", "1.2.1"));
         assert!(!version_outdated("1.2.1", "1.2"));
+    }
+
+    #[test]
+    fn profile_merge_keeps_published_fields() {
+        // kind 0 is replaceable: the merge must round-trip everything
+        // the author already published, only the name is ours
+        let merged = merge_profile_raw(
+            Some(r#"{"name":"Old","nip05":"me@example.com","picture":"https://x/y.png"}"#),
+            "New",
+        );
+        let value: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(value["name"], "New");
+        assert_eq!(value["nip05"], "me@example.com");
+        assert_eq!(value["picture"], "https://x/y.png");
+
+        // no existing profile (fresh key): a fresh object
+        let merged = merge_profile_raw(None, "Fresh");
+        let value: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(value["name"], "Fresh");
+        assert!(value.get("nip05").is_none());
+
+        // corrupt payload: start over rather than carry junk
+        let merged = merge_profile_raw(Some("not json"), "New");
+        let value: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(value["name"], "New");
     }
 
     #[test]
