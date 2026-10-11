@@ -721,10 +721,18 @@ impl StoreRoot {
                 return;
             }
         };
+        let qr_path = match crate::qr::write_qr_png(&uri, &qr_cache_dir()) {
+            Ok(path) => path,
+            Err(err) => {
+                self.review_error = Some(format!("QR image failed: {err:#}"));
+                return;
+            }
+        };
         self.connect = Some(ConnectSession {
+            keys: keys.clone(),
+            qr_path,
             uri,
             relay: relay.clone(),
-            keys: keys.clone(),
         });
         cx.notify();
 
@@ -2542,15 +2550,17 @@ impl StoreRoot {
             .into_any_element()
     }
 
-    /// The pairing panel: the nostrconnect URI in a clickable box (the
+    /// The pairing panel: the QR and the URI, both clickable (the
     /// signer app opens on click; the URI lands on the clipboard
     /// either way), a status line, retry.
     fn render_pairing_phase(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(session) = self.connect.as_ref() else {
             return div().into_any_element();
         };
+        let qr = session.qr_path.clone();
         let uri = session.uri.clone();
         let uri_for_click = uri.clone();
+        let uri_for_qr_click = uri.clone();
         let mut panel = div()
             .w(px(440.))
             .flex()
@@ -2568,10 +2578,19 @@ impl StoreRoot {
                     .child("Sign in"),
             )
             .child(
-                div()
-                    .text_size(px(ui::TEXT_SIZE))
-                    .text_color(ui::text())
-                    .child("Click the code to pair; your signer app opens."),
+                div().flex().justify_center().child(
+                    div()
+                        .id("connect-qr")
+                        .cursor_pointer()
+                        .rounded_sm()
+                        .on_click(cx.listener(move |_this, _e: &ClickEvent, _w, cx| {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                uri_for_qr_click.clone(),
+                            ));
+                            cx.open_url(&uri_for_qr_click);
+                        }))
+                        .child(gpui::img(qr.clone()).w(px(240.)).h(px(240.))),
+                ),
             )
             .child(
                 div()
@@ -2598,6 +2617,12 @@ impl StoreRoot {
                         cx.open_url(&uri_for_click);
                     }))
                     .child(uri.clone()),
+            )
+            .child(
+                div()
+                    .text_size(px(ui::TEXT_SIZE_LABEL))
+                    .text_color(ui::text_dim())
+                    .child("Click to pair, or scan with a signer app."),
             )
             .child(
                 div()
@@ -3574,11 +3599,13 @@ fn review_relays() -> Vec<String> {
     }
 }
 
-/// A live pairing session: the ephemeral client key, the pairing URI
-/// on screen, and the relay both ends must reach. The anti-spoofing
-/// secret rides in the poll loop that waits for the connect response.
+/// A live pairing session: the ephemeral client key, the QR image and
+/// URI on screen, and the relay both ends must reach. The
+/// anti-spoofing secret rides in the poll loop that waits for the
+/// connect response.
 struct ConnectSession {
     keys: nostr::prelude::Keys,
+    qr_path: std::path::PathBuf,
     uri: String,
     relay: String,
 }
@@ -3690,6 +3717,18 @@ fn identity_path() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME").map(|home| {
         std::path::PathBuf::from(home).join(".local/share/orchard/identity.json")
     })
+}
+
+/// Where the pairing QR lands: the XDG cache when set, `$HOME/.cache`
+/// otherwise, /tmp last. Unique names per call dodge the image cache.
+fn qr_cache_dir() -> std::path::PathBuf {
+    if let Some(cache) = std::env::var_os("XDG_CACHE_HOME") {
+        return std::path::PathBuf::from(cache).join("orchard");
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return std::path::PathBuf::from(home).join(".cache/orchard");
+    }
+    std::env::temp_dir().join("orchard")
 }
 
 /// The relay the connect channel rides: a public NIP-46 relay, so a
