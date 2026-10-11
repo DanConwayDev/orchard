@@ -124,6 +124,12 @@ pub struct StoreRoot {
     follows: std::collections::HashSet<String>,
     /// A follows fetch in flight.
     follows_fetching: bool,
+    /// The reviewer contact-list graph from indexd: reviewer pubkey
+    /// -> the pubkeys their kind 3 follows. Public data; the
+    /// distance-2 set is computed from it locally.
+    graph: std::collections::BTreeMap<String, Vec<String>>,
+    /// A graph fetch in flight.
+    graph_fetching: bool,
     /// The reviews list is collapsed by default; the header toggles it.
     reviews_expanded: bool,
     /// The signed-in reviewer: a NIP-46 session (the remote signer's
@@ -213,6 +219,8 @@ impl StoreRoot {
             reviews_fetching: false,
             follows: Default::default(),
             follows_fetching: false,
+            graph: Default::default(),
+            graph_fetching: false,
             reviews_expanded: false,
             reviewer: load_reviewer(),
             signin_modal: false,
@@ -256,6 +264,8 @@ impl StoreRoot {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.apply_orchard_apps(orchard_apps, cx);
+                // the reviewer graph is public data, no session needed
+                this.ensure_graph(cx);
                 // a session restored from identity.json learns its
                 // circle right away, not on the first tick
                 if this.reviewer.is_some() {
@@ -282,6 +292,8 @@ impl StoreRoot {
                     // reviews only move while somebody is looking
                     if this.page_open {
                         this.ensure_reviews(cx);
+                        // the graph feeds the same pages' two-hop marks
+                        this.ensure_graph(cx);
                     }
                     // a restored session picks its circle up here
                     if this.reviewer.is_some() && this.follows.is_empty() {
@@ -612,6 +624,37 @@ impl StoreRoot {
     }
 
     // ----- reviews (kind 30065) -----
+
+    /// Fetch the reviewer contact-list graph from indexd (startup and
+    /// the refresh tick; the crawler over there refreshes on its own
+    /// cadence). Page-independent: any open reviews section renders
+    /// from it.
+    fn ensure_graph(&mut self, cx: &mut Context<Self>) {
+        if self.graph_fetching {
+            return;
+        }
+        self.graph_fetching = true;
+        cx.spawn(async move |this, cx| {
+            let fetched = cx
+                .background_executor()
+                .spawn(async move { load_graph() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.graph_fetching = false;
+                match fetched {
+                    Ok(graph) => {
+                        this.graph = graph;
+                        cx.notify();
+                    }
+                    Err(err) => {
+                        // keep the old graph; the next tick retries
+                        eprintln!("graph fetch failed: {err:#}");
+                    }
+                }
+            });
+        })
+        .detach();
+    }
 
     /// Fetch the reviews document from indexd (once per page open; the
     /// refresh loop repeats the call while a page is open). The whole
@@ -2468,7 +2511,41 @@ impl gpui::Render for TextTooltip {
 /// Is this review written by the app's own publisher?
 fn is_publisher_review(review: &orchard_core::Review, publisher: Option<&str>) -> bool {
     publisher == Some(review.pubkey.as_str())
-}/// Is this reviewer's key new to the feed (first seen under a week
+}
+
+impl StoreRoot {
+    /// Reviewers two steps away: followed by someone the signed-in
+    /// identity follows, not followed directly, never the identity
+    /// itself. Personal interpretation of the public graph, computed
+    /// from small sets.
+    fn circle2(&self) -> std::collections::HashSet<String> {
+        circle2_set(
+            &self.follows,
+            &self.graph,
+            self.reviewer.as_ref().map(|r| r.signer_pubkey.as_str()),
+        )
+    }
+}
+
+/// The two-hop set: everything the identity's follows follow, minus
+/// the follows themselves and the identity.
+fn circle2_set(
+    follows: &std::collections::HashSet<String>,
+    graph: &std::collections::BTreeMap<String, Vec<String>>,
+    me: Option<&str>,
+) -> std::collections::HashSet<String> {
+    let mut set = std::collections::HashSet::new();
+    for followed in follows {
+        for pk in graph.get(followed).into_iter().flatten() {
+            if Some(pk.as_str()) != me && !follows.contains(pk) {
+                set.insert(pk.clone());
+            }
+        }
+    }
+    set
+}
+
+/// Is this reviewer's key new to the feed (first seen under a week
 /// ago)? Absence from the table means unknown age, never new.
 fn is_new_key(
     first_seen: &std::collections::BTreeMap<String, u64>,
@@ -2495,6 +2572,7 @@ struct ReviewsAggregate {
     publisher_reviews: usize,
     circle: usize,
     circle_average: Option<f32>,
+    circle2: usize,
 }
 
 fn reviews_aggregate(
@@ -2503,6 +2581,7 @@ fn reviews_aggregate(
     first_seen: &std::collections::BTreeMap<String, u64>,
     now: i64,
     follows: &std::collections::HashSet<String>,
+    circle2: &std::collections::HashSet<String>,
 ) -> ReviewsAggregate {
     let mut aggregate = ReviewsAggregate::default();
     let mut rated: Vec<f32> = Vec::new();
@@ -2523,6 +2602,8 @@ fn reviews_aggregate(
             if let Some(rating) = review.rating {
                 circle_rated.push(rating);
             }
+        } else if circle2.contains(&review.pubkey) {
+            aggregate.circle2 += 1;
         }
     }
     aggregate.average = (!rated.is_empty())
@@ -2557,6 +2638,7 @@ impl StoreRoot {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(i64::MAX);
+        let circle2_set = self.circle2();
         let ReviewsAggregate {
             average,
             counted,
@@ -2564,7 +2646,15 @@ impl StoreRoot {
             publisher_reviews,
             circle,
             circle_average,
-        } = reviews_aggregate(&reviews, publisher, &self.first_seen, now, &self.follows);
+            circle2,
+        } = reviews_aggregate(
+            &reviews,
+            publisher,
+            &self.first_seen,
+            now,
+            &self.follows,
+            &circle2_set,
+        );
         let label = if reviews.is_empty() {
             "No reviews yet".to_string()
         } else {
@@ -2620,6 +2710,9 @@ impl StoreRoot {
                 }
                 notes.push(circle_note);
             }
+            if circle2 > 0 {
+                notes.push(format!("{circle2} in your circle's circle"));
+            }
             if !notes.is_empty() {
                 body = body.child(
                     div()
@@ -2638,6 +2731,7 @@ impl StoreRoot {
                 let flagged_publisher = is_publisher_review(review, publisher);
                 let fresh = is_new_key(&self.first_seen, &review.pubkey, now);
                 let in_circle = self.follows.contains(&review.pubkey);
+                let in_circle2 = !in_circle && circle2_set.contains(&review.pubkey);
                 let mut row = div().flex().flex_col().gap_1().w_full().child(
                     div()
                         .flex()
@@ -2693,6 +2787,25 @@ impl StoreRoot {
                                     .into()
                                 })
                                 .child(ui::icon("icons/person.svg", 11., ui::accent()))
+                        }))
+                        .children(in_circle2.then(|| {
+                            // the two-hop glyph: a reviewer someone in
+                            // the circle follows. Dimmer than the
+                            // circle glyph on purpose: one step
+                            // further from you. Same hover rules.
+                            div()
+                                .id(SharedString::from(format!("circle2-{index}")))
+                                .flex_none()
+                                .hover(|style| style.bg(gpui::transparent_black()))
+                                .tooltip(|_window, cx| {
+                                    cx.new(|_| {
+                                        TextTooltip(
+                                            "In your circle's circle: followed by someone you follow",
+                                        )
+                                    })
+                                    .into()
+                                })
+                                .child(ui::icon("icons/person.svg", 11., ui::text_dim()))
                         })),
                 );
                 if !review.content.is_empty() {
@@ -3833,6 +3946,19 @@ fn load_reviews() -> anyhow::Result<(
     Ok((grouped, file.first_seen))
 }
 
+/// Fetch the reviewer contact-list graph from indexd. Blocking: runs
+/// on the background pool.
+fn load_graph() -> anyhow::Result<std::collections::BTreeMap<String, Vec<String>>> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(5))
+        .build();
+    let file: orchard_core::GraphFile = agent
+        .get(&format!("http://127.0.0.1:{INDEXD_PORT}/v1/graph"))
+        .call()?
+        .into_json()?;
+    Ok(file.graph)
+}
+
 /// Sign and send one review event through the signer, then publish it
 /// to the review relays. Blocking: runs on the background pool.
 fn post_review(reviewer: &Reviewer, app_id: &str, rating: f32, content: String) -> anyhow::Result<()> {
@@ -4222,6 +4348,7 @@ mod tests {
             &Default::default(),
             0,
             &Default::default(),
+            &Default::default(),
         );
         assert_eq!(aggregate.average, Some(1.0));
         assert_eq!(aggregate.counted, 1);
@@ -4239,7 +4366,8 @@ mod tests {
         first_seen.insert("fresh".to_string(), 0);
         // the fresh key is first seen a minute before now; the other
         // key is absent from the table, which means unknown, not new
-        let aggregate = reviews_aggregate(&reviews, None, &first_seen, 60, &Default::default());
+        let aggregate =
+            reviews_aggregate(&reviews, None, &first_seen, 60, &Default::default(), &Default::default());
         assert_eq!(aggregate.average, Some(3.0));
         assert_eq!(aggregate.counted, 2);
         assert_eq!(aggregate.new_keys, 1);
@@ -4272,7 +4400,8 @@ mod tests {
         follows.insert("mute".to_string());
         let mut first_seen = std::collections::BTreeMap::new();
         first_seen.insert("friend".to_string(), 0);
-        let aggregate = reviews_aggregate(&reviews, None, &first_seen, 60, &follows);
+        let aggregate =
+            reviews_aggregate(&reviews, None, &first_seen, 60, &follows, &Default::default());
         assert_eq!(aggregate.circle, 2);
         assert_eq!(aggregate.circle_average, Some(4.0));
         // the global aggregate is unchanged by the circle lens
@@ -4280,5 +4409,35 @@ mod tests {
         assert_eq!(aggregate.counted, 3);
         // the followed key also shows its sprout
         assert_eq!(aggregate.new_keys, 1);
+    }
+
+    #[test]
+    fn circle2_is_two_hops_from_the_graph() {
+        // the identity ("me") follows friend and mute; friend follows
+        // twohop, the identity themself, and someone already followed
+        let mut follows = std::collections::HashSet::new();
+        follows.insert("friend".to_string());
+        follows.insert("mute".to_string());
+        let mut graph = std::collections::BTreeMap::new();
+        graph.insert(
+            "friend".to_string(),
+            vec![
+                "twohop".to_string(),
+                "me".to_string(),
+                "mute".to_string(),
+            ],
+        );
+        let two = circle2_set(&follows, &graph, Some("me"));
+        assert_eq!(two, std::collections::HashSet::from_iter(["twohop".to_string()]));
+
+        // the aggregate counts a two-hop review in circle2, not circle
+        let reviews = vec![trust_review("twohop", Some(3.0)), trust_review("stranger", Some(2.0))];
+        let aggregate =
+            reviews_aggregate(&reviews, None, &Default::default(), 0, &follows, &two);
+        assert_eq!(aggregate.circle, 0);
+        assert_eq!(aggregate.circle2, 1);
+        assert_eq!(aggregate.counted, 2);
+        // signed out there are no follows, so no two hops at all
+        assert!(circle2_set(&Default::default(), &graph, None).is_empty());
     }
 }

@@ -369,6 +369,19 @@ Pointer-following (NIP-65 kind 10002, "my events live over here") is the future
 edge for self-hosting publishers, fetched by indexd on demand; not part of this
 floor.
 
+**M6, distance-2 slice (built).** The web of trust extends two hops without
+learning anything about anyone: indexd crawls the contact lists of known reviewers
+(the authors of review events in its feed) with one batched read-only anonymous REQ
+per relay (newest kind 3 per author wins), refreshes each entry on a ten-minute
+cadence, and serves the result at `/v1/graph` (`GraphFile`: reviewer -> followed
+pubkeys). The client computes the two-hop set locally: everything the identity's
+follows follow, minus the follows and the identity. Signed out, there are no
+follows and therefore no two hops. Two-hop reviewers carry a dimmer person glyph
+("In your circle's circle: followed by someone you follow") and the trust line
+gains "n in your circle's circle"; the circle and global aggregates are unchanged.
+Absence stamps too: a reviewer with no contact list on a relay is not re-asked
+every tick, only after the cadence.
+
 **M6: reviews + web of trust; self-distribution.** CI builds Orchard's own `.flatpak`
 bundle; dogfood the update path by updating Orchard through Orchard.
 

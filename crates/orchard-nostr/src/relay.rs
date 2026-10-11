@@ -163,22 +163,28 @@ pub fn send(relay_url: &str, events: &[Event]) -> Result<()> {    let (mut socke
     Ok(())
 }
 
-/// One read-only, anonymous query for a key's kind 3 contact list:
-/// connect, REQ (kinds [3], authors [pubkey], limit 1), read until
-/// EOSE or the deadline, return the newest event's `p` tag pubkeys.
-/// Blocking with a hard deadline; run on a worker thread. The fetch
-/// carries only the key: no read receipt, no profile exposure.
-pub fn fetch_contacts(relay_url: &str, pubkey: &str, timeout: Duration) -> Result<Vec<String>> {
+/// One read-only, anonymous query for many keys' kind 3 contact
+/// lists in a single REQ: connect, REQ (kinds [3], authors [...]),
+/// read until EOSE or the deadline, keep the newest event per author,
+/// return one `(pubkey, followed pubkeys)` pair per author with an
+/// event on the relay. Blocking with a hard deadline; run on a worker
+/// thread. The fetch carries only the keys: no read receipt, no
+/// profile exposure.
+pub fn fetch_contact_lists(
+    relay_url: &str,
+    pubkeys: &[String],
+    timeout: Duration,
+) -> Result<Vec<(String, Vec<String>)>> {
     let req = serde_json::json!([
         "REQ",
         "orchard-contacts",
-        { "kinds": [Kind::ContactList], "authors": [pubkey], "limit": 1u16 },
+        { "kinds": [Kind::ContactList], "authors": pubkeys },
     ])
     .to_string();
     let (mut socket, _response) = tungstenite::connect(relay_url)?;
     crate::connect::set_read_timeout(&mut socket, timeout);
     socket.send(Message::text(req))?;
-    let mut contacts: Vec<String> = Vec::new();
+    let mut newest: std::collections::HashMap<String, (u64, Vec<String>)> = Default::default();
     loop {
         let message = match socket.read() {
             Ok(message) => message,
@@ -204,11 +210,7 @@ pub fn fetch_contacts(relay_url: &str, pubkey: &str, timeout: Duration) -> Resul
                             .get(2)
                             .ok_or_else(|| anyhow::anyhow!("EVENT frame without event"))?;
                         let event: Event = serde_json::from_value(raw.clone())?;
-                        // guard against relays that ignore the authors
-                        // filter; only the newest kind 3 wins
-                        if event.kind == Kind::ContactList && event.pubkey.to_string() == pubkey {
-                            contacts = contacts_from_event(&event);
-                        }
+                        absorb_contact_event(&mut newest, &event, pubkeys);
                     }
                     Some("EOSE") => break,
                     _ => {}
@@ -219,7 +221,41 @@ pub fn fetch_contacts(relay_url: &str, pubkey: &str, timeout: Duration) -> Resul
             _ => {}
         }
     }
-    Ok(contacts)
+    Ok(newest
+        .into_iter()
+        .map(|(pubkey, (_, follows))| (pubkey, follows))
+        .collect())
+}
+
+/// Newest kind 3 per requested author wins; anything else (other
+/// kinds, authors the relay threw in against the filter) is ignored.
+fn absorb_contact_event(
+    newest: &mut std::collections::HashMap<String, (u64, Vec<String>)>,
+    event: &Event,
+    pubkeys: &[String],
+) {
+    let pubkey = event.pubkey.to_string();
+    if event.kind != Kind::ContactList || !pubkeys.contains(&pubkey) {
+        return;
+    }
+    let created = event.created_at.as_secs();
+    let known = newest.get(&pubkey).map(|(created, _)| *created).unwrap_or(0);
+    if known <= created {
+        newest.insert(pubkey, (created, contacts_from_event(event)));
+    }
+}
+
+/// One read-only, anonymous query for a key's kind 3 contact list:
+/// the batched query narrowed to one author. Blocking with a hard
+/// deadline; run on a worker thread. The fetch carries only the key:
+/// no read receipt, no profile exposure.
+pub fn fetch_contacts(relay_url: &str, pubkey: &str, timeout: Duration) -> Result<Vec<String>> {
+    let keys = [pubkey.to_string()];
+    Ok(fetch_contact_lists(relay_url, &keys, timeout)?
+        .into_iter()
+        .next()
+        .map(|(_, follows)| follows)
+        .unwrap_or_default())
 }
 
 /// The `p` tag pubkeys of a contact-list event, in tag order.
@@ -265,5 +301,58 @@ mod tests {
         assert_eq!(contacts.len(), 2);
         assert!(contacts[0].starts_with("aaaaaaaa"));
         assert!(contacts[1].starts_with("bbbbbbbb"));
+    }
+
+    /// The graph crawl's absorb rule: newest kind 3 per requested
+    /// author wins; other kinds and unrequested authors never land.
+    #[test]
+    fn absorb_contact_event_keeps_newest_per_author() {
+        let keys = Keys::generate();
+        let other = Keys::generate();
+        let mut requested = [keys.get_public_key().unwrap().to_string()];
+        let pk = requested[0].clone();
+
+        let old = EventBuilder::new(Kind::ContactList, "")
+            .custom_created_at(Timestamp::from_secs(100))
+            .tag(Tag::custom("p", ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]))
+            .finalize(&keys)
+            .unwrap();
+        let new = EventBuilder::new(Kind::ContactList, "")
+            .custom_created_at(Timestamp::from_secs(200))
+            .tag(Tag::custom("p", ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]))
+            .tag(Tag::custom("p", ["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"]))
+            .finalize(&keys)
+            .unwrap();
+        // someone else's contact list rides along against the filter
+        let stranger = EventBuilder::new(Kind::ContactList, "")
+            .custom_created_at(Timestamp::from_secs(300))
+            .finalize(&other)
+            .unwrap();
+        // same author, wrong kind
+        let profile = EventBuilder::new(Kind::Metadata, "")
+            .custom_created_at(Timestamp::from_secs(400))
+            .finalize(&keys)
+            .unwrap();
+
+        let mut newest = Default::default();
+        absorb_contact_event(&mut newest, &old, &requested);
+        absorb_contact_event(&mut newest, &new, &requested);
+        absorb_contact_event(&mut newest, &stranger, &requested);
+        absorb_contact_event(&mut newest, &profile, &requested);
+
+        assert_eq!(newest.len(), 1);
+        let (created, follows) = &newest[&pk];
+        assert_eq!(*created, 200);
+        assert_eq!(follows.len(), 2);
+        assert!(follows[0].starts_with("bbbbbbbb"));
+
+        // an older event than the stored one cannot win
+        let stale = EventBuilder::new(Kind::ContactList, "")
+            .custom_created_at(Timestamp::from_secs(150))
+            .finalize(&keys)
+            .unwrap();
+        absorb_contact_event(&mut newest, &stale, &requested);
+        assert_eq!(newest[&pk].0, 200);
+        assert_eq!(requested.len(), 1);
     }
 }

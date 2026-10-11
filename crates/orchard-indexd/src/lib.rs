@@ -104,6 +104,14 @@ pub trait CatalogDocument: Send + Sync + 'static {
             profiles: std::collections::BTreeMap::new(),
         }
     }
+
+    /// The reviewer contact-list graph. Static files carry none.
+    fn graph(&self) -> orchard_core::GraphFile {
+        orchard_core::GraphFile {
+            version: 1,
+            graph: Default::default(),
+        }
+    }
 }
 
 impl CatalogDocument for CatalogFile {
@@ -118,6 +126,9 @@ impl CatalogDocument for CatalogFile {
 pub struct NostrCatalog {
     pub base: CatalogFile,
     pub feed: Arc<Mutex<orchard_nostr::Feed>>,
+    /// The crawled reviewer contact-list graph, refreshed by the
+    /// crawler thread.
+    pub graph: Arc<Mutex<GraphStore>>,
 }
 
 impl CatalogDocument for NostrCatalog {
@@ -146,6 +157,10 @@ impl CatalogDocument for NostrCatalog {
                 .profile_raws(),
         }
     }
+
+    fn graph(&self) -> orchard_core::GraphFile {
+        self.graph.lock().expect("graph lock poisoned").file()
+    }
 }
 
 /// Shared server state: the catalog document (and the OCI index derived
@@ -164,6 +179,101 @@ pub struct RelayConfig {
     pub cache: Option<std::path::PathBuf>,
 }
 
+/// The crawled reviewer graph plus per-reviewer crawl times. The
+/// crawler thread refreshes entries on a fixed cadence; the endpoint
+/// serves whatever is here.
+#[derive(Default)]
+pub struct GraphStore {
+    graph: std::collections::BTreeMap<String, Vec<String>>,
+    crawled: std::collections::BTreeMap<String, std::time::Instant>,
+}
+
+/// How often the crawler wakes to look for new reviewers.
+const GRAPH_TICK: std::time::Duration = std::time::Duration::from_secs(60);
+/// How stale a crawled contact list may get before it is refetched.
+const GRAPH_REFRESH: std::time::Duration = std::time::Duration::from_secs(600);
+/// The one-shot REQ deadline per relay.
+const GRAPH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+impl GraphStore {
+    /// Reviewers to crawl now: in the reviewer set and either never
+    /// crawled or last crawled longer ago than the refresh cadence.
+    fn pending(&self, reviewers: &[String], cadence: std::time::Duration) -> Vec<String> {
+        reviewers
+            .iter()
+            .filter(|pubkey| {
+                self.crawled
+                    .get(*pubkey)
+                    .is_none_or(|at| at.elapsed() >= cadence)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Absorb one relay's answer for a batch. Requested authors with
+    /// no event on the relay stamp anyway: absence is an answer (no
+    /// contact list there), so the crawl does not re-ask every tick.
+    fn absorb(&mut self, found: Vec<(String, Vec<String>)>, requested: &[String]) {
+        let now = std::time::Instant::now();
+        for (pubkey, follows) in found {
+            self.graph.insert(pubkey.clone(), follows);
+            self.crawled.insert(pubkey, now);
+        }
+        for pubkey in requested {
+            self.crawled.entry(pubkey.clone()).or_insert(now);
+        }
+    }
+
+    /// The served document: a copy of the graph.
+    fn file(&self) -> orchard_core::GraphFile {
+        orchard_core::GraphFile {
+            version: 1,
+            graph: self.graph.clone(),
+        }
+    }
+}
+
+/// Crawl the contact lists of known reviewers: the reviewers come
+/// from the feed's review authors, the kind 3s from one batched
+/// read-only REQ per relay. Blocking loop; one thread.
+fn spawn_graph_crawler(
+    urls: Vec<String>,
+    feed: Arc<Mutex<orchard_nostr::Feed>>,
+    graph: Arc<Mutex<GraphStore>>,
+) {
+    std::thread::Builder::new()
+        .name("orchard-graph".into())
+        .spawn(move || loop {
+            std::thread::sleep(GRAPH_TICK);
+            let reviewers: Vec<String> = {
+                let feed = feed.lock().expect("feed lock poisoned");
+                let mut seen: Vec<String> = Vec::new();
+                for review in feed.reviews().reviews {
+                    if !seen.contains(&review.pubkey) {
+                        seen.push(review.pubkey);
+                    }
+                }
+                seen
+            };
+            if reviewers.is_empty() {
+                continue;
+            }
+            let pending = graph.lock().expect("graph lock poisoned").pending(&reviewers, GRAPH_REFRESH);
+            if pending.is_empty() {
+                continue;
+            }
+            for url in &urls {
+                match orchard_nostr::relay::fetch_contact_lists(url, &pending, GRAPH_TIMEOUT) {
+                    Ok(found) => {
+                        graph.lock().expect("graph lock poisoned").absorb(found, &pending)
+                    }
+                    Err(err) => eprintln!("graph: {url}: {err:#}"),
+                }
+            }
+        })
+        .expect("spawning the graph crawler");
+}
+
 /// Build the axum router for a state.
 pub fn router(state: ServerState) -> Router {
     Router::new()
@@ -172,6 +282,7 @@ pub fn router(state: ServerState) -> Router {
         .route("/v1/catalog", get(catalog))
         .route("/v1/reviews", get(reviews))
         .route("/v1/profiles", get(profiles))
+        .route("/v1/graph", get(graph))
         .with_state(state)
 }
 
@@ -179,7 +290,7 @@ async fn root() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "service": "orchard-indexd",
         "description": "Orchard's local catalog service",
-        "endpoints": ["/v1/catalog", "/v1/reviews", "/v1/profiles", "/index/{arch}"]
+        "endpoints": ["/v1/catalog", "/v1/reviews", "/v1/profiles", "/v1/graph", "/index/{arch}"]
     }))
 }
 
@@ -225,6 +336,11 @@ async fn profiles(State(state): State<ServerState>) -> Json<orchard_core::Profil
     Json(state.document.profiles())
 }
 
+/// The reviewer contact-list graph, straight from the crawler.
+async fn graph(State(state): State<ServerState>) -> Json<orchard_core::GraphFile> {
+    Json(state.document.graph())
+}
+
 /// Bind and serve. The port is reachable from the host even when Orchard runs
 /// sandboxed, because flatpak sandboxes share the network namespace by default
 /// (asserted in M2).
@@ -243,10 +359,13 @@ pub async fn serve(
         load_cache(&relays.cache, &feed);
         spawn_relay_threads(&relays.urls, Arc::clone(&feed));
         spawn_cache_writer(relays.cache, Arc::clone(&feed));
+        let graph = Arc::new(Mutex::new(GraphStore::default()));
+        spawn_graph_crawler(relays.urls.clone(), Arc::clone(&feed), Arc::clone(&graph));
         ServerState {
             document: Arc::new(NostrCatalog {
                 base: state.document.document(),
                 feed,
+                graph,
             }),
         }
     };
@@ -333,6 +452,34 @@ fn spawn_cache_writer(path: Option<std::path::PathBuf>, feed: Arc<Mutex<orchard_
 mod tests {
     use super::*;
     use orchard_core::CatalogApp;
+
+    /// The crawl selection: never-crawled reviewers go first, freshly
+    /// crawled ones wait for the cadence, and absence stamps too (a
+    /// reviewer with no contact list is not re-asked every tick).
+    #[test]
+    fn graph_store_pends_and_absorbs() {
+        let mut store = GraphStore::default();
+        let reviewers = vec!["aaaa".to_string(), "bbbb".to_string()];
+        assert_eq!(store.pending(&reviewers, GRAPH_REFRESH).len(), 2);
+
+        // one reviewer answered, the other absent: both stamp
+        store.absorb(
+            vec![("aaaa".into(), vec!["cccc".into()])],
+            &reviewers,
+        );
+        assert_eq!(store.pending(&reviewers, GRAPH_REFRESH).len(), 0);
+        assert_eq!(store.graph["aaaa"], vec!["cccc".to_string()]);
+        assert!(!store.graph.contains_key("bbbb"));
+
+        // after the cadence only the backdated entry is pending again;
+        // the freshly crawled one waits out its cadence
+        store.crawled.insert(
+            "aaaa".into(),
+            std::time::Instant::now() - std::time::Duration::from_secs(601),
+        );
+        assert_eq!(store.pending(&reviewers, GRAPH_REFRESH), vec!["aaaa".to_string()]);
+        assert_eq!(store.file().graph.len(), 1);
+    }
 
     fn sample_catalog() -> CatalogFile {
         CatalogFile {

@@ -118,6 +118,17 @@ pub struct ReviewsFile {
     pub first_seen: std::collections::BTreeMap<String, u64>,
 }
 
+/// The reviewer contact-list graph: served by `orchard-indexd` at
+/// `/v1/graph`, read by the client. Public data on purpose: the
+/// client computes personal distance (who is two steps away) from it
+/// locally, so the server never learns who is asking.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphFile {
+    pub version: u32,
+    /// Reviewer pubkey -> the pubkeys their newest kind 3 follows.
+    pub graph: std::collections::BTreeMap<String, Vec<String>>,
+}
+
 /// The profiles transport: the raw kind 0 metadata each author last
 /// signed, served by `orchard-indexd` at `/v1/profiles`. Raw on
 /// purpose: kind 0 is replaceable, so a client that republishes a
