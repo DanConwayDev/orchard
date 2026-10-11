@@ -4957,7 +4957,7 @@ fn installed_size(app_id: &str) -> Option<String> {
 
 /// True when the remote's version is strictly newer than the
 /// installed one. Dot components compare numerically; anything
-/// non-numeric is inconclusive and reads as up to date — flatpak's
+/// non-numeric is inconclusive and reads as up to date: flatpak's
 /// deploy version `1.2.95.453.g0eeebbed` must not read as an update
 /// against the appstream's `1.2.95.453`.
 fn version_outdated(installed: &str, available: &str) -> bool {

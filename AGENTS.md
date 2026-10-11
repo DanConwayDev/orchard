@@ -66,5 +66,6 @@ Revisit when gpui ships a tree without xattr 0.2.x.
 ## Docs
 
 `DESIGN.md` is the architecture record: locked decisions, the Nostr
-protocol draft, milestones M0 through M6. Update it when a decision
-changes.
+protocol draft, and the milestone history. `PUBLISHING.md` is the
+publisher guide; keep it accurate when the publish path changes. Update
+DESIGN.md when a decision changes.

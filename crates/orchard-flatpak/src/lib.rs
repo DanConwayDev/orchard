@@ -137,7 +137,7 @@ pub fn update_ref(app_id: &str) -> Command {
 }
 
 /// Summary of the remote's current commit for an app, before install:
-/// `flatpak remote-info <remote> <app>` — version and the download /
+/// `flatpak remote-info <remote> <app>`: version and the download /
 /// installed sizes of what would be installed.
 pub fn remote_info(remote: &str, app_id: &str) -> Command {
     let mut cmd = flatpak_command();
