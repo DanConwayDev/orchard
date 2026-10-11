@@ -267,7 +267,11 @@ The connect channel rides kind 24133 over a public NIP-46 relay
 (`wss://relay.nip46.com`, override with `ORCHARD_CONNECT_RELAY`) so both ends can
 reach it regardless of where the catalog mirrors live. The signer's connect response
 must echo the secret, and from then on every review and profile publish is a
-NIP-44-encrypted `sign_event` request the user approves on their device. Pasting a
+NIP-44-encrypted `sign_event` request the user approves on their device. The URI
+states the whole request surface: name and repo url, and the permissions
+`sign_event:30065,sign_event:0` (reviews and profile metadata, nothing else), so a
+capable signer shows one consent screen and decides itself whether to re-confirm
+inside the scope; signers that ignore the param just ask per signature. Pasting a
 secret key into the client was an earlier draft and is gone: the client never sees
 the identity's key, the remote signer's pubkey is the review identity. Publishing a
 name is proper profile management: the client merges against the author's latest

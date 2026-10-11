@@ -17,7 +17,7 @@ use nostr::prelude::*;
 use nostr::nips::nip44;
 use nostr::nips::nip46::{
     NostrConnectMessage, NostrConnectMethod, NostrConnectRequest, NostrConnectResponse,
-    NostrConnectUri, ResponseResult,
+    ResponseResult,
 };
 use tungstenite::{Message, WebSocket, stream::MaybeTlsStream};
 
@@ -26,21 +26,42 @@ use tungstenite::{Message, WebSocket, stream::MaybeTlsStream};
 const SIGN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The `nostrconnect://` pairing URI: the ephemeral client key, the
-/// relay both ends must reach, the app name, and the anti-spoofing
-/// secret the signer has to echo back.
+/// relay both ends must reach, who is asking, and the narrow signing
+/// scope requested. The secret must echo back in the connect
+/// response; an answer without it is spoofing.
 pub fn connect_uri(
     client_pubkey: &PublicKey,
     relay: &str,
     app_name: &str,
+    app_url: &str,
+    permissions: &str,
     secret: &str,
 ) -> Result<String> {
-    let uri = NostrConnectUri::client_with_secret(
-        *client_pubkey,
-        [RelayUrl::parse(relay)?],
-        app_name,
-        secret,
-    );
-    Ok(uri.to_string())
+    Ok(format!(
+        "nostrconnect://{client_pubkey}?relay={}&name={}&url={}&permissions={}&secret={}",
+        percent_encode(relay),
+        percent_encode(app_name),
+        percent_encode(app_url),
+        percent_encode(permissions),
+        percent_encode(secret),
+    ))
+}
+
+/// Percent-encode a query value per RFC 3986: unreserved characters
+/// pass, everything else goes out as %XX. Query values here carry
+/// colons and slashes (wss://, sign_event:30065), which the NIP-46
+/// examples encode.
+fn percent_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
 }
 
 /// Listen (blocking, up to `window`) for the signer's connect response.
@@ -216,4 +237,59 @@ fn set_read_timeout(socket: &mut WebSocket<MaybeTlsStream<std::net::TcpStream>>,
         MaybeTlsStream::Rustls(stream) => stream.get_ref().set_read_timeout(Some(timeout)),
         _ => Ok(()),
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nostr::key::GetPublicKey as _;
+
+    /// The URI carries the full request surface, percent-encoded, and
+    /// every value round-trips through a naive query parser.
+    #[test]
+    fn connect_uri_carries_scope_and_decodes() {
+        let keys = Keys::generate();
+        let pubkey = keys.get_public_key().unwrap();
+        let uri = connect_uri(
+            &pubkey,
+            "wss://relay.nip46.com",
+            "Orchard",
+            "https://github.com/Letdown2491/orchard",
+            "sign_event:30065,sign_event:0",
+            "abcd1234",
+        )
+        .unwrap();
+        assert!(uri.starts_with(&format!("nostrconnect://{pubkey}?")));
+        let query = uri.split('?').nth(1).unwrap();
+        let mut values = std::collections::BTreeMap::new();
+        for pair in query.split('&') {
+            let (key, value) = pair.split_once('=').unwrap();
+            values.insert(key.to_string(), decode(value));
+        }
+        assert_eq!(values["relay"], "wss://relay.nip46.com");
+        assert_eq!(values["name"], "Orchard");
+        assert_eq!(values["url"], "https://github.com/Letdown2491/orchard");
+        assert_eq!(values["permissions"], "sign_event:30065,sign_event:0");
+        assert_eq!(values["secret"], "abcd1234");
+    }
+
+    fn decode(value: &str) -> String {
+        let bytes = value.as_bytes();
+        let mut out = Vec::new();
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] == b'%' {
+                out.push(u8::from_str_radix(
+                    std::str::from_utf8(&bytes[index + 1..index + 3]).unwrap(),
+                    16,
+                )
+                .unwrap());
+                index += 3;
+            } else {
+                out.push(bytes[index]);
+                index += 1;
+            }
+        }
+        String::from_utf8(out).unwrap()
+    }
 }

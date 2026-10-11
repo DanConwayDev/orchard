@@ -701,20 +701,26 @@ impl StoreRoot {
     /// for "new pairing code".
     fn start_pairing(&mut self, cx: &mut Context<Self>) {
         use nostr::key::GetPublicKey as _;
-        use nostr::nips::nip19::ToBech32 as _;
         use nostr::prelude::*;
         self.review_error = None;
         let relay = connect_relay();
         let keys = Keys::generate();
         // the anti-spoofing secret: the signer echoes it back in the
-        // connect response, a pairing answer without it is noise
-        let secret = keys
-            .secret_key()
-            .to_bech32()
-            .expect("nsec bech32 encoding is infallible");
+        // connect response, a pairing answer without it is noise. A
+        // fresh key's secret hex is 64 random characters, enough for
+        // an echo token.
+        let secret = Keys::generate().secret_key().to_secret_hex();
         let client_pubkey = keys.get_public_key().expect("generated key has a pubkey");
-        let uri = match orchard_nostr::connect::connect_uri(&client_pubkey, &relay, "Orchard", &secret)
-        {
+        let uri = match orchard_nostr::connect::connect_uri(
+            &client_pubkey,
+            &relay,
+            "Orchard",
+            "https://github.com/Letdown2491/orchard",
+            // the whole request surface: reviews and profile metadata,
+            // nothing else
+            "sign_event:30065,sign_event:0",
+            &secret,
+        ) {
             Ok(uri) => uri,
             Err(err) => {
                 self.review_error = Some(format!("pairing URI failed: {err:#}"));
