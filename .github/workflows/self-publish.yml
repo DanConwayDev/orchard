@@ -13,9 +13,10 @@
 # Required repository secret:
 #   ORCHARD_NSEC  the publisher identity's secret key (nsec hex)
 # The relay list is publishing policy, versioned in
-# self/orchard.publish.toml, never a secret. GITHUB_TOKEN is the
-# registry password; the package turns public via its settings after
-# the first push.
+# self/orchard.publish.toml, never a secret. GITHUB_TOKEN is both the
+# registry password and the repository-proof credential (it refreshes
+# orchard.txt on the default branch, hence contents: write); the
+# package turns public via its settings after the first push.
 
 name: self-publish
 
@@ -24,7 +25,7 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 jobs:

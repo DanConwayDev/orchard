@@ -48,7 +48,8 @@ description-file = "description.md"     # long form, relative path; or inline `d
 icon = "https://you.example/icon.png"   # URL you host
 categories = ["Utilities"]              # AppStream categories
 license = "MIT"                         # optional
-repository = "https://github.com/you/app"   # source, shown as a link
+repository = "https://github.com/you/app"   # source, shown as a link; a github
+                                            # repo can host your proof (--prove)
 homepage = "https://you.example"        # optional; omit if the repo is the page
 
 [release]
@@ -111,10 +112,47 @@ carried one affects availability only.
 | `--out dir` | local layout directory (default `target/publish/<app-id>`) |
 | `--skip-push` | build and sign, push nothing |
 | `--skip-relays` | sign, send nothing |
+| `--prove` | after a successful publish, refresh the repository proof file (below) |
 
 Dry runs: `--skip-relays` keeps test events off the public relays entirely.
 Never point a test manifest's relays at the public rendezvous set; test
 events are real events once a relay has them.
+
+## Proving your repository
+
+The listing's `repository` link is otherwise a free claim: nothing stops
+a listing for someone else's app from naming someone else's repo. The
+proof closes that. Run with `--prove` and, after the publish lands, the
+CLI writes an `orchard.txt` to the repository's own default branch
+(via the GitHub contents API) containing your publisher key as an npub:
+
+    orchard-publish app.publish.toml --registry ghcr.io/you/your-app --prove
+
+What makes this a proof is where the file lives. Clients derive the URL
+from the listing's `repository` tag itself
+(`raw.githubusercontent.com/<owner>/<repo>/HEAD/orchard.txt`), so a
+listing and its proof sit at the same address: naming a repository
+means hosting the file at that repository, and an impersonator must
+control the real repo. The `HEAD` path resolves the default branch at
+read time, so there is nothing to keep in sync.
+
+Details worth knowing:
+
+- `--prove` needs `GITHUB_TOKEN` in the environment, with `contents:
+  write` on the repository. Without the token the step skips with a
+  note and the repo keeps whatever proof it has; the publish itself is
+  unaffected either way.
+- The token route is GitHub-only today. A manifest whose repository
+  points at another forge prints a note and proves nothing; the client
+  shows such a listing as unverified rather than guessing.
+- Until the repository is public, the raw URL does not resolve and the
+  client honestly shows unverified.
+- In the client, a proven listing wears a check beside the repository
+  link on the page and a quiet check on its catalog row. One fetch per
+  repository per session; any fetch failure is unverified, never a
+  guess.
+- The file may carry several keys, one per line (npub or hex), which
+  is how a team or a rotated key set keeps one repository proven.
 
 ## Multi-arch
 
@@ -145,7 +183,7 @@ on:
     tags: ["v*"]            # the tag is the publish switch
 
 permissions:
-  contents: read
+  contents: write           # the repository proof (--prove)
   packages: write           # ghcr push
 
 jobs:
@@ -169,11 +207,13 @@ jobs:
           ORCHARD_NSEC: ${{ secrets.ORCHARD_NSEC }}
           ORCHARD_REGISTRY_USER: ${{ github.actor }}
           ORCHARD_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # the proof write
         run: |
           export ORCHARD_PUBLISH_VERSION="${GITHUB_REF_NAME#v}"   # v1.2.3 -> 1.2.3
           target/release/orchard-publish your.publish.toml \
             --arch "${{ matrix.arch }}" \
-            --registry "ghcr.io/${GITHUB_REPOSITORY,,}"
+            --registry "ghcr.io/${GITHUB_REPOSITORY,,}" \
+            --prove
 ```
 
 Notes:
@@ -183,8 +223,12 @@ Notes:
   bearer-token challenge; other registries use their own credentials.
 - `ORCHARD_PUBLISH_VERSION` overrides the manifest's version, so one
   manifest serves every future tag.
+- `contents: write` matters: `--prove` refreshes `orchard.txt` on the
+  default branch through the `GITHUB_TOKEN`, and a read-only token
+  fails that write after the artifact and events are already out.
 - ghcr packages are private by default: flip the package public in its
-  settings after the first push, or installs cannot fetch it.
+  settings after the first push, or installs cannot fetch it (and the
+  proof file stays unreadable too).
 - The workflow fires on `v*` tags only. Pushing the branch publishes
   nothing.
 
@@ -246,6 +290,8 @@ bytes; the client fetches them directly into a local cache.
       shows it verbatim.
 - [ ] Dry run first: `--skip-relays --registry localhost:5000/...` against
       a throwaway registry, then the real run.
+- [ ] Run with `--prove` (and a `GITHUB_TOKEN` with `contents: write`)
+      so the repository link verifies in clients.
 - [ ] Profile published once (`author-name`, `nip05`) and only re-signed
       when it changes.
 - [ ] Tag pushed: `v*` is the publish switch; branch pushes publish nothing.

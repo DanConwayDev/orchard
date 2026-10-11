@@ -9,18 +9,21 @@ client, not a gatekeeper.
 
 - **Publishers** push their app as an OCI image to any registry they
   control and sign small Nostr events (listing, release, asset, profile)
-  that describe it. `PUBLISHING.md` is the guide, including a ready CI
-  workflow.
+  that describe it. `--prove` also drops a proof file into the linked
+  source repository, so the repo link is a claim clients can check.
+  `PUBLISHING.md` is the guide, including a ready CI workflow.
 - **The client** merges those events into a catalog beside Flathub's
   (read from your local AppStream), shows the sandbox permissions the
   artifact really carries, pins the release to its manifest digest, and
   installs through flatpak. Installs are refused when bytes do not match
-  the pin.
+  the pin. Proven repositories wear a check; a quiet composition line
+  says what every list is made of.
 - **Reviews are Nostr events too**, signed through your own signer over
   NIP-46 Nostr Connect: the client never holds your identity key.
   Publishers cannot review themselves into a rating, and a publisher key
   change is disclosed, with a signed handover shown as an authorized
-  migration.
+  migration. Signed in, the review list opens on your circle: the
+  people you follow first, everyone one click away.
 - **No central server.** Discovery is a rendezvous set of public relays;
   binaries live on publisher registries; the client embeds a local index
   shim so every Orchard app is a normal Flatpak-remote app, visible to

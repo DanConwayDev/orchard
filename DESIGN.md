@@ -412,8 +412,10 @@ opening items because they need the push, the signing secret, and a tag.
       user owns; never a key that passed through a session), tag `v0.1.0`, watch
       CI build and push to ghcr, flip the package public, then install Orchard
       through Orchard in the GUI and let a later tag deliver an update through it.
-      (The repo can flip public whenever; secrets and ghcr work on the private
-      repo too.)
+      (Secrets and ghcr work on the private repo too; the repository proof only
+      verifies once the repo is public, since the raw URL of a private repo does
+      not resolve. The workflow holds `contents: write` so CI's `--prove` can
+      refresh the proof file.)
 - [x] Avatars: kind 0 `picture` in the account trigger and review rows via the
       image cache; person glyph as fallback. (Built: profiles fetched and parsed
       once per refresh; avatars are round `img` crops, the glyph stands in until
@@ -595,7 +597,14 @@ opening items because they need the push, the signing secret, and a tag.
 - GPUI on Linux is its youngest backend; API churns. Pin `0.2.x`; watch signatures.
 - Sandboxed-client networking: a port bound inside the flatpak sandbox should be reachable
   from the host (network namespace shared by default), verified in M2.
-- Review spam / sybil resistance in the web of trust.
+- Review spam / sybil resistance: the ranked defense list of 2026-10-11
+  is executed and recorded in the checklist (install-moment hardening,
+  repository proof, the sort picker and review lens, the composition
+  line). What remains is accepted residual: a fresh client with no
+  circle and no history can still be flooded with noise, which the
+  composition line discloses but nothing prevents; intent is unreadable
+  and only permissions are enforceable. Relay-side friction (item 7) is
+  operator policy at the relays, parked until after dogfooding.
 - aarch64 day-one or later?
 
 **Resolved 2026-10-11:** event kinds reconciled with Zapstore's `zsp` reference
