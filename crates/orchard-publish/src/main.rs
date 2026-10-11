@@ -17,6 +17,7 @@ use nostr::prelude::*;
 
 mod artifact;
 mod manifest;
+mod proof;
 mod push;
 
 use orchard_nostr::events::{self, Asset, Listing, Profile, Release};
@@ -38,6 +39,10 @@ struct Args {
     arch: Option<String>,
     skip_relays: bool,
     skip_push: bool,
+    /// After a successful publish, write the publisher's hex key to
+    /// `orchard.txt` at the manifest's repository (a `GITHUB_TOKEN`
+    /// with `contents:write` must be set): the repository proof.
+    prove: bool,
 }
 
 fn parse_args() -> Result<Args> {
@@ -49,6 +54,7 @@ fn parse_args() -> Result<Args> {
     let mut out = None;
     let mut skip_relays = false;
     let mut skip_push = false;
+    let mut prove = false;
     let mut arch = None;
     while let Some(flag) = values.next() {
         let mut next = || {
@@ -71,6 +77,7 @@ fn parse_args() -> Result<Args> {
             "--arch" => arch = Some(next()?),
             "--skip-relays" => skip_relays = true,
             "--skip-push" => skip_push = true,
+            "--prove" => prove = true,
             other if other.starts_with('-') => bail!("unknown flag {other:?}"),
             other => {
                 if manifest_path.is_some() {
@@ -89,6 +96,7 @@ fn parse_args() -> Result<Args> {
         arch,
         skip_relays,
         skip_push,
+        prove,
     })
 }
 
@@ -257,6 +265,28 @@ fn run() -> Result<()> {
         human_bytes(built.download_size),
         human_bytes(built.installed_size)
     );
+
+    // repository proof: after a successful publish, write the
+    // publisher's key to the manifest's repository. Needs --prove and
+    // a GITHUB_TOKEN with contents:write; a local run without the
+    // token skips with a note, never an error.
+    if args.prove {
+        let repo = manifest.app.repository.as_deref().and_then(proof::github_repo);
+        match repo {
+            Some(repo) => {
+                let token = std::env::var("GITHUB_TOKEN").unwrap_or_default();
+                if token.trim().is_empty() {
+                    eprintln!("proof: --prove set but GITHUB_TOKEN is not; the repository {repo} keeps whatever proof it has");
+                } else {
+                    proof::write_proof(&repo, &publisher, token.trim())?;
+                    println!("proof: orchard.txt refreshed at {repo}");
+                }
+            }
+            None => eprintln!(
+                "proof: --prove set but the manifest's repository is not a github repo; nothing proved"
+            ),
+        }
+    }
     Ok(())
 }
 

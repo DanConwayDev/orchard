@@ -55,9 +55,11 @@ jobs:
           ORCHARD_NSEC: ${{ secrets.ORCHARD_NSEC }}
           ORCHARD_REGISTRY_USER: ${{ github.actor }}
           ORCHARD_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # v1.2.3 becomes 1.2.3
           export ORCHARD_PUBLISH_VERSION="${GITHUB_REF_NAME#v}"
           target/release/orchard-publish self/orchard.publish.toml \
             --arch "${{ matrix.arch }}" \
-            --registry "ghcr.io/${GITHUB_REPOSITORY,,}"
+            --registry "ghcr.io/${GITHUB_REPOSITORY,,}" \
+            --prove

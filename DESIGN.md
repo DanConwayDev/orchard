@@ -497,6 +497,19 @@ opening items because they need the push, the signing secret, and a tag.
       permission grants repeat in one line ("This app asks for: …"),
       colored by the worst risk present; low-risk confirms stay silent.
       Starting any action disarms every pending confirm.
+- [x] Repository proof (the anti-impersonation anchor): the listing's
+      `repository` tag stops being a free claim. `orchard-publish
+      --prove` writes `orchard.txt` (the hex pubkey derived from the
+      signing key) to the repo's default branch via the contents API
+      (needs `GITHUB_TOKEN` with `contents:write`; a local run without
+      it skips with a note); the client derives the forge raw URL from
+      the repository tag itself, so claiming a repo means hosting the
+      proof at the forge's URL. One fetch per repository per session,
+      any failure is unverified, never a guess. A verified listing
+      wears the check beside the repository link on the page and a
+      quiet check on the row. Shared format parser in
+      `orchard-core::proof`; github.com only today, other forges are
+      a recorded miss.
 - [x] Future-dated releases do not rank: the list sorts on the newest
       release date that has arrived, so an upstream pre-listing a future
       release (or re-listing one forward forever) cannot hold the top of

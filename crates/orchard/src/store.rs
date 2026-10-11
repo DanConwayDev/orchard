@@ -180,6 +180,12 @@ pub struct StoreRoot {
     nip05: std::collections::BTreeMap<String, Nip05Verdict>,
     /// Publisher keys with a NIP-05 check in flight.
     nip05_checking: Vec<String>,
+    /// Repository proofs: repository url -> the publisher keys the
+    /// forge-hosted proof file named, or None when the fetch failed
+    /// (one attempt per repository per session, never a guess).
+    repo_proofs: std::collections::BTreeMap<String, Option<Vec<String>>>,
+    /// Repositories with a proof fetch in flight.
+    repo_proof_fetching: Vec<String>,
     /// The signed-in identity's own social-relay profile fetch in
     /// flight (one per session; stops once the profile lands).
     own_profile_fetching: bool,
@@ -313,6 +319,8 @@ impl StoreRoot {
             profiles_fetching: false,
             nip05: Default::default(),
             nip05_checking: Vec::new(),
+            repo_proofs: Default::default(),
+            repo_proof_fetching: Vec::new(),
             own_profile_fetching: false,
             reviews_expanded: false,
             settings: settings.clone(),
@@ -721,6 +729,7 @@ impl StoreRoot {
             self.page_open = false;
         }
         self.ensure_nip05_checks(cx);
+        self.ensure_repo_proofs(cx);
         cx.notify();
     }
 
@@ -750,6 +759,53 @@ impl StoreRoot {
     /// signed-in identity's own claim joins the scan (the account
     /// menu wears the same check), and so do comment authors: the
     /// review rows play by the same rule.
+    /// Repository proofs for publisher rows: the forge must host the
+    /// publisher's key. One fetch per repository per session; any
+    /// failure is unverified, never a guess.
+    fn ensure_repo_proofs(&mut self, cx: &mut Context<Self>) {
+        let repos: std::collections::BTreeSet<String> = self
+            .apps
+            .iter()
+            .filter(|app| app.source == Source::Publisher)
+            .filter_map(|app| app.repository.clone())
+            .collect();
+        for repo in repos {
+            if self.repo_proofs.contains_key(&repo)
+                || self.repo_proof_fetching.contains(&repo)
+            {
+                continue;
+            }
+            let Some(url) = proof_url(&repo) else {
+                // a forge we cannot derive a proof URL for is a
+                // recorded miss: unverified, not retried per frame
+                self.repo_proofs.insert(repo, None);
+                continue;
+            };
+            self.repo_proof_fetching.push(repo.clone());
+            cx.spawn(async move |this, cx| {
+                let keys = cx
+                    .background_executor()
+                    .spawn(async move { fetch_proof_keys(&url) })
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    this.repo_proof_fetching.retain(|r| r != &repo);
+                    this.repo_proofs.insert(repo, keys);
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+    }
+
+    /// True when the repository's proof file names this publisher
+    /// key: the repo-verified fact.
+    fn repo_verified(&self, repository: &str, pubkey: Option<&str>) -> bool {
+        let Some(Some(keys)) = self.repo_proofs.get(repository) else {
+            return false;
+        };
+        pubkey.is_some_and(|key| keys.iter().any(|k| k == key))
+    }
+
     fn ensure_nip05_checks(&mut self, cx: &mut Context<Self>) {
         let mut candidates: std::collections::BTreeSet<String> = self
             .apps
@@ -2624,6 +2680,11 @@ impl StoreRoot {
                 // cannot share the original
                 let click_publisher = row_publisher.clone();
                 let install_publisher = row_publisher.clone();
+                let row_repo_ok = app.source == Source::Publisher
+                    && self.repo_verified(
+                        app.repository.as_deref().unwrap_or(""),
+                        app.publisher.as_deref(),
+                    );
 
                 div()
                     .id(SharedString::from(row_id))
@@ -2673,6 +2734,16 @@ impl StoreRoot {
                                         row.child(badge("digest ok", ui::risk_color(
                                             orchard_core::Risk::Low,
                                         )))
+                                    })
+                                    // repo-verified: the forge hosts
+                                    // this publisher key (quiet by
+                                    // default, details on the page)
+                                    .when(row_repo_ok, |row| {
+                                        row.child(ui::icon(
+                                            "icons/check.svg",
+                                            13.,
+                                            ui::risk_color(orchard_core::Risk::Low),
+                                        ))
                                     }),
                             )
                             .child(
@@ -3209,6 +3280,10 @@ impl StoreRoot {
             || self.confirm_update.as_deref() == Some(app_id.as_str()))
         .then(|| risk_echo(sandbox_metadata.as_deref()))
         .flatten();
+        // the repo-verified fact for the page's repository link
+        let page_repo_ok = app.repository.as_deref().is_some_and(|url| {
+            self.repo_verified(url, app.publisher.as_deref())
+        });
         content = content
             .child(
                 div()
@@ -3238,12 +3313,21 @@ impl StoreRoot {
                     .children(
                         app.homepage
                             .clone()
-                            .map(|url| project_link("homepage", "icons/globe.svg", url)),
+                            .map(|url| {
+                                project_link("homepage", "icons/globe.svg", url, false)
+                            }),
                     )
                     .children(
                         app.repository
                             .clone()
-                            .map(|url| project_link("repository", "icons/git.svg", url)),
+                            .map(|url| {
+                                project_link(
+                                    "repository",
+                                    "icons/git.svg",
+                                    url,
+                                    page_repo_ok,
+                                )
+                            }),
                     ),
             )
             .child(self.render_reviews(&app_id, app.publisher.as_deref(), font.clone(), cx))
@@ -5714,8 +5798,14 @@ fn human_size(bytes: u64) -> String {
 /// for this machine. This one line is the whole arch story: quiet
 /// everywhere else, told in full exactly where it matters.
 /// One clickable project link row: an icon, the URL, the host's
-/// default handler on click. Homepage and repository share the shape.
-fn project_link(id: &'static str, icon: &'static str, url: String) -> impl IntoElement {
+/// default handler on click. Homepage and repository share the shape;
+/// `verified` adds the repo-verified check beside the link.
+fn project_link(
+    id: &'static str,
+    icon: &'static str,
+    url: String,
+    verified: bool,
+) -> impl IntoElement {
     let open = url.clone();
     div()
         .id(SharedString::from(format!("link-{id}")))
@@ -5732,6 +5822,13 @@ fn project_link(id: &'static str, icon: &'static str, url: String) -> impl IntoE
         })
         .child(ui::icon(icon, 13., ui::accent()))
         .child(url)
+        .when(verified, |link| {
+            link.child(ui::icon(
+                "icons/check.svg",
+                13.,
+                ui::risk_color(orchard_core::Risk::Low),
+            ))
+        })
 }
 
 fn no_build_note(app: &StoreApp) -> String {
@@ -5983,6 +6080,40 @@ fn verify_nip05(claim: &str, pubkey: &str) -> bool {
         return false;
     };
     claim_matches_record(&format!("https://{domain}"), &local, pubkey)
+}
+
+/// The forge raw URL for a repository's proof file, derived from the
+/// repository tag itself: claiming the repo means hosting the proof
+/// at the forge's URL, so the tag stops being a free claim. GitHub
+/// today (`HEAD` resolves the default branch); other forges are
+/// unverified, never a guess.
+fn proof_url(repository: &str) -> Option<String> {
+    let rest = repository
+        .strip_prefix("https://")
+        .or_else(|| repository.strip_prefix("http://"))?
+        .trim_start_matches("www.");
+    let rest = rest.strip_prefix("github.com/")?;
+    let rest = rest.trim_end_matches('/');
+    let rest = rest.strip_suffix(".git").unwrap_or(rest);
+    let mut parts = rest.split('/');
+    let owner = parts.next()?.trim();
+    let repo = parts.next()?.trim().trim_end_matches(".git");
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "https://raw.githubusercontent.com/{owner}/{repo}/HEAD/orchard.txt"
+    ))
+}
+
+/// Fetch the proof file and parse it through the shared format.
+/// None on any failure. Blocking: runs on the background pool.
+fn fetch_proof_keys(url: &str) -> Option<Vec<String>> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(5))
+        .build();
+    let body = agent.get(url).call().ok()?.into_string().ok()?;
+    orchard_core::proof::parse_proof_keys(&body)
 }
 
 /// Sign and send one review event through the signer, then publish it

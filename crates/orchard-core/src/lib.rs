@@ -9,6 +9,7 @@ pub mod appstream;
 pub mod model;
 pub mod oci;
 pub mod permissions;
+pub mod proof;
 pub mod settings;
 
 pub use appstream::*;
