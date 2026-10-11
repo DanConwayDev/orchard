@@ -1468,18 +1468,37 @@ fn render_permissions_static(metadata: &str) -> gpui::AnyElement {
             )
         })
         .children(grants.iter().map(|grant| {
+            // the badge is fixed; the texts live in a shrinkable column
+            // so long permission lines wrap inside the box instead of
+            // painting past it
             div()
                 .flex()
-                .items_center()
+                .items_start()
                 .gap_2()
                 .text_size(px(ui::TEXT_SIZE))
-                .child(badge(risk_label(grant.risk), ui::risk_color(grant.risk)))
+                .child(
+                    badge(risk_label(grant.risk), ui::risk_color(grant.risk)).flex_none(),
+                )
                 .child(
                     div()
-                        .text_color(ui::text())
-                        .child(grant.summary.clone()),
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap_0p5()
+                        .child(
+                            div()
+                                .w_full()
+                                .text_color(ui::text())
+                                .child(grant.summary.clone()),
+                        )
+                        .children((!grant.arg.is_empty()).then(|| {
+                            div()
+                                .w_full()
+                                .text_color(ui::text_dim())
+                                .child(grant.arg.clone())
+                        })),
                 )
-                .child(div().text_color(ui::text_dim()).child(grant.arg.clone()))
         }))
         .into_any_element()
 }
