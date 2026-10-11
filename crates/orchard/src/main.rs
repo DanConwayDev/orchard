@@ -38,24 +38,25 @@ fn start_indexd(catalog: orchard_core::CatalogFile) {
                 }
             };
             let state = orchard_indexd::ServerState {
-                index: std::sync::Arc::new(orchard_indexd::StaticCatalog::new(
-                    catalog
-                        .apps
-                        .iter()
-                        .map(|app| {
-                            orchard_indexd::IndexEntry::for_ref(
-                                &app.flatpak_ref,
-                                app.digest
-                                    .clone()
-                                    .unwrap_or_else(|| "sha256:unknown".into()),
-                                0,
-                            )
-                        })
-                        .collect(),
-                )),
-                catalog: std::sync::Arc::new(catalog),
+                document: std::sync::Arc::new(catalog),
             };
-            if let Err(err) = runtime.block_on(orchard_indexd::serve(addr, state)) {
+            // relay config for the embedded instance: ORCHARD_RELAYS if
+            // set, else the local dev relay so the M3 loop works out of
+            // the box
+            let urls = match std::env::var("ORCHARD_RELAYS") {
+                Ok(value) if !value.trim().is_empty() => value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|url| !url.is_empty())
+                    .map(str::to_string)
+                    .collect(),
+                _ => vec!["ws://127.0.0.1:8008".to_string()],
+            };
+            let cache = std::env::var_os("XDG_DATA_HOME")
+                .map(std::path::PathBuf::from)
+                .map(|data| data.join("orchard/nostr-events.json"));
+            let relays = orchard_indexd::RelayConfig { urls, cache };
+            if let Err(err) = runtime.block_on(orchard_indexd::serve(addr, state, relays)) {
                 eprintln!("indexd failed: {err:#}");
             }
         })

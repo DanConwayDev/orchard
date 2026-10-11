@@ -24,7 +24,7 @@
 //!   verification.
 //! - `GET /` - service description.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use axum::extract::{Path as AxumPath, State};
 use axum::routing::get;
@@ -82,44 +82,54 @@ impl IndexEntry {
     }
 }
 
-/// Where the shim gets its index entries. In the MVP this is the static
-/// catalog file; later it is backed by the client's live Nostr state.
-pub trait CatalogSource: Send + Sync + 'static {
-    /// Index entries for the given architecture (e.g. `x86_64`, `aarch64`).
-    fn entries(&self, arch: &str) -> Vec<IndexEntry>;
+/// Where the served catalog document comes from. In the MVP this is the
+/// static catalog file; the Nostr feed wraps it in [`NostrCatalog`].
+pub trait CatalogDocument: Send + Sync + 'static {
+    /// The full catalog document to serve.
+    fn document(&self) -> CatalogFile;
 }
 
-/// A fixed catalog, useful for tests.
-#[derive(Debug, Clone)]
-pub struct StaticCatalog {
-    entries: Vec<IndexEntry>,
-}
-
-impl StaticCatalog {
-    pub fn new(entries: Vec<IndexEntry>) -> Self {
-        Self { entries }
+impl CatalogDocument for CatalogFile {
+    fn document(&self) -> CatalogFile {
+        self.clone()
     }
 }
 
-impl CatalogSource for StaticCatalog {
-    fn entries(&self, arch: &str) -> Vec<IndexEntry> {
-        let needle = format!("/{arch}/");
-        self.entries
-            .iter()
-            .filter(|e| match e.flatpak_ref() {
-                Some(r) => r.contains(&needle),
-                None => true, // entries without a ref pass through untouched
-            })
-            .cloned()
-            .collect()
+/// The base document plus a live Nostr feed. Feed rows win on app-id
+/// collisions: an app a publisher actually signed is the authoritative row,
+/// the file entry is the bootstrap fallback.
+pub struct NostrCatalog {
+    pub base: CatalogFile,
+    pub feed: Arc<Mutex<orchard_nostr::Feed>>,
+}
+
+impl CatalogDocument for NostrCatalog {
+    fn document(&self) -> CatalogFile {
+        let mut apps = self.feed.lock().expect("feed lock poisoned").catalog().apps;
+        for base_app in &self.base.apps {
+            if !apps.iter().any(|app| app.app_id == base_app.app_id) {
+                apps.push(base_app.clone());
+            }
+        }
+        apps.sort_by(|a, b| a.app_id.cmp(&b.app_id));
+        CatalogFile { version: 1, apps }
     }
 }
 
-/// Shared server state: the index source and the catalog document.
+/// Shared server state: the catalog document (and the OCI index derived
+/// from it per request).
 #[derive(Clone)]
 pub struct ServerState {
-    pub index: Arc<dyn CatalogSource>,
-    pub catalog: Arc<CatalogFile>,
+    pub document: Arc<dyn CatalogDocument>,
+}
+
+/// Relay and cache configuration for [`serve`].
+#[derive(Debug, Clone, Default)]
+pub struct RelayConfig {
+    /// NIP-01 relay URLs to subscribe to, e.g. `ws://127.0.0.1:8008`.
+    pub urls: Vec<String>,
+    /// Where to persist verified events across restarts. Absent: no cache.
+    pub cache: Option<std::path::PathBuf>,
 }
 
 /// Build the axum router for a state.
@@ -143,24 +153,136 @@ async fn index(
     State(state): State<ServerState>,
     AxumPath(arch): AxumPath<String>,
 ) -> Json<OciIndex> {
+    // derive the entries from the live document so relay-published apps
+    // show up without restarting
+    let needle = format!("/{arch}/");
+    let manifests = state
+        .document
+        .document()
+        .apps
+        .iter()
+        .filter(|app| app.flatpak_ref.contains(&needle))
+        .map(|app| {
+            IndexEntry::for_ref(
+                &app.flatpak_ref,
+                app.digest.clone().unwrap_or_else(|| "sha256:unknown".into()),
+                0,
+            )
+        })
+        .collect();
     Json(OciIndex {
         schema_version: 2,
         media_type: INDEX_MEDIA_TYPE.to_string(),
-        manifests: state.index.entries(&arch),
+        manifests,
     })
 }
 
 async fn catalog(State(state): State<ServerState>) -> Json<CatalogFile> {
-    Json((*state.catalog).clone())
+    Json(state.document.document())
 }
 
 /// Bind and serve. The port is reachable from the host even when Orchard runs
 /// sandboxed, because flatpak sandboxes share the network namespace by default
 /// (asserted in M2).
-pub async fn serve(addr: std::net::SocketAddr, state: ServerState) -> anyhow::Result<()> {
+///
+/// With [`RelayConfig`] set, verified NIP-82 events from the given relays are
+/// merged over the state's base document and cached to disk.
+pub async fn serve(
+    addr: std::net::SocketAddr,
+    state: ServerState,
+    relays: RelayConfig,
+) -> anyhow::Result<()> {
+    let state = if relays.urls.is_empty() {
+        state
+    } else {
+        let feed = Arc::new(Mutex::new(orchard_nostr::Feed::new()));
+        load_cache(&relays.cache, &feed);
+        spawn_relay_threads(&relays.urls, Arc::clone(&feed));
+        spawn_cache_writer(relays.cache, Arc::clone(&feed));
+        ServerState {
+            document: Arc::new(NostrCatalog {
+                base: state.document.document(),
+                feed,
+            }),
+        }
+    };
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, router(state)).await?;
     Ok(())
+}
+
+/// Load the event cache and absorb it into the feed. Every event is
+/// re-verified on load; corrupt or tampered entries are skipped with a note.
+fn load_cache(path: &Option<std::path::PathBuf>, feed: &Arc<Mutex<orchard_nostr::Feed>>) {
+    let Some(path) = path else { return };
+    let Ok(bytes) = std::fs::read(path) else {
+        return;
+    };
+    let Ok(jsons) = serde_json::from_slice::<Vec<String>>(&bytes) else {
+        eprintln!("nostr cache {}: unparseable, starting empty", path.display());
+        return;
+    };
+    let mut feed = feed.lock().expect("feed lock poisoned");
+    let mut accepted = 0usize;
+    for json in jsons {
+        match nostr::event::Event::from_json(json)
+            .map_err(|err| anyhow::anyhow!("{err}"))
+            .and_then(|event| feed.absorb(event))
+        {
+            Ok(true) => accepted += 1,
+            Ok(false) => {}
+            Err(err) => eprintln!("nostr cache: dropping event: {err:#}"),
+        }
+    }
+    eprintln!("nostr cache: {accepted} events loaded");
+}
+
+/// One blocking thread per relay; the threads live as long as the process.
+fn spawn_relay_threads(urls: &[String], feed: Arc<Mutex<orchard_nostr::Feed>>) {
+    for url in urls {
+        let relay_url = url.clone();
+        let feed = Arc::clone(&feed);
+        let spawned = std::thread::Builder::new()
+            .name(format!("relay-{url}"))
+            .spawn(move || {
+                orchard_nostr::relay::run_forever(&relay_url, feed, Arc::new(|| {}))
+            });
+        if spawned.is_err() {
+            eprintln!("failed to spawn relay thread for {url}");
+        }
+    }
+}
+
+/// Periodically write the feed's events to the cache when they changed.
+/// Coalesces bursts: relay event storms cost at most one write per tick.
+fn spawn_cache_writer(path: Option<std::path::PathBuf>, feed: Arc<Mutex<orchard_nostr::Feed>>) {
+    let Some(path) = path else { return };
+    if std::thread::Builder::new()
+        .name("nostr-cache".into())
+        .spawn(move || {
+            let mut signatures = Vec::new();
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                let jsons = feed.lock().expect("feed lock poisoned").event_jsons();
+                if jsons != signatures {
+                    if let Some(parent) = path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    match serde_json::to_vec(&jsons) {
+                        Ok(bytes) => {
+                            if std::fs::write(&path, bytes).is_ok() {
+                                signatures = jsons;
+                            }
+                        }
+                        Err(_) => {}
+                    }
+                }
+            }
+        })
+        .is_err()
+    {
+        eprintln!("failed to spawn nostr cache writer");
+    }
 }
 
 #[cfg(test)]
@@ -196,20 +318,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn catalog_endpoint_serves_document() {
         let catalog = sample_catalog();
-        let entries = catalog
-            .apps
-            .iter()
-            .map(|a| {
-                IndexEntry::for_ref(
-                    &a.flatpak_ref,
-                    a.digest.clone().unwrap_or_default(),
-                    0,
-                )
-            })
-            .collect();
         let router = router(ServerState {
-            index: Arc::new(StaticCatalog::new(entries)),
-            catalog: Arc::new(catalog),
+            document: Arc::new(catalog.clone()),
         });
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

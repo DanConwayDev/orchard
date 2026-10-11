@@ -1,0 +1,15 @@
+[package]
+name = "orchard-nostr"
+description = "NIP-82 software events: parse, verify, and project Nostr listings into Orchard's catalog"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow = { workspace = true }
+nostr = { workspace = true }
+orchard-core = { workspace = true }
+serde_json = { workspace = true }
+# sync WebSocket client for NIP-01 relay subscriptions; rustls so no OpenSSL
+tungstenite = { version = "0.30", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }

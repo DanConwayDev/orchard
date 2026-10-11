@@ -9,7 +9,9 @@ publish = false
 [dependencies]
 anyhow = { workspace = true }
 axum = { workspace = true }
+nostr = { workspace = true }
 orchard-core = { workspace = true }
+orchard-nostr = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

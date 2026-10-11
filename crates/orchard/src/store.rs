@@ -106,6 +106,11 @@ pub struct StoreRoot {
     remote_sizes: HashMap<String, (Option<String>, Option<String>)>,
     /// Remote fetches in flight (metadata + sizes), keyed by app id.
     remote_fetching: HashSet<String>,
+    /// Publisher-channel page-open artifact checks in flight.
+    publisher_fetching: HashSet<String>,
+    /// Failed pre-install digest checks: app id -> why. Security
+    /// relevant, so it shows on the page, not just in the log.
+    verify_errors: HashMap<String, String>,
     /// Detail page open? Selection survives closing, so keyboard
     /// navigation resumes where it left off.
     page_open: bool,
@@ -147,6 +152,8 @@ impl StoreRoot {
             remote_metadata: HashMap::new(),
             remote_sizes: HashMap::new(),
             remote_fetching: HashSet::new(),
+            publisher_fetching: HashSet::new(),
+            verify_errors: HashMap::new(),
             page_open: false,
             category: None,
             cursor: 0,
@@ -306,15 +313,16 @@ impl StoreRoot {
             }
         }
         self.ensure_fetched(urls, cx);
-        // pre-install data for reviewed apps: the remote serves the
-        // manifest and sizes of the commit that would install
-        let reviewed = self
-            .apps
-            .iter()
-            .find(|a| a.app_id == app_id)
-            .is_some_and(|app| app.source == Source::Reviewed);
-        if reviewed && !self.installed.contains_key(app_id) {
-            self.ensure_remote_data(app_id, cx);
+        // pre-install data: for reviewed apps the remote serves the
+        // manifest and sizes of the commit that would install; for
+        // publisher apps the artifact itself is read (digest check plus
+        // sandbox labels in one manifest fetch)
+        let source = self.apps.iter().find(|a| a.app_id == app_id).map(|a| a.source);
+        let not_installed = !self.installed.contains_key(app_id);
+        match source {
+            Some(Source::Reviewed) if not_installed => self.ensure_remote_data(app_id, cx),
+            Some(Source::Publisher) if not_installed => self.ensure_publisher_data(app_id, cx),
+            _ => {}
         }
         cx.notify();
     }
@@ -366,6 +374,72 @@ impl StoreRoot {
                     this.remote_sizes.insert(app_id.clone(), sizes);
                 }
                 this.remote_fetching.remove(&app_id);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Pre-install artifact check for publisher apps: one manifest fetch
+    /// verifies the pinned digest and reads the sandbox labels, so the
+    /// page shows exactly what install will pin. Same fetch the install
+    /// button runs; failures surface on the page and retry on the next
+    /// page open.
+    fn ensure_publisher_data(&mut self, app_id: &str, cx: &mut Context<Self>) {
+        if self.verified.contains_key(app_id)
+            || self.verify_errors.contains_key(app_id)
+            || !self.publisher_fetching.insert(app_id.to_string())
+        {
+            return;
+        }
+        let Some(app) = self.apps.iter().find(|a| a.app_id == app_id) else {
+            self.publisher_fetching.remove(app_id);
+            return;
+        };
+        let location = match app
+            .location
+            .as_deref()
+            .and_then(|raw| oci::Location::parse(raw).ok())
+        {
+            Some(location) => location,
+            None => {
+                self.publisher_fetching.remove(app_id);
+                return;
+            }
+        };
+        let pinned = app.pinned_digest.clone();
+        let app_id = app_id.to_string();
+        cx.spawn(async move |this, cx| {
+            let report = cx
+                .background_executor()
+                .spawn(async move { oci::verify(&location, pinned.as_deref()) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.publisher_fetching.remove(&app_id);
+                match report {
+                    Ok(report) => {
+                        this.verified.insert(app_id.clone(), report.digest.clone());
+                        if let Some(app) = this.apps.iter_mut().find(|a| a.app_id == app_id) {
+                            if app.metadata.is_none() {
+                                app.metadata = report.metadata.clone();
+                            }
+                            this.remote_sizes.insert(
+                                app_id.clone(),
+                                (
+                                    Some(human_size(report.download_size)),
+                                    report.installed_size.map(human_size),
+                                ),
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        // the pin did not match or the artifact is
+                        // unreadable: show it, and keep retrying on the
+                        // next page open
+                        this.verify_errors
+                            .insert(app_id.clone(), format!("{err:#}"));
+                    }
+                }
                 cx.notify();
             });
         })
@@ -1194,6 +1268,15 @@ impl StoreRoot {
 
         // the quiet provenance line: what the user is relying on,
         // without cryptographic jargon by default
+        let digest_failed = self.verify_errors.get(&app_id).cloned();
+        let digest_badge = if digest_failed.is_none() {
+            verified.clone().map(|digest| {
+                let short = &digest[..digest.len().min(12)];
+                badge(&format!("digest {short}"), ui::risk_color(Risk::Low))
+            })
+        } else {
+            None
+        };
         let provenance = match app.source {
             Source::Reviewed => div()
                 .flex()
@@ -1214,10 +1297,21 @@ impl StoreRoot {
                 .items_center()
                 .gap_2()
                 .child(badge("Publisher-verified", ui::accent()))
-                .children(verified.clone().map(|digest| {
-                    let short = &digest[..digest.len().min(12)];
-                    badge(&format!("digest {short}"), ui::risk_color(Risk::Low))
+                .children(digest_failed.clone().map(|err| {
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .child(badge("Digest check failed", ui::risk_color(Risk::High)))
+                        .child(
+                            div()
+                                .text_size(px(ui::TEXT_SIZE))
+                                .text_color(ui::risk_color(Risk::High))
+                                .child(err),
+                        )
                 }))
+                .children(digest_badge)
                 .children(app.publisher.as_ref().map(|pubkey| {
                     let short = &pubkey[..pubkey.len().min(16)];
                     div()
@@ -1432,7 +1526,16 @@ impl StoreRoot {
             })
             .when(!has_sandbox, |section| {
                 // no sandbox data yet: it is being fetched from the
-                // remote, or flatpak could not produce it
+                // artifact or the remote, or flatpak could not produce it
+                let note = if self.verify_errors.contains_key(&app_id) {
+                    "Sandbox info unavailable: the artifact did not pass its digest check."
+                } else if self.publisher_fetching.contains(&app_id) {
+                    "Reading the sandbox manifest from the artifact…"
+                } else if self.remote_fetching.contains(&app_id) {
+                    "Reading the sandbox manifest from flathub…"
+                } else {
+                    "Flatpak apps run in a sandbox; this app's permissions appear here once its manifest is available."
+                };
                 section.child(
                     div()
                         .flex()
@@ -1441,11 +1544,7 @@ impl StoreRoot {
                         .text_size(px(ui::TEXT_SIZE))
                         .text_color(ui::text())
                         .child(ui::icon("icons/shield.svg", 13., ui::text_dim()))
-                        .child(if self.remote_fetching.contains(&app_id) {
-                            "Reading the sandbox manifest from flathub…"
-                        } else {
-                            "Flatpak apps run in a sandbox; this app's permissions appear here once its manifest is available."
-                        }),
+                        .child(note),
                 )
             });
 
@@ -1945,6 +2044,23 @@ impl Render for StoreRoot {
 // ----- catalog loaders (background) -----
 
 /// Flathub channel: parse the local AppStream for the system install.
+/// Human byte count, flatpak-style SI units: `9.8 MB`, `1.2 GB`.
+fn human_size(bytes: u64) -> String {
+    const UNITS: [(&str, u64); 4] = [
+        ("GB", 1_000_000_000),
+        ("MB", 1_000_000),
+        ("kB", 1_000),
+        ("B", 1),
+    ];
+    for (unit, size) in UNITS {
+        if bytes >= size {
+            let value = bytes as f64 / size as f64;
+            return format!("{value:.1} {unit}");
+        }
+    }
+    format!("{bytes} B")
+}
+
 fn load_flathub() -> Vec<StoreApp> {
     for path in orchard_core::appstream::appstream_paths(FLATHUB_REMOTE, APPSTREAM_ARCH) {
         if !path.exists() {
