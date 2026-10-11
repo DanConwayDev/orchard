@@ -2552,7 +2552,8 @@ impl StoreRoot {
 
     /// The pairing panel: the QR and the URI, both clickable (the
     /// signer app opens on click; the URI lands on the clipboard
-    /// either way), a status line, retry.
+    /// either way), a status line. Closing the modal and reopening
+    /// starts a fresh pairing, so there is no retry button.
     fn render_pairing_phase(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(session) = self.connect.as_ref() else {
             return div().into_any_element();
@@ -2638,15 +2639,6 @@ impl StoreRoot {
                     .child(error.clone()),
             );
         }
-        panel = panel.child(
-            div().flex().items_center().gap_3().child(
-                button("btn-new-pairing", None, "New pairing code", false).on_click(cx.listener(
-                    |this, _e: &ClickEvent, _w, cx| {
-                        this.start_pairing(cx);
-                    },
-                )),
-            ),
-        );
         panel.into_any_element()
     }
 
