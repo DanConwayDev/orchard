@@ -289,7 +289,12 @@ impl StoreApp {
             summary: app.summary.clone(),
             description: app.description.clone(),
             version: (!app.version.is_empty()).then(|| app.version.clone()),
-            release_date: None,
+            // the newest release's signed event time ranks the row
+            // like any other channel's; the list's arrived-only rule
+            // governs a pre-listed future stamp the same way it
+            // governs AppStream's. Zero (no release) stays undated.
+            release_date: (app.published_at > 0)
+                .then(|| crate::appstream::iso_date(app.published_at)),
             homepage: app.homepage.clone(),
             repository: app.repository.clone(),
             license: None,

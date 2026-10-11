@@ -428,8 +428,15 @@ fn release_date(start: &BytesStart<'_>) -> Result<Option<Box<str>>> {
     else {
         return Ok(None);
     };
-    let (y, m, d) = days_to_ymd(stamp.div_euclid(86_400));
-    Ok(Some(format!("{y:04}-{m:02}-{d:02}").into_boxed_str()))
+    Ok(Some(iso_date(stamp).into_boxed_str()))
+}
+
+/// Unix seconds as an ISO date (`YYYY-MM-DD`). Public because the
+/// publisher channel's rows rank on their signed event time: the
+/// catalog's `published_at` converts through the same calendar.
+pub fn iso_date(epoch_secs: i64) -> String {
+    let (y, m, d) = days_to_ymd(epoch_secs.div_euclid(86_400));
+    format!("{y:04}-{m:02}-{d:02}")
 }
 
 /// Today as an ISO date, from the system clock: the cutoff that
@@ -441,8 +448,7 @@ pub fn today_iso() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let (y, m, d) = days_to_ymd((secs / 86_400) as i64);
-    format!("{y:04}-{m:02}-{d:02}")
+    iso_date(secs as i64)
 }
 
 /// Days since the unix epoch to a `(year, month, day)` civil date:
@@ -939,6 +945,13 @@ mod tests {
         assert_eq!(apps.len(), 1);
         assert_eq!(apps[0].version.as_deref(), Some("2.0"));
         assert_eq!(apps[0].release_date.as_deref(), Some("2099-01-01"));
+    }
+
+    #[test]
+    fn iso_date_converts_unix_seconds() {
+        // the Hello fixture's release stamp: 2026-10-11
+        assert_eq!(iso_date(1_791_711_263), "2026-10-11");
+        assert_eq!(iso_date(0), "1970-01-01");
     }
 
     /// Parse one appstream document through the same path `load` uses

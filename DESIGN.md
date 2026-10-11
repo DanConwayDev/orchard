@@ -477,6 +477,13 @@ opening items because they need the push, the signing secret, and a tag.
 - [x] The arch story is quiet by default: no platforms badge in the install
       bar. The no-build note names the mismatch in full ("no x86_64 build
       yet, published for aarch64"), and nowhere else does the list appear.
+- [x] Publisher rows rank by their signed release time: `from_catalog`
+      maps the newest release event's `created_at` into the row's date,
+      so the Orchard channel shares the arrived-only rank rule with
+      Flathub's rows instead of sinking as undated (they sank off the
+      visible end of the multi-thousand-row All list once the undated
+      arms were fixed). Zero (no release) stays undated; a pre-listed
+      future stamp is governed like AppStream's ("dated" until true).
 - [x] Future-dated releases do not rank: the list sorts on the newest
       release date that has arrived, so an upstream pre-listing a future
       release (or re-listing one forward forever) cannot hold the top of

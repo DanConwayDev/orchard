@@ -6068,7 +6068,13 @@ mod tests {
 
     /// A minimal publisher-channel row for order tests.
     fn dated_app(name: &str, date: Option<&str>) -> StoreApp {
-        let mut app = StoreApp::from_catalog(&CatalogApp {
+        let mut app = StoreApp::from_catalog(&catalog_fixture(name, 0));
+        app.release_date = date.map(Into::into);
+        app
+    }
+
+    fn catalog_fixture(name: &str, published_at: i64) -> CatalogApp {
+        CatalogApp {
             app_id: format!("com.example.{name}").into(),
             name: name.into(),
             summary: "A demo app".into(),
@@ -6088,11 +6094,20 @@ mod tests {
             repository: None,
             homepage: None,
             notes: None,
-            published_at: 0,
+            published_at,
             successor_to: None,
-        });
-        app.release_date = date.map(Into::into);
-        app
+        }
+    }
+
+    #[test]
+    fn publisher_rows_date_from_their_signed_release_time() {
+        // the newest release's signed event time ranks a publisher row
+        // beside the Flathub rows; the Hello fixture's stamp is today
+        let app = StoreApp::from_catalog(&catalog_fixture("App", 1_791_711_263));
+        assert_eq!(app.release_date.as_deref(), Some("2026-10-11"));
+        // zero (no release) stays undated
+        let app = StoreApp::from_catalog(&catalog_fixture("App", 0));
+        assert_eq!(app.release_date, None);
     }
 
     #[test]
