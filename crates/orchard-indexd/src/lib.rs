@@ -506,6 +506,7 @@ mod tests {
                 metadata: None,
                 notes: None,
                 published_at: 0,
+                successor_to: None,
             }],
         }
     }

@@ -530,6 +530,16 @@ impl Feed {
                 notes: (!release.event.content.is_empty())
                     .then(|| release.event.content.clone()),
                 published_at: release.created_at as i64,
+                // the newest statement naming this publisher as
+                // successor, if any: the row's handover is authorized
+                successor_to: self
+                    .migrations
+                    .iter()
+                    .filter(|((_, _), migration)| {
+                        migration.new_key.as_deref() == Some(author.as_str())
+                    })
+                    .max_by_key(|((_, _), migration)| migration.created_at)
+                    .map(|((_, old_key), _)| old_key.clone()),
             });
         }
         apps.sort_by(|a, b| a.app_id.cmp(&b.app_id));
@@ -847,6 +857,12 @@ mod tests {
         assert_eq!(catalog.apps.len(), 1);
         assert_eq!(catalog.apps[0].publisher.pubkey, b_pubkey);
         assert_eq!(catalog.apps[0].summary, "new key");
+        // the surviving row carries the handover: the client can tell
+        // an authorized rotation from an unexplained new key
+        assert_eq!(
+            catalog.apps[0].successor_to.as_deref(),
+            Some(a.get_public_key().unwrap().to_string().as_str())
+        );
 
         // revocation: a newer statement from the old key with no `p`
         // restores its row
@@ -857,6 +873,12 @@ mod tests {
             .unwrap();
         absorb_all(&mut feed, &[revoke]);
         assert_eq!(feed.catalog().apps.len(), 2);
+        // and the handover annotation is gone with the designation
+        assert!(feed
+            .catalog()
+            .apps
+            .iter()
+            .all(|app| app.successor_to.is_none()));
     }
 
     /// A designation whose successor never lists suppresses nothing:

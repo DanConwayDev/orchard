@@ -433,7 +433,13 @@ opening items because they need the push, the signing secret, and a tag.
       published). A key new for a known app id gets a "New publisher key" badge on
       the page (amber, with an on-hover explanation); first sight of an app seeds
       all its keys unflagged, so a fresh client discloses nothing. Rotation is
-      legitimate; the badge is a fact, not a verdict.
+      legitimate; the badge is a fact, not a verdict. When the feed carries a
+      migration statement naming the new key, the badge reads "Publisher migrated"
+      (green): the handover is authorized by the previous key, not unexplained.
+- [x] Clean-room rerun verified: fresh relay database, cache, and continuity, then
+      demo publisher, a second publisher, a stranger, and a rotation with a signed
+      handover. Row counts, flags, and the `successor_to` annotation matched at
+      every step.
 - [ ] NIP-05 verification: check the domain claim against the profile's address
       instead of displaying it as given.
 - [ ] Client relay configuration: a settings surface over the rendezvous set

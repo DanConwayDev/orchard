@@ -190,6 +190,11 @@ pub struct CatalogApp {
     pub notes: Option<String>,
     #[serde(default)]
     pub published_at: i64,
+    /// The previous publisher key that signed a migration statement
+    /// naming this row's publisher, when one exists: the difference
+    /// between an authorized handover and an unexplained new key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub successor_to: Option<String>,
 }
 
 /// Which half of the store an app came from, for badges and install routing.
@@ -229,6 +234,9 @@ pub struct StoreApp {
     pub location: Option<String>,
     /// Pinned digest (publisher channel only).
     pub pinned_digest: Option<String>,
+    /// The previous publisher key that designated this row's
+    /// publisher (publisher channel only).
+    pub successor_to: Option<String>,
 }
 
 impl StoreApp {
@@ -251,6 +259,7 @@ impl StoreApp {
             metadata: None,
             location: None,
             pinned_digest: None,
+            successor_to: None,
         }
     }
 
@@ -273,6 +282,7 @@ impl StoreApp {
             metadata: app.metadata.clone(),
             location: Some(app.location.clone()),
             pinned_digest: app.digest.clone(),
+            successor_to: app.successor_to.clone(),
         }
     }
 }

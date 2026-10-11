@@ -2325,13 +2325,27 @@ impl StoreRoot {
                         .child(label)
                 }))
                 // continuity: this app id was published by another key
-                // before this client ever saw this one
+                // before this client ever saw this one; a signed
+                // handover from that key reads calmer than an
+                // unexplained new key
                 .children(app.publisher.as_ref().filter(|pubkey| {
                     self.continuity
                         .apps
                         .get(&app.app_id)
                         .is_some_and(|entry| entry.flagged.contains(pubkey))
                 }).map(|pubkey| {
+                    let authorized = app.successor_to.is_some();
+                    let (label, note) = if authorized {
+                        (
+                            "Publisher migrated",
+                            "The previous key signed a statement handing this app id to this key. The digest pin still verifies the artifact.",
+                        )
+                    } else {
+                        (
+                            "New publisher key",
+                            "This app id was published by another key before; this key is new since then. The digest pin is what your install verifies.",
+                        )
+                    };
                     div()
                         .id(SharedString::from(format!(
                             "key-changed-{}-{pubkey}",
@@ -2340,16 +2354,15 @@ impl StoreRoot {
                         .flex_none()
                         .hover(|style| style.bg(gpui::transparent_black()))
                         .tooltip(|_window, cx| {
-                            cx.new(|_| {
-                                TextTooltip(
-                                    "This app id was published by another key before; this key is new since then. The digest pin is what your install verifies.",
-                                )
-                            })
-                            .into()
+                            cx.new(|_| TextTooltip(note)).into()
                         })
                         .child(badge(
-                            "New publisher key",
-                            ui::risk_color(Risk::Medium),
+                            label,
+                            ui::risk_color(if authorized {
+                                Risk::Low
+                            } else {
+                                Risk::Medium
+                            }),
                         ))
                 }))
                 .children(digest_badge)
@@ -4140,13 +4153,14 @@ fn orchard_fingerprint(rows: &[StoreApp]) -> String {
     for app in rows {
         let _ = writeln!(
             fingerprint,
-            "{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}",
+            "{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}",
             app.app_id,
             app.publisher.as_deref().unwrap_or(""),
             app.version.as_deref().unwrap_or(""),
             app.pinned_digest.as_deref().unwrap_or(""),
             app.name,
             app.summary,
+            app.successor_to.as_deref().unwrap_or(""),
         );
     }
     fingerprint
@@ -4760,6 +4774,7 @@ mod tests {
             metadata: None,
             notes: None,
             published_at: 0,
+            successor_to: None,
         });
         let same = orchard_fingerprint(std::slice::from_ref(&app));
         assert_eq!(same, orchard_fingerprint(std::slice::from_ref(&app)));
