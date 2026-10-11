@@ -118,6 +118,15 @@ pub fn info(app_id: &str) -> Command {
     cmd
 }
 
+/// The sandbox metadata ini of an app on a remote, before install:
+/// `flatpak remote-info --show-metadata <remote> <app>`. This is the
+/// manifest of the commit that would be installed.
+pub fn remote_metadata(remote: &str, app_id: &str) -> Command {
+    let mut cmd = flatpak_command();
+    cmd.args(["remote-info", "--show-metadata", "--system", remote, app_id]);
+    cmd
+}
+
 /// The sandbox metadata ini of an installed app, read straight from the
 /// deploy (`app/<id>/current/active/metadata`). System install first,
 /// then user. This is what powers the permissions view for apps that

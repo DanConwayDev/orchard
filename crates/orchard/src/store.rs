@@ -93,6 +93,12 @@ pub struct StoreRoot {
     fetched: HashMap<String, Option<PathBuf>>,
     /// Fetches in flight, keyed by url.
     fetching: HashSet<String>,
+    /// Sandbox metadata read from the remote for apps that are not
+    /// installed (reviewed channel), fetched on page open and cached
+    /// for the session.
+    remote_metadata: HashMap<String, String>,
+    /// Remote-metadata fetches in flight, keyed by app id.
+    remote_metadata_fetching: HashSet<String>,
     /// Detail page open? Selection survives closing, so keyboard
     /// navigation resumes where it left off.
     page_open: bool,
@@ -127,6 +133,8 @@ impl StoreRoot {
             flathub_loading: true,
             fetched: HashMap::new(),
             fetching: HashSet::new(),
+            remote_metadata: HashMap::new(),
+            remote_metadata_fetching: HashSet::new(),
             page_open: false,
             category: None,
             cursor: 0,
@@ -264,7 +272,51 @@ impl StoreRoot {
             }
         }
         self.ensure_fetched(urls, cx);
+        // pre-install sandbox metadata for reviewed apps: the remote
+        // serves the manifest of the commit that would install
+        let reviewed = self
+            .apps
+            .iter()
+            .find(|a| a.app_id == app_id)
+            .is_some_and(|app| app.source == Source::Reviewed);
+        if reviewed && !self.installed.contains_key(app_id) {
+            self.ensure_remote_metadata(app_id, cx);
+        }
         cx.notify();
+    }
+
+    /// Fetch an app's sandbox metadata from the remote (once per
+    /// session; failures retry on the next page open).
+    fn ensure_remote_metadata(&mut self, app_id: &str, cx: &mut Context<Self>) {
+        if self.remote_metadata.contains_key(app_id)
+            || !self.remote_metadata_fetching.insert(app_id.to_string())
+        {
+            return;
+        }
+        let app_id = app_id.to_string();
+        let remote = FLATHUB_REMOTE.to_string();
+        cx.spawn(async move |this, cx| {
+            let key = app_id.clone();
+            let metadata = cx
+                .background_executor()
+                .spawn(async move {
+                    orchard_flatpak::remote_metadata(&remote, &app_id)
+                        .output()
+                        .ok()
+                        .filter(|out| out.status.success())
+                        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+                        .filter(|text| !text.is_empty())
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(metadata) = metadata {
+                    this.remote_metadata.insert(key.clone(), metadata);
+                }
+                this.remote_metadata_fetching.remove(&key);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Close the detail page. Selection survives so keyboard
@@ -1016,17 +1068,22 @@ impl StoreRoot {
     /// bar stays pinned while the content scrolls.
     fn render_page(&self, app: StoreApp, cx: &mut Context<Self>) -> AnyElement {
         let app_id = app.app_id.clone();
-        let mut app = app;
-        // installed apps carry their sandbox metadata in the deploy;
-        // the catalog does not know it
-        if app.metadata.is_none() {
-            if let Some(info) = self.installed.get(&app_id) {
-                app.metadata = info.metadata.clone();
-            }
-        }
         let installed = self.installed.contains_key(&app_id);
         let job = self.jobs.get(&app_id);
         let verified = self.verified.get(&app_id).cloned();
+
+        // the permissions source, in order: catalog metadata (Orchard
+        // channel), the deploy's ini (installed apps), the remote's
+        // manifest (pre-install check on the reviewed channel)
+        let sandbox_metadata: Option<String> = app
+            .metadata
+            .clone()
+            .or_else(|| {
+                self.installed
+                    .get(&app_id)
+                    .and_then(|info| info.metadata.clone())
+            })
+            .or_else(|| self.remote_metadata.get(&app_id).cloned());
 
         // the header icon: cached AppStream PNG, or a disk-cache fetch
         // of the remote icon, or the initials tile
@@ -1123,8 +1180,8 @@ impl StoreRoot {
                                 .flex_wrap()
                                 .items_center()
                                 .gap_2()
-                                .text_size(px(ui::TEXT_SIZE_SMALL))
-                                .text_color(ui::text_dim())
+                                .text_size(px(ui::TEXT_SIZE))
+                                .text_color(ui::text())
                                 .child(div().child(app.app_id.clone()))
                                 .children(app.version.clone().map(|v| div().child(format!("· {v}"))))
                                 .children(
@@ -1186,6 +1243,7 @@ impl StoreRoot {
             );
         }
 
+        let has_sandbox = sandbox_metadata.is_some();
         content = content
             .child(
                 div()
@@ -1223,47 +1281,44 @@ impl StoreRoot {
                     .child(ui::icon("icons/globe.svg", 13., ui::accent()))
                     .child(url)
             }))
-            .when(
-                app.source == Source::Publisher || app.metadata.is_some(),
-                |section| {
-                    section.child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1p5()
-                                    .text_size(px(ui::TEXT_SIZE_EMPHASIS - 1.))
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(ui::text())
-                                    .child(ui::icon("icons/shield.svg", 13., ui::text()))
-                                    .child("What it can access"),
-                            )
-                            .child(render_permissions_static(&app)),
-                    )
-                },
-            )
-            .when(
-                app.source == Source::Reviewed && app.metadata.is_none(),
-                |section| {
-                    // no sandbox data locally until flatpak installs it
-                    section.child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1p5()
-                            .text_size(px(ui::TEXT_SIZE))
-                            .text_color(ui::text())
-                            .child(ui::icon("icons/shield.svg", 13., ui::text_dim()))
-                            .child(
-                                "Flatpak apps run in a sandbox; this app's specific permissions appear here once installed.",
-                            ),
-                    )
-                },
-            );
+            .when_some(sandbox_metadata, |section, metadata| {
+                section.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1p5()
+                                .text_size(px(ui::TEXT_SIZE_EMPHASIS - 1.))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(ui::text())
+                                .child(ui::icon("icons/shield.svg", 13., ui::text()))
+                                .child("What it can access"),
+                        )
+                        .child(render_permissions_static(&metadata)),
+                )
+            })
+            .when(!has_sandbox, |section| {
+                // no sandbox data yet: it is being fetched from the
+                // remote, or flatpak could not produce it
+                section.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1p5()
+                        .text_size(px(ui::TEXT_SIZE))
+                        .text_color(ui::text())
+                        .child(ui::icon("icons/shield.svg", 13., ui::text_dim()))
+                        .child(if self.remote_metadata_fetching.contains(&app_id) {
+                            "Reading the sandbox manifest from flathub…"
+                        } else {
+                            "Flatpak apps run in a sandbox; this app's permissions appear here once its manifest is available."
+                        }),
+                )
+            });
 
         div()
             .flex_1()
@@ -1384,10 +1439,9 @@ fn image_placeholder(loading: bool) -> gpui::AnyElement {
         .into_any_element()
 }
 
-fn render_permissions_static(app: &StoreApp) -> gpui::AnyElement {
+fn render_permissions_static(metadata: &str) -> gpui::AnyElement {
     // Borrow-free re-render of the permissions section (the method version
     // cannot be called from a non-self context).
-    let metadata = app.metadata.as_deref().unwrap_or("");
     let grants = permissions::grants_from_metadata(metadata);
     div()
         .flex()
