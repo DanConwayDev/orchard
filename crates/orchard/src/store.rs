@@ -120,11 +120,17 @@ pub struct StoreRoot {
     reviews_fetching: bool,
     /// The reviews list is collapsed by default; the header toggles it.
     reviews_expanded: bool,
-    /// The signed-in reviewer: local key plus display name. None until
-    /// the user signs in; the key file survives restarts.
+    /// The signed-in reviewer: the Nostr key reviews are signed with.
+    /// None until the user signs in; the key file survives restarts.
     reviewer: Option<Reviewer>,
-    /// The sign-in form is open: the shared input holds the name.
+    /// The sign-in form is open: step one asks for the key, step two
+    /// for an optional published name.
     signin_open: bool,
+    signin_step: SigninStep,
+    /// The key parsed in step one, signed in at the end of step two.
+    pending_keys: Option<nostr::prelude::Keys>,
+    /// The nsec of a freshly generated key, shown once for backup.
+    new_key_notice: Option<String>,
     /// Compose mode: keystrokes go to the review draft, not the search
     /// box or the page's type-to-close. Entered by clicking the compose
     /// box or pressing r on a page; left by Escape or a successful post.
@@ -193,6 +199,9 @@ impl StoreRoot {
             reviews_expanded: false,
             reviewer: load_reviewer(),
             signin_open: false,
+            signin_step: SigninStep::Key,
+            pending_keys: None,
+            new_key_notice: None,
             composing: false,
             review_draft: (None, String::new()),
             review_cursor: 0,
@@ -357,6 +366,9 @@ impl StoreRoot {
             // a half-written review belongs to the app it was for
             self.composing = false;
             self.signin_open = false;
+            self.signin_step = SigninStep::Key;
+            self.pending_keys = None;
+            self.new_key_notice = None;
             self.reviews_expanded = false;
             self.review_draft = (None, String::new());
             self.review_cursor = 0;
@@ -661,8 +673,10 @@ impl StoreRoot {
         if self.reviewer.is_some() {
             self.composing = true;
         } else {
-            // the shared input holds the display name until sign-in
             self.signin_open = true;
+            self.signin_step = SigninStep::Key;
+            self.pending_keys = None;
+            self.new_key_notice = None;
             self.review_draft = (None, String::new());
             self.review_cursor = 0;
             self.review_anchor = None;
@@ -671,33 +685,94 @@ impl StoreRoot {
         cx.notify();
     }
 
-    /// Finish sign-in: create or rename the device identity, close the
-    /// form, drop into compose.
-    fn sign_in(&mut self, cx: &mut Context<Self>) {
-        let name = self.review_draft.1.trim().to_string();
-        if name.is_empty() {
-            self.review_error = Some("Pick a display name first.".into());
+    /// Sign-in step one: parse the pasted key (nsec or hex). Valid
+    /// keys move the form to the optional name question.
+    fn accept_nsec(&mut self, cx: &mut Context<Self>) {
+        use nostr::prelude::*;
+        let raw = self.review_draft.1.trim();
+        match Keys::parse(raw) {
+            Ok(keys) => {
+                self.pending_keys = Some(keys);
+                self.signin_step = SigninStep::Name;
+                self.review_draft = (None, String::new());
+                self.review_cursor = 0;
+                self.review_anchor = None;
+                self.review_layout = None;
+                self.review_error = None;
+            }
+            Err(_) => {
+                self.review_error = Some(
+                    "That does not parse as a Nostr key; paste nsec1… or 64 hex characters."
+                        .into(),
+                );
+            }
+        }
+        cx.notify();
+    }
+
+    /// A fresh key for reviewers without one: nothing is written until
+    /// sign-in completes, so this notice is the one chance to copy it.
+    fn new_identity(&mut self, cx: &mut Context<Self>) {
+        use nostr::nips::nip19::ToBech32 as _;
+        use nostr::prelude::*;
+        let keys = Keys::generate();
+        // Err is Infallible: the encoding cannot fail
+        let nsec = keys
+            .secret_key()
+            .to_bech32()
+            .expect("nsec bech32 encoding is infallible");
+        self.new_key_notice = Some(nsec);
+        self.pending_keys = Some(keys);
+        self.signin_step = SigninStep::Name;
+        self.review_draft = (None, String::new());
+        self.review_cursor = 0;
+        self.review_anchor = None;
+        self.review_layout = None;
+        self.review_error = None;
+        cx.notify();
+    }
+
+    /// Sign-in step two: persist the key (plus the optional published
+    /// name), close the form, drop into compose.
+    fn finish_sign_in(&mut self, cx: &mut Context<Self>) {
+        let Some(keys) = self.pending_keys.take() else {
+            self.signin_step = SigninStep::Key;
             cx.notify();
             return;
-        }
+        };
+        let name = self.review_draft.1.trim().to_string();
+        let name = (!name.is_empty()).then_some(name);
         cx.spawn(async move |this, cx| {
-            let created = cx
-                .background_executor()
-                .spawn(async move { create_reviewer(&name) })
-                .await;
+            use nostr::key::GetPublicKey as _;
+            let done = cx.background_executor().spawn(async move {
+                save_reviewer(&keys, name.as_deref())?;
+                if let Some(published) = &name {
+                    // best effort: a review still reads fine as a
+                    // pubkey until the profile propagates
+                    if let Err(err) = announce_reviewer(&keys, published) {
+                        eprintln!("profile announce failed: {err:#}");
+                    }
+                }
+                Ok::<_, anyhow::Error>(Reviewer {
+                    pubkey: keys.get_public_key()?.to_string(),
+                    name,
+                    keys,
+                })
+            }).await;
             let _ = this.update(cx, |this, cx| {
-                match created {
+                match done {
                     Ok(reviewer) => {
                         this.reviewer = Some(reviewer);
                         this.signin_open = false;
+                        this.new_key_notice = None;
                         this.composing = true;
                         this.review_draft = (None, String::new());
                         this.review_cursor = 0;
                         this.review_anchor = None;
                         this.review_layout = None;
                         this.review_error = None;
-                        // the profile event announces the name; the
-                        // next fetch resolves it onto past reviews too
+                        // past reviews by this key pick up the new
+                        // name once the profile propagates
                         this.ensure_reviews(cx);
                     }
                     Err(err) => {
@@ -708,6 +783,14 @@ impl StoreRoot {
             });
         })
         .detach();
+    }
+
+    /// End the session: the key stays in identity.json on this device
+    /// and reloads on the next launch.
+    fn sign_out(&mut self, cx: &mut Context<Self>) {
+        self.reviewer = None;
+        self.composing = false;
+        cx.notify();
     }
 
     /// Close the detail page. Selection survives so keyboard
@@ -958,21 +1041,38 @@ impl StoreRoot {
         let shift = keystroke.modifiers.shift;
         let ctrl = keystroke.modifiers.control || keystroke.modifiers.platform;
 
-        // ----- review compose: keystrokes go to the draft, not the
-        // search box, and typing does not close the page -----
+        // ----- sign-in form: keystrokes go to the shared input (the
+        // nsec on step one, the optional name on step two) -----
         if self.signin_open {
             match key {
                 "escape" => {
                     self.signin_open = false;
+                    self.pending_keys = None;
+                    self.new_key_notice = None;
                     self.review_draft = (None, String::new());
                     self.review_cursor = 0;
                     self.review_anchor = None;
                     self.review_layout = None;
                     self.review_error = None;
                 }
-                "enter" => self.sign_in(cx),
+                "enter" => match self.signin_step {
+                    SigninStep::Key => self.accept_nsec(cx),
+                    SigninStep::Name => self.finish_sign_in(cx),
+                },
                 "left" | "right" | "home" | "end" | "backspace" | "delete" => {
                     self.move_draft_cursor(key, shift)
+                }
+                "a" if ctrl => {
+                    self.review_anchor = Some(0);
+                    self.review_cursor = self.review_draft.1.len();
+                }
+                "v" if ctrl => {
+                    if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                        // a key is one token: strip every whitespace
+                        // character on paste
+                        let pasted: String = text.split_whitespace().collect();
+                        self.insert_draft_text(&pasted);
+                    }
                 }
                 "space" => self.insert_draft_text(" "),
                 other if other.chars().count() == 1 && !ctrl => {
@@ -983,6 +1083,9 @@ impl StoreRoot {
             cx.notify();
             return;
         }
+
+        // ----- review compose: keystrokes go to the draft, not the
+        // search box, and typing does not close the page -----
         if self.composing {
             match key {
                 "escape" => {
@@ -2191,38 +2294,140 @@ impl StoreRoot {
             } else if self.composing {
                 section = section.child(self.render_review_compose(app_id, font.clone(), cx));
             } else {
-                let invitation = if self.reviewer.is_some() {
-                    format!("Write a review (r) as {}", self.reviewer.as_ref().unwrap().name)
+                let mut invitation = div().flex().items_center().gap_2();
+                if let Some(reviewer) = self.reviewer.as_ref() {
+                    invitation = invitation
+                        .child(
+                            div()
+                                .id("write-review")
+                                .cursor_pointer()
+                                .text_size(px(ui::TEXT_SIZE))
+                                .text_color(ui::accent())
+                                .hover(|style| style.text_color(ui::text()))
+                                .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
+                                    this.start_review(cx);
+                                }))
+                                .child(format!(
+                                    "Write a review (r) as {}",
+                                    reviewer.display()
+                                )),
+                        )
+                        .child(
+                            div()
+                                .id("sign-out")
+                                .cursor_pointer()
+                                .text_size(px(ui::TEXT_SIZE_LABEL))
+                                .text_color(ui::text_dim())
+                                .hover(|style| style.text_color(ui::text()))
+                                .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
+                                    this.sign_out(cx);
+                                }))
+                                .child("sign out (key stays on device)"),
+                        );
                 } else {
-                    "Write a review (r)".to_string()
-                };
-                section = section.child(
-                    div()
-                        .id("write-review")
-                        .flex()
-                        .items_center()
-                        .gap_1p5()
-                        .cursor_pointer()
-                        .text_size(px(ui::TEXT_SIZE))
-                        .text_color(ui::accent())
-                        .hover(|style| style.text_color(ui::text()))
-                        .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
-                            this.start_review(cx);
-                        }))
-                        .child(invitation),
-                );
+                    invitation = invitation.child(
+                        div()
+                            .id("write-review")
+                            .cursor_pointer()
+                            .text_size(px(ui::TEXT_SIZE))
+                            .text_color(ui::accent())
+                            .hover(|style| style.text_color(ui::text()))
+                            .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
+                                this.start_review(cx);
+                            }))
+                            .child("Write a review (r)"),
+                    );
+                }
+                section = section.child(invitation);
             }
         }
 
         section.into_any_element()
     }
 
-    /// The sign-in form: one input for the display name. Signing in
-    /// creates (or renames) the device's reviewer identity and
-    /// announces it as a kind 0 profile.
+    /// The sign-in form, in two steps: the Nostr key first (pasted or
+    /// freshly generated), an optional published display name second.
+    /// The key is the identity; the name is only a kind 0 profile.
     fn render_review_signin(&mut self, font: gpui::Font, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let name = self.review_draft.1.clone();
-        let input = self.render_text_input("signin-input", &name, "Your display name", font);
+        match self.signin_step {
+            SigninStep::Key => {
+                // the key never shows on screen: asterisks stand in
+                // for every character, and byte counts match so the
+                // caret maps through the same field state
+                let masked = "*".repeat(self.review_draft.1.len());
+                let input =
+                    self.render_text_input("signin-input", &masked, "nsec1… or 64-hex private key", font);
+                self.render_signin_frame(
+                    "Sign in with your Nostr key",
+                    input,
+                    Some("Reviews are signed with this key; it stays on this device."),
+                    "Continue",
+                    Some("create a new key instead"),
+                    cx,
+                )
+            }
+            SigninStep::Name => {
+                let text = self.review_draft.1.clone();
+                let input = self.render_text_input(
+                    "signin-input",
+                    &text,
+                    "Display name (optional, publishes a public profile)",
+                    font,
+                );
+                let notice = self.new_key_notice.as_deref().map(|nsec| {
+                    format!("New key, copy it now, it is your identity: {nsec}")
+                });
+                self.render_signin_frame(
+                    "Signing in",
+                    input,
+                    notice.as_deref(),
+                    "Start reviewing",
+                    Some("Skip"),
+                    cx,
+                )
+            }
+        }
+    }
+
+    /// The sign-in form chrome around its single input: title, optional
+    /// notice or hint line, confirm button and optional secondary link.
+    fn render_signin_frame(
+        &mut self,
+        title: &str,
+        input: gpui::Stateful<gpui::Div>,
+        notice: Option<&str>,
+        confirm: &str,
+        secondary: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let confirm_id: SharedString =
+            format!("btn-{}", confirm.to_lowercase().replace(' ', "-")).into();
+        let mut footer = div().flex().items_center().gap_3().child(
+            button(confirm_id, None, confirm, true).on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
+                match this.signin_step {
+                    SigninStep::Key => this.accept_nsec(cx),
+                    SigninStep::Name => this.finish_sign_in(cx),
+                }
+            })),
+        );
+        if let Some(link) = secondary {
+            footer = footer.child(
+                div()
+                    .id(SharedString::from(format!("link-{link}")))
+                    .cursor_pointer()
+                    .text_size(px(ui::TEXT_SIZE_LABEL))
+                    .text_color(ui::text_dim())
+                    .hover(|style| style.text_color(ui::text()))
+                    .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
+                        if this.signin_step == SigninStep::Key {
+                            this.new_identity(cx);
+                        } else {
+                            this.finish_sign_in(cx);
+                        }
+                    }))
+                    .child(link.to_string()),
+            );
+        }
 
         let mut form = div()
             .flex()
@@ -2237,30 +2442,17 @@ impl StoreRoot {
                 div()
                     .text_size(px(ui::TEXT_SIZE))
                     .text_color(ui::text())
-                    .child("Sign in to review"),
-            )
-            .child(input)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_size(px(ui::TEXT_SIZE_LABEL))
-                            .text_color(ui::text_dim())
-                            .child(
-                                "A local key is created on sign-in and never leaves this device.",
-                            ),
-                    )
-                    .child(
-                        button("btn-sign-in", None, "Sign in", true).on_click(cx.listener(
-                            |this, _e: &ClickEvent, _w, cx| {
-                                this.sign_in(cx);
-                            },
-                        )),
-                    ),
+                    .child(title.to_string()),
             );
+        if let Some(notice) = notice {
+            form = form.child(
+                div()
+                    .text_size(px(ui::TEXT_SIZE_LABEL))
+                    .text_color(ui::text_dim())
+                    .child(notice.to_string()),
+            );
+        }
+        form = form.child(input).child(footer);
         if let Some(error) = &self.review_error {
             form = form.child(
                 div()
@@ -2961,39 +3153,55 @@ fn review_relays() -> Vec<String> {
     }
 }
 
-/// The signed-in reviewer: the local key in memory plus the display
-/// name shown on the reviews they post.
-pub struct Reviewer {
-    keys: nostr::prelude::Keys,
-    pub name: String,
+/// Where the sign-in form is: the key question comes first, the
+/// optional profile name second.
+#[derive(Clone, Copy, PartialEq)]
+enum SigninStep {
+    Key,
+    Name,
 }
 
-/// Load the device's reviewer identity, if one has been created. The
-/// file holds the key hex and the chosen display name; the key is the
-/// identity, so it stays on disk across sign-outs.
+/// The signed-in reviewer: the Nostr key the reviews are signed with,
+/// its public key, and the display name if one was published (None:
+/// reviews resolve to a pubkey fragment until a profile exists).
+pub struct Reviewer {
+    keys: nostr::prelude::Keys,
+    pub pubkey: String,
+    pub name: Option<String>,
+}
+
+impl Reviewer {
+    /// What to call this reviewer in the UI: the published profile
+    /// name, else a short pubkey fragment.
+    pub fn display(&self) -> String {
+        self.name.clone().unwrap_or_else(|| {
+            format!("{}…", &self.pubkey[..self.pubkey.len().min(12)])
+        })
+    }
+}
+
+/// Load the device's reviewer identity, if one is saved. The file
+/// holds the secret key (nsec or hex) and the optional published
+/// name; the key is the identity, so it stays on disk across
+/// sign-outs.
 fn load_reviewer() -> Option<Reviewer> {
+    use nostr::key::GetPublicKey as _;
     let path = identity_path()?;
     let raw = std::fs::read_to_string(path).ok()?;
     let saved: serde_json::Value = serde_json::from_str(&raw).ok()?;
     let keys = nostr::prelude::Keys::parse(saved["secret_key"].as_str()?).ok()?;
     Some(Reviewer {
-        name: saved["name"].as_str().unwrap_or("anonymous").to_string(),
+        pubkey: keys.get_public_key().ok()?.to_string(),
+        name: saved["name"].as_str().map(str::to_string),
         keys,
     })
 }
 
-/// Create (or rename) the device's reviewer identity: generate the key
-/// when none exists, persist name and key, and announce the kind 0
-/// profile so other readers can resolve the name.
-fn create_reviewer(name: &str) -> anyhow::Result<Reviewer> {
-    use nostr::prelude::*;
+/// Persist the signed-in identity: the key as given plus the optional
+/// published name. The key leaves the memory of this machine only
+/// when the file is deleted.
+fn save_reviewer(keys: &nostr::prelude::Keys, name: Option<&str>) -> anyhow::Result<()> {
     let path = identity_path().ok_or_else(|| anyhow::anyhow!("XDG_DATA_HOME not set"))?;
-    // an existing key is reused: the identity lives on this device,
-    // sign-in only (re)names it
-    let keys = match load_reviewer() {
-        Some(existing) => existing.keys,
-        None => Keys::generate(),
-    };
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -3007,26 +3215,19 @@ fn create_reviewer(name: &str) -> anyhow::Result<Reviewer> {
         use std::os::unix::fs::PermissionsExt as _;
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
     }
-    let reviewer = Reviewer {
-        name: name.to_string(),
-        keys,
-    };
-    // best effort: a review still reads fine as a pubkey until the
-    // profile propagates
-    if let Err(err) = announce_reviewer(&reviewer) {
-        eprintln!("profile announce failed: {err:#}");
-    }
-    Ok(reviewer)
+    Ok(())
 }
 
 /// Publish the reviewer's kind 0 profile so review authors resolve to
 /// names. Best effort: a review still reads fine as a pubkey until the
-/// profile propagates.
-fn announce_reviewer(reviewer: &Reviewer) -> anyhow::Result<()> {
+/// profile propagates. Note: kind 0 is replaceable, so this overwrite
+/// is total; a key with an established profile loses fields not sent
+/// here (known limitation until profile management is a real thing).
+fn announce_reviewer(keys: &nostr::prelude::Keys, name: &str) -> anyhow::Result<()> {
     let event = orchard_nostr::events::sign_profile(
-        &reviewer.keys,
+        keys,
         &orchard_nostr::events::Profile {
-            name: Some(reviewer.name.clone()),
+            name: Some(name.to_string()),
             nip05: None,
         },
     )?;
