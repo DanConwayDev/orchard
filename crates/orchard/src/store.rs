@@ -2549,10 +2549,17 @@ impl StoreRoot {
                         }))
                         .children(fresh.then(|| {
                             // a sprout: a key young in the feed; the
-                            // words live on hover and in the line below
+                            // words live on hover and in the line below.
+                            // The transparent hover style is load-bearing:
+                            // gpui registers its repaint-on-hover-change
+                            // listener only for elements with a hover
+                            // style, and a visible tooltip hides during
+                            // prepaint, so without it the tooltip never
+                            // sees the mouse leave.
                             div()
                                 .id("new-key")
                                 .flex_none()
+                                .hover(|style| style.bg(gpui::transparent_black()))
                                 .tooltip(|_window, cx| {
                                     cx.new(|_| {
                                         TextTooltip("New key: first seen on the relays under a week ago")
