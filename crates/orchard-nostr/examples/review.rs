@@ -1,12 +1,15 @@
-//! Sign and publish one review (kind 30065): the reference for the
-//! client's post path, useful as a test driver for the review pipeline.
+//! Sign and publish one review (kind 30065): the demo seeder for the
+//! comment rows. Reviews in the real client are signed through the
+//! user's NIP-46 remote signer; this tool exists so a dev relay can
+//! stage scenarios the client renders.
 //!
-//!     review --nsec <hex> --app-id com.orchard.Hello --rating 4.5 \
-//!            --text "Works on my machine." [--relay ws://...]
+//!     review --nsec <hex> [--relay ws://...] <app-id> <rating> <text...>
+//!
+//! Rating is 0.0 to 5.0 (omit the tag with --no-rating). Without
+//! --nsec an ephemeral key is generated (printed once, then gone).
 
 use anyhow::{bail, Result};
 use nostr::prelude::*;
-use orchard_nostr::events::{self, Review};
 use orchard_nostr::relay;
 
 fn main() {
@@ -20,26 +23,36 @@ fn run() -> Result<()> {
     let mut values = std::env::args().skip(1);
     let mut nsec = std::env::var("ORCHARD_NSEC").ok();
     let mut relays = vec![match std::env::var("ORCHARD_RELAYS") {
-        Ok(value) if !value.trim().is_empty() => {
-            value.split(',').next().unwrap_or("ws://127.0.0.1:8008").to_string()
-        }
+        Ok(value) if !value.trim().is_empty() => value
+            .split(',')
+            .next()
+            .unwrap_or("ws://127.0.0.1:8008")
+            .to_string(),
         _ => "ws://127.0.0.1:8008".to_string(),
     }];
-    let mut app_id = None;
-    let mut rating = None;
-    let mut text = String::new();
+    let mut rating: Option<String> = None;
+    let mut positional: Vec<String> = Vec::new();
     while let Some(flag) = values.next() {
-        let mut next = || values.next().ok_or_else(|| anyhow::anyhow!("missing value for {flag}"));
+        let mut next =
+            || values.next().ok_or_else(|| anyhow::anyhow!("missing value for {flag}"));
         match flag.as_str() {
             "--nsec" => nsec = Some(next()?),
             "--relay" => relays = vec![next()?],
-            "--app-id" => app_id = Some(next()?),
-            "--rating" => rating = Some(next()?.parse::<f32>()?),
-            "--text" => text = next()?,
-            other => bail!("unknown argument {other:?}"),
+            "--rating" => rating = Some(next()?),
+            other => positional.push(other.to_string()),
         }
     }
-    let app_id = app_id.ok_or_else(|| anyhow::anyhow!("--app-id required"))?;
+    if positional.len() < 2 {
+        bail!("usage: review --nsec <hex> [--rating 0-5] <app-id> <text...>");
+    }
+    let app_id = positional.remove(0);
+    let content = positional.join(" ");
+    if let Some(value) = &rating {
+        let value: f32 = value.parse()?;
+        if !(0.0..=5.0).contains(&value) {
+            bail!("rating must be 0.0 to 5.0");
+        }
+    }
     let keys = match nsec.as_deref() {
         Some(raw) => Keys::parse(raw.trim())?,
         None => {
@@ -51,18 +64,16 @@ fn run() -> Result<()> {
             generated
         }
     };
-    println!("reviewer {}", keys.get_public_key()?.to_string());
-    let event = events::sign_review(
-        &keys,
-        &Review {
-            app_id,
-            rating,
-            content: text,
-        },
-    )?;
+    println!("reviewing as {}", keys.get_public_key()?.to_string());
+    let mut builder = EventBuilder::new(Kind::Custom(orchard_nostr::KIND_REVIEW as u16), &content)
+        .tag(Tag::custom("d", [app_id.as_str()]));
+    if let Some(rating) = &rating {
+        builder = builder.tag(Tag::custom("rating", [rating.as_str()]));
+    }
+    let event = builder.finalize(&keys)?;
     for relay_url in &relays {
         relay::send(relay_url, &[event.clone()])?;
     }
-    println!("review published");
+    println!("review published: {app_id}");
     Ok(())
 }

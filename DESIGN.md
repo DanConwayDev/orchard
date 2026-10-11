@@ -444,9 +444,12 @@ opening items because they need the push, the signing secret, and a tag.
       `_` local part) is checked against the domain's `/.well-known/nostr.json` —
       the domain is the only party that can confirm it. One fetch per claim per
       session, on the background pool; any failure is unverified, never a guess.
-      The address renders (with a check and a hover note, e.g. "{domain} lists
-      {local} as this key") only when the record named the publisher's key; an
-      unchecked or failed claim falls back to the profile name or truncated npub.
+      The check covers publishers and the signed-in identity's own claim. The
+      address renders (with a check and a hover note, e.g. "{domain} lists
+      {local} as this key") only when the record named the key; an unchecked or
+      failed claim falls back to the profile name or truncated npub. The account
+      menu wears the same check beside the name: "Signed in as <name>" plus the
+      check when the domain backed the claim, plain npub when there is neither.
       Dev fixture: the Hello manifest claims `orchard@localhost:8443`, answered
       by the same TLS cert the demo registry uses.
 - [ ] Client relay configuration: a settings surface over the rendezvous set

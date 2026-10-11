@@ -628,17 +628,39 @@ impl StoreRoot {
         cx.notify();
     }
 
+    /// The key's verified NIP-05 claim: the domain backed it AND the
+    /// profile still carries the same claim (a changed claim reads as
+    /// unverified until rechecked).
+    fn verified_nip05(&self, pubkey: &str) -> Option<String> {
+        let verdict = self.nip05.get(pubkey)?;
+        if !verdict.verified {
+            return None;
+        }
+        match self
+            .profiles
+            .get(pubkey)
+            .and_then(|p| p.nip05.as_deref())
+        {
+            Some(claim) if claim == verdict.claim => Some(verdict.claim.clone()),
+            _ => None,
+        }
+    }
+
     /// Kick a NIP-05 check for every publisher whose profile claims an
     /// address and whose claim has no verdict yet: the domain behind
     /// the claim is the only party that can confirm it, so the client
     /// asks, once per claim per session, and renders the address only
-    /// when the answer is yes. A claim on its own shows nothing.
+    /// when the answer is yes. A claim on its own shows nothing. The
+    /// signed-in identity's own claim joins the scan: the account menu
+    /// wears the same check.
     fn ensure_nip05_checks(&mut self, cx: &mut Context<Self>) {
         let pending: Vec<(String, String)> = self
             .apps
             .iter()
             .filter(|app| app.source == Source::Publisher)
             .filter_map(|app| app.publisher.clone())
+            // the signed-in identity's own claim: the account menu
+            .chain(self.reviewer.as_ref().map(|r| r.signer_pubkey.clone()))
             .filter(|pubkey| !self.nip05.contains_key(pubkey) && !self.nip05_checking.contains(pubkey))
             .filter_map(|pubkey| {
                 let claim = self.profiles.get(&pubkey)?.nip05.clone()?;
@@ -2362,17 +2384,11 @@ impl StoreRoot {
                 )
                 .children(app.publisher.as_ref().map(|pubkey| {
                     let profile = self.profiles.get(pubkey);
-                    let verdict = self.nip05.get(pubkey);
                     // the address shows only when the domain backed
                     // it: a claim alone is marketing, the check is
                     // the fact. A claim that no longer matches the
                     // profile reads as unverified until rechecked.
-                    let verified_claim = verdict
-                        .filter(|verdict| verdict.verified)
-                        .filter(|verdict| {
-                            profile.and_then(|p| p.nip05.as_deref()) == Some(verdict.claim.as_str())
-                        })
-                        .map(|verdict| verdict.claim.clone());
+                    let verified_claim = self.verified_nip05(pubkey);
                     let label = match &verified_claim {
                         Some(claim) => format!("Published by {claim}."),
                         None => {
@@ -4087,11 +4103,17 @@ impl StoreRoot {
     fn render_account_menu(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let anchor = self.account_menu.unwrap_or_default();
         let left = (anchor.x - px(170.)).max(px(8.));
-        let display = self
-            .reviewer
-            .as_ref()
-            .map(|reviewer| reviewer.display())
-            .unwrap_or_default();
+        let (display, signer) = match self.reviewer.as_ref() {
+            Some(reviewer) => (reviewer.display(), Some(reviewer.signer_pubkey.clone())),
+            None => (String::new(), None),
+        };
+        let note = signer
+            .as_deref()
+            .and_then(|pubkey| self.verified_nip05(pubkey))
+            .and_then(|claim| {
+                split_nip05(&claim)
+                    .map(|(local, domain)| format!("{domain} lists {local} as this key"))
+            });
         div()
             .absolute()
             .left(left)
@@ -4112,9 +4134,24 @@ impl StoreRoot {
                 div()
                     .px_3()
                     .py_1()
+                    .flex()
+                    .gap_1()
+                    .items_center()
                     .text_size(px(ui::TEXT_SIZE_LABEL))
                     .text_color(ui::text_dim())
-                    .child(format!("Signed in as {display}")),
+                    .child(format!("Signed in as {display}"))
+                    .children(note.map(|note| {
+                        // the domain backed this identity's claim;
+                        // the words live on hover
+                        div()
+                            .id("account-nip05")
+                            .flex_none()
+                            .hover(|style| style.bg(gpui::transparent_black()))
+                            .tooltip(move |_window, cx| {
+                                cx.new(|_| TextTooltip(note.clone().into())).into()
+                            })
+                            .child(ui::icon("icons/check.svg", 11., ui::accent()))
+                    })),
             )
             .child(
                 div()
