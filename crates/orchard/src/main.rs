@@ -41,18 +41,11 @@ fn start_indexd(catalog: orchard_core::CatalogFile) {
             let state = orchard_indexd::ServerState {
                 document: std::sync::Arc::new(catalog),
             };
-            // relay config for the embedded instance: ORCHARD_RELAYS if
-            // set, else the local dev relay so the M3 loop works out of
-            // the box
-            let urls = match std::env::var("ORCHARD_RELAYS") {
-                Ok(value) if !value.trim().is_empty() => value
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|url| !url.is_empty())
-                    .map(str::to_string)
-                    .collect(),
-                _ => vec!["ws://127.0.0.1:8008".to_string()],
-            };
+            // relay config for the embedded instance: ORCHARD_RELAYS
+            // if set, else the rendezvous set
+            let urls = orchard_nostr::relay::relay_urls(
+                std::env::var("ORCHARD_RELAYS").ok().as_deref(),
+            );
             let cache = std::env::var_os("XDG_DATA_HOME")
                 .map(std::path::PathBuf::from)
                 .map(|data| data.join("orchard/nostr-events.json"));

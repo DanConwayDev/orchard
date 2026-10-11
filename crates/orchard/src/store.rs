@@ -25,9 +25,6 @@ use crate::ui::{self, app_icon, badge, button};
 /// Port the in-process indexd listens on. The client is the remote.
 pub const INDEXD_PORT: u16 = 7780;
 
-/// The default dev relay, shared by the embedded indexd and review posts.
-const LOCAL_RELAY: &str = "ws://127.0.0.1:8008";
-
 const FLATHUB_REMOTE: &str = "flathub";
 const APPSTREAM_ARCH: &str = "x86_64";
 
@@ -3813,17 +3810,9 @@ fn post_review(reviewer: &Reviewer, app_id: &str, rating: f32, content: String) 
 }
 
 /// Relays to post reviews to: the same list the embedded indexd reads
-/// from (ORCHARD_RELAYS or the local dev relay).
+/// from (ORCHARD_RELAYS or the rendezvous set).
 fn review_relays() -> Vec<String> {
-    match std::env::var("ORCHARD_RELAYS") {
-        Ok(value) if !value.trim().is_empty() => value
-            .split(',')
-            .map(str::trim)
-            .filter(|url| !url.is_empty())
-            .map(str::to_string)
-            .collect(),
-        _ => vec![LOCAL_RELAY.to_string()],
-    }
+    orchard_nostr::relay::relay_urls(std::env::var("ORCHARD_RELAYS").ok().as_deref())
 }
 
 /// Social relays to read the signed-in identity's own contact list

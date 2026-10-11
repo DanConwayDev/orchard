@@ -48,15 +48,10 @@ fn load_catalog() -> anyhow::Result<CatalogFile> {
     anyhow::bail!("no catalog found (tried {:?})", candidates)
 }
 
-/// Relays to subscribe to, from ORCHARD_RELAYS (comma-separated).
+/// Relays to subscribe to: ORCHARD_RELAYS (comma-separated) or the
+/// rendezvous set.
 fn relay_config() -> RelayConfig {
-    let urls: Vec<String> = std::env::var("ORCHARD_RELAYS")
-        .unwrap_or_default()
-        .split(',')
-        .map(str::trim)
-        .filter(|url| !url.is_empty())
-        .map(str::to_string)
-        .collect();
+    let urls = orchard_nostr::relay::relay_urls(std::env::var("ORCHARD_RELAYS").ok().as_deref());
     let cache = std::env::var_os("XDG_DATA_HOME")
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| {

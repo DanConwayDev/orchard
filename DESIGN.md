@@ -355,6 +355,20 @@ ride it on every request; registries that never challenge (the demo registry) ke
 the plain path. The GITHUB_TOKEN needs `packages: write`; the ghcr package flips
 public in its settings after the first push.
 
+**Relay topology: the rendezvous set (decided).** Nostr relays do not gossip to
+each other, so a publisher and a reader must share at least one relay for anything
+to flow. The model is a small, public, versioned **rendezvous set**
+(`RENDEZVOUS_RELAYS` in orchard-nostr, currently `wss://relay.primal.net` and
+`wss://nos.lol`, the same pair the social reads use): every publisher's manifest
+lists at least one of them, every client defaults to all of them, and discovery is
+the overlap. The relays are mailboxes, not trust roots: events are signed, so which
+relay an event came from affects availability, never integrity. The dev loop keeps
+the demo relay by `ORCHARD_RELAYS` in run.sh. Flathub comparison: Flathub's central
+repo is one rendezvous point with a gatekeeper; Orchard's is a list with none.
+Pointer-following (NIP-65 kind 10002, "my events live over here") is the future
+edge for self-hosting publishers, fetched by indexd on demand; not part of this
+floor.
+
 **M6: reviews + web of trust; self-distribution.** CI builds Orchard's own `.flatpak`
 bundle; dogfood the update path by updating Orchard through Orchard.
 

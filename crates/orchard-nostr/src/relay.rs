@@ -18,6 +18,31 @@ use tungstenite::Message;
 
 use crate::Feed;
 
+/// The rendezvous relay set: where publishers announce catalog events
+/// and where clients read them from. Small and public on purpose. The
+/// client's default list and every publisher's manifest overlap here;
+/// discovery is the overlap, and the relays themselves are mailboxes,
+/// not trust roots. Pointer-following (NIP-65) for self-hosting
+/// publishers is a future edge, not part of this floor.
+pub const RENDEZVOUS_RELAYS: &[&str] = &["wss://relay.primal.net", "wss://nos.lol"];
+
+/// Parse an `ORCHARD_RELAYS`-style comma list, falling back to the
+/// rendezvous set when unset or blank.
+pub fn relay_urls(env_value: Option<&str>) -> Vec<String> {
+    match env_value {
+        Some(value) if !value.trim().is_empty() => value
+            .split(',')
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .map(str::to_string)
+            .collect(),
+        _ => RENDEZVOUS_RELAYS
+            .iter()
+            .map(|url| url.to_string())
+            .collect(),
+    }
+}
+
 /// NIP-82 kinds Orchard reads: profiles, listings, releases, assets,
 /// reviews.
 const SUB_KINDS: [u16; 5] = [
@@ -210,6 +235,21 @@ fn contacts_from_event(event: &Event) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The relay list parser: env wins, blank falls back to the
+    /// rendezvous set.
+    #[test]
+    fn relay_urls_falls_back_to_rendezvous() {
+        assert_eq!(
+            relay_urls(Some("ws://a:1, ws://b:2")),
+            vec!["ws://a:1", "ws://b:2"]
+        );
+        assert_eq!(
+            relay_urls(None),
+            RENDEZVOUS_RELAYS.iter().map(|url| url.to_string()).collect::<Vec<_>>()
+        );
+        assert_eq!(relay_urls(Some("  ")).len(), RENDEZVOUS_RELAYS.len());
+    }
 
     /// The contact list's follows are its p tags, in tag order.
     #[test]
