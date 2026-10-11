@@ -2603,9 +2603,7 @@ impl StoreRoot {
                     .name
                     .clone()
                     .or_else(|| review.nip05.clone())
-                    .unwrap_or_else(|| {
-                        format!("{}…", &review.pubkey[..review.pubkey.len().min(12)])
-                    });
+                    .unwrap_or_else(|| short_npub(&review.pubkey));
                 let when = relative_time(review.created_at);
                 let flagged_publisher = is_publisher_review(review, publisher);
                 let fresh = is_new_key(&self.first_seen, &review.pubkey, now);
@@ -3886,14 +3884,27 @@ pub struct Reviewer {
 
 impl Reviewer {
     /// What to call this reviewer in the UI: the published profile
-    /// name, else a short pubkey fragment.
+    /// name, else a truncated npub (the format Nostr users expect,
+    /// not raw hex).
     pub fn display(&self) -> String {
-        self.name.clone().unwrap_or_else(|| {
-            format!(
-                "{}…",
-                &self.signer_pubkey[..self.signer_pubkey.len().min(12)]
-            )
-        })
+        self.name
+            .clone()
+            .unwrap_or_else(|| short_npub(&self.signer_pubkey))
+    }
+}
+
+/// The identity's fallback display: a truncated npub. The full npub
+/// is the identifier of record; a label is not the place for 63
+/// characters. Unparseable keys keep the hex fragment.
+fn short_npub(pubkey: &str) -> String {
+    use nostr::nips::nip19::ToBech32 as _;
+    let npub = nostr::prelude::PublicKey::from_hex(pubkey)
+        .ok()
+        .and_then(|key| key.to_bech32().ok());
+    match npub {
+        Some(npub) if npub.len() > 14 => format!("{}…", &npub[..14]),
+        Some(npub) => npub,
+        None => format!("{}…", &pubkey[..pubkey.len().min(12)]),
     }
 }
 
@@ -4211,8 +4222,18 @@ mod tests {
     }
 
     #[test]
-    fn circle_reviews_are_counted_and_averaged() {
-        let reviews = vec![
+    fn short_npub_truncates_and_falls_back() {
+        // the demo publisher key, bech32-encoded and cut at 14 chars
+        let npub = short_npub("ec2c39e7a8a4c38b9c8b9e3c8f3ab4b09bd0e3b98b6c1b3b0f2e3d4c5b6a7988");
+        assert!(npub.starts_with("npub1"));
+        assert!(npub.ends_with('…'));
+        assert_eq!(npub.chars().count(), 15);
+        // garbage keys keep the hex fragment
+        assert_eq!(short_npub("not-hex"), "not-hex…");
+    }
+
+    #[test]
+    fn circle_reviews_are_counted_and_averaged() {        let reviews = vec![
             trust_review("friend", Some(4.0)),
             trust_review("stranger", Some(1.0)),
             trust_review("mute", None),
