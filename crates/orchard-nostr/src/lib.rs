@@ -792,6 +792,19 @@ mod tests {
     /// The migration case: the old key's designation hands the app id
     /// to the successor, whose listing then stands alone instead of
     /// doubling the row.
+
+    /// The live migration event from the dev relay, absorbed cold:
+    /// signature, tags, and map placement all hold for real data.
+    #[test]
+    fn live_migration_event_absorbs() {
+        let raw = r#"{"id":"aae5473ea4a30738e0595cfb23bdd741a6faae540e2372e445a8edc9a60128b5","pubkey":"ec2c39e7fb46ddea4e916c240661c4e0ba5128fe6cf8ccf10fa074b95b63379d","created_at":1791706308,"kind":30066,"tags":[["d","com.orchard.Orchard"],["p","14cad7029d2b32e46eb47172d47988d180b17ac97de07a57fdb16a5a97d50365"]],"content":"","sig":"a787e0aefa18be9547faa5d6fb4dd250111b62643d999f0afb641b2b3af0ab85615371544c1824fb8731d34db9f2154cff2dce09f57d5973b4f8b080d32c3306"}"#;
+        let event = Event::from_json(raw).unwrap();
+        let mut feed = Feed::new();
+        let absorbed = feed.absorb(event).unwrap();
+        assert!(absorbed, "the migration must absorb");
+        assert_eq!(feed.event_jsons().len(), 1);
+    }
+
     #[test]
     fn migrated_listing_steps_aside() {
         let a = demo_keys();

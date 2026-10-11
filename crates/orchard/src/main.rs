@@ -46,8 +46,14 @@ fn start_indexd(catalog: orchard_core::CatalogFile) {
             let urls = orchard_nostr::relay::relay_urls(
                 std::env::var("ORCHARD_RELAYS").ok().as_deref(),
             );
+            // the event cache lives beside the other client state:
+            // XDG when set, the home fallback otherwise
             let cache = std::env::var_os("XDG_DATA_HOME")
                 .map(std::path::PathBuf::from)
+                .or_else(|| {
+                    std::env::var_os("HOME")
+                        .map(|home| std::path::PathBuf::from(home).join(".local/share"))
+                })
                 .map(|data| data.join("orchard/nostr-events.json"));
             let relays = orchard_indexd::RelayConfig { urls, cache };
             if let Err(err) = runtime.block_on(orchard_indexd::serve(addr, state, relays)) {
