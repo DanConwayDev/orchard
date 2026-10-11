@@ -20,7 +20,7 @@ use gpui::{
 
 use orchard_core::{oci, permissions, CatalogFile, Risk, Source, StoreApp};
 
-use crate::ui::{self, app_icon, badge, button};
+use crate::ui::{self, app_icon, badge, button, Tone};
 
 /// Port the in-process indexd listens on. The client is the remote.
 pub const INDEXD_PORT: u16 = 7780;
@@ -2670,7 +2670,7 @@ impl StoreRoot {
                                     format!("row-open-{action_id}-{}", row_publisher.as_deref().unwrap_or("")),
                                     Some("icons/play.svg"),
                                     "Open",
-                                    true,
+                                    Tone::Accent,
                                 )
                                 .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
                                     cx.stop_propagation();
@@ -2686,7 +2686,7 @@ impl StoreRoot {
                                             ),
                                             Some("icons/update.svg"),
                                             "Update",
-                                            false,
+                                            Tone::Quiet,
                                         )
                                         .on_click(cx.listener(
                                             move |this, _e: &ClickEvent, _w, cx| {
@@ -2703,7 +2703,7 @@ impl StoreRoot {
                                     ),
                                     Some("icons/trash.svg"),
                                     if remove_confirming { "Sure?" } else { "Remove" },
-                                    false,
+                                    Tone::Danger,
                                 )
                                 .on_click(cx.listener(
                                     move |this, _e: &ClickEvent, _w, cx| {
@@ -2745,7 +2745,7 @@ impl StoreRoot {
                                         ),
                                         Some("icons/plus.svg"),
                                         if confirming { "Sure?" } else { "Install" },
-                                        true,
+                                        Tone::Accent,
                                     )
                                     .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
                                         cx.stop_propagation();
@@ -3215,7 +3215,7 @@ impl StoreRoot {
                             if installed {
                                 let open_id = app_id.clone();
                                 buttons.push(
-                                    button("btn-open", Some("icons/play.svg"), "Open", true)
+                                    button("btn-open", Some("icons/play.svg"), "Open", Tone::Accent)
                                         .on_click(
                                             cx.listener(move |this, _e: &ClickEvent, _w, cx| {
                                                 this.open(open_id.as_str(), cx);
@@ -3234,7 +3234,7 @@ impl StoreRoot {
                                             "btn-update",
                                             Some("icons/update.svg"),
                                             "Update",
-                                            false,
+                                            Tone::Quiet,
                                         )
                                         .on_click(cx.listener(
                                             move |this, _e: &ClickEvent, _w, cx| {
@@ -3255,7 +3255,7 @@ impl StoreRoot {
                                         "btn-remove",
                                         Some("icons/trash.svg"),
                                         if remove_confirming { "Sure?" } else { "Remove" },
-                                        false,
+                                        Tone::Danger,
                                     )
                                     .on_click(cx.listener(
                                         move |this, _e: &ClickEvent, _w, cx| {
@@ -3290,7 +3290,7 @@ impl StoreRoot {
                                     "Install"
                                 };
                                 buttons.push(
-                                    button("btn-install", Some("icons/plus.svg"), label, true)
+                                    button("btn-install", Some("icons/plus.svg"), label, Tone::Accent)
                                         .on_click(cx.listener(
                                             move |this, _e: &ClickEvent, _w, cx| {
                                                 if confirming {
@@ -3940,7 +3940,7 @@ impl StoreRoot {
             .child(input)
             .child(
                 div().flex().items_center().gap_3().child(
-                    button("btn-start-reviewing", None, "Start reviewing", true).on_click(
+                    button("btn-start-reviewing", None, "Start reviewing", Tone::Accent).on_click(
                         cx.listener(|this, _e: &ClickEvent, _w, cx| {
                             this.finish_sign_in(cx);
                         }),
@@ -4104,7 +4104,7 @@ impl StoreRoot {
                         }),
                 )
                 .child(
-                    button("btn-post-review", None, "Post review", true).on_click(
+                    button("btn-post-review", None, "Post review", Tone::Accent).on_click(
                         cx.listener({
                             let app_id = app_id.to_string();
                             move |this, _e: &ClickEvent, _w, cx| {
@@ -4970,7 +4970,7 @@ impl StoreRoot {
                             SharedString::from(format!("{group_id}-remove-{index}")),
                             Some("icons/trash.svg"),
                             "",
-                            false,
+                            Tone::Quiet,
                         )
                         .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
                             this.remove_relay(target, index, cx);
@@ -5036,7 +5036,7 @@ impl StoreRoot {
                             SharedString::from(format!("{group_id}-reset")),
                             None,
                             "Use built-in set",
-                            false,
+                            Tone::Quiet,
                         )
                         .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
                             this.reset_relays(target, cx);
@@ -5062,7 +5062,7 @@ impl StoreRoot {
                             SharedString::from(format!("{group_id}-add")),
                             Some("icons/plus.svg"),
                             "Add",
-                            false,
+                            Tone::Quiet,
                         )
                         .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
                             this.relay_target = Some(target);
@@ -5291,7 +5291,7 @@ impl StoreRoot {
                                     "settings-clear-images",
                                     None,
                                     "Clear",
-                                    false,
+                                    Tone::Quiet,
                                 )
                                 .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
                                     this.clear_image_cache(cx);
@@ -5304,7 +5304,7 @@ impl StoreRoot {
                                     "settings-clear-events",
                                     None,
                                     "Clear",
-                                    false,
+                                    Tone::Quiet,
                                 )
                                 .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
                                     this.clear_event_cache(cx);
@@ -5395,7 +5395,7 @@ impl StoreRoot {
                     .child(ui::icon("icons/chevron_down.svg", 11., ui::text_dim()))
                     .into_any_element()
             }
-            None => button("btn-sign-in-header", None, "Sign in", false)
+            None => button("btn-sign-in-header", None, "Sign in", Tone::Quiet)
                 .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
                     this.open_signin_modal(false, cx);
                 }))

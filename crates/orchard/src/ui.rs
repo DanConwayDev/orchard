@@ -240,6 +240,12 @@ pub fn risk_color(risk: Risk) -> Rgba {
     }
 }
 
+/// The destructive-action color: the same red the high-risk
+/// permission badges wear, so a Remove reads as danger everywhere.
+pub fn danger() -> Rgba {
+    get(&URGENT)
+}
+
 /// The two-hop web-of-trust color.
 pub fn circle2() -> Rgba {
     rgb(CIRCLE2)
@@ -254,18 +260,31 @@ pub const TEXT_SIZE_EMPHASIS: f32 = 13.;
 
 // ---------- shared elements ----------
 
+/// A button's severity. `Quiet` is filler, `Accent` the primary
+/// action, `Danger` the destructive one: it wears the same red as
+/// the high-risk permission badges and goes solid on hover.
+pub enum Tone {
+    Quiet,
+    Accent,
+    Danger,
+}
+
+/// The whisper behind a colored label: keep the rgb bytes, swap in a
+/// ~13% alpha fill.
+fn tint(fg: Rgba) -> Rgba {
+    rgba((u32::from(fg) & 0xFF_FF_FF00) | 0x22)
+}
+
 /// A small tinted label: colored text on a whisper of the same color,
 /// kuma's rubber-band trick.
 pub fn badge(text: &str, fg: Rgba) -> Div {
-    // keep the rgb bytes, swap in a ~13% alpha fill
-    let tint: u32 = (u32::from(fg) & 0xFF_FF_FF00) | 0x22;
     div()
         .px_2()
         .py_0p5()
         .rounded_sm()
         .text_size(px(TEXT_SIZE_SMALL))
         .text_color(fg)
-        .bg(rgba(tint))
+        .bg(tint(fg))
         .child(text.to_string())
 }
 
@@ -279,15 +298,17 @@ pub fn icon(path: &'static str, size: f32, color: Rgba) -> gpui::AnyElement {
         .into_any_element()
 }
 
-/// A button. `accent` styles the primary action: solid accent with
-/// dark text, matching the active filter chips. Secondary buttons are
-/// quiet surfaces with a border that brightens on hover. `icon` is an
-/// optional leading glyph (`icons/…svg`).
+/// A button. `Tone::Accent` styles the primary action: solid accent
+/// with dark text, matching the active filter chips. `Tone::Quiet`
+/// buttons are quiet surfaces with a border that brightens on hover.
+/// `Tone::Danger` is the destructive action: risk-red text on a
+/// whisper of red, hovering to solid red so the act previews itself.
+/// `icon` is an optional leading glyph (`icons/…svg`).
 pub fn button(
     id: impl Into<SharedString>,
     glyph: Option<&'static str>,
     label: &str,
-    accent: bool,
+    tone: Tone,
 ) -> gpui::Stateful<Div> {
     let base = div()
         .id(id.into())
@@ -299,15 +320,20 @@ pub fn button(
         .rounded_sm()
         .text_size(px(TEXT_SIZE))
         .cursor_pointer();
-    let fg = if accent { accent_fg() } else { text() };
+    let fg = match tone {
+        Tone::Accent => accent_fg(),
+        Tone::Quiet => text(),
+        Tone::Danger => danger(),
+    };
     let base = base.children(glyph.map(|path| icon(path, 13., fg)));
-    if accent {
-        base.bg(get(&ACCENT))
+    match tone {
+        Tone::Accent => base
+            .bg(get(&ACCENT))
             .text_color(accent_fg())
             .hover(|style| style.bg(get(&ACCENT_HOVER)))
-            .child(label.to_string())
-    } else {
-        base.bg(surface())
+            .child(label.to_string()),
+        Tone::Quiet => base
+            .bg(surface())
             .border_1()
             .border_color(divider())
             .text_color(text())
@@ -316,7 +342,19 @@ pub fn button(
                     .bg(get(&SURFACE_HOVER))
                     .border_color(text())
             })
-            .child(label.to_string())
+            .child(label.to_string()),
+        Tone::Danger => base
+            .bg(tint(danger()))
+            .border_1()
+            .border_color(danger())
+            .text_color(danger())
+            .hover(|style| {
+                style
+                    .bg(danger())
+                    .border_color(danger())
+                    .text_color(accent_fg())
+            })
+            .child(label.to_string()),
     }
 }
 
@@ -386,8 +424,9 @@ pub fn small_button(
     id: impl Into<SharedString>,
     glyph: Option<&'static str>,
     label: &str,
-    accent: bool,
-) -> gpui::Stateful<Div> {    let base = div()
+    tone: Tone,
+) -> gpui::Stateful<Div> {
+    let base = div()
         .id(id.into())
         .flex()
         .items_center()
@@ -397,20 +436,37 @@ pub fn small_button(
         .rounded_sm()
         .text_size(px(TEXT_SIZE_SMALL))
         .cursor_pointer();
-    let fg = if accent { accent_fg() } else { text_dim() };
+    let fg = match tone {
+        Tone::Accent => accent_fg(),
+        Tone::Quiet => text_dim(),
+        Tone::Danger => danger(),
+    };
     let base = base.children(glyph.map(|path| icon(path, 11., fg)));
-    if accent {
-        base.bg(get(&ACCENT))
+    match tone {
+        Tone::Accent => base
+            .bg(get(&ACCENT))
             .text_color(accent_fg())
             .hover(|style| style.bg(get(&ACCENT_HOVER)))
-            .child(label.to_string())
-    } else {
-        base.bg(surface())
+            .child(label.to_string()),
+        Tone::Quiet => base
+            .bg(surface())
             .border_1()
             .border_color(divider())
             .text_color(text_dim())
             .hover(|style| style.text_color(text()).bg(surface_hover()))
-            .child(label.to_string())
+            .child(label.to_string()),
+        Tone::Danger => base
+            .bg(tint(danger()))
+            .border_1()
+            .border_color(danger())
+            .text_color(danger())
+            .hover(|style| {
+                style
+                    .bg(danger())
+                    .border_color(danger())
+                    .text_color(accent_fg())
+            })
+            .child(label.to_string()),
     }
 }
 
