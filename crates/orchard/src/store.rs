@@ -130,6 +130,12 @@ pub struct StoreRoot {
     graph: std::collections::BTreeMap<String, Vec<String>>,
     /// A graph fetch in flight.
     graph_fetching: bool,
+    /// Every profile indexd holds, parsed once: display names and
+    /// picture urls for the account trigger, review rows, and the
+    /// publisher line.
+    profiles: std::collections::BTreeMap<String, ProfileBits>,
+    /// A profiles fetch in flight.
+    profiles_fetching: bool,
     /// The reviews list is collapsed by default; the header toggles it.
     reviews_expanded: bool,
     /// The signed-in reviewer: a NIP-46 session (the remote signer's
@@ -221,6 +227,8 @@ impl StoreRoot {
             follows_fetching: false,
             graph: Default::default(),
             graph_fetching: false,
+            profiles: Default::default(),
+            profiles_fetching: false,
             reviews_expanded: false,
             reviewer: load_reviewer(),
             signin_modal: false,
@@ -264,8 +272,10 @@ impl StoreRoot {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.apply_orchard_apps(orchard_apps, cx);
-                // the reviewer graph is public data, no session needed
+                // the reviewer graph and the profiles are public data,
+                // no session needed
                 this.ensure_graph(cx);
+                this.ensure_profiles(cx);
                 // a session restored from identity.json learns its
                 // circle right away, not on the first tick
                 if this.reviewer.is_some() {
@@ -295,6 +305,8 @@ impl StoreRoot {
                         // the graph feeds the same pages' two-hop marks
                         this.ensure_graph(cx);
                     }
+                    // the account trigger wears the profile picture
+                    this.ensure_profiles(cx);
                     // a restored session picks its circle up here
                     if this.reviewer.is_some() && this.follows.is_empty() {
                         this.ensure_follows(cx);
@@ -624,6 +636,36 @@ impl StoreRoot {
     }
 
     // ----- reviews (kind 30065) -----
+
+    /// Fetch every profile indexd holds: display names and picture
+    /// urls for the account trigger, review rows, and the publisher
+    /// line. Public data; parsed once on arrival.
+    fn ensure_profiles(&mut self, cx: &mut Context<Self>) {
+        if self.profiles_fetching {
+            return;
+        }
+        self.profiles_fetching = true;
+        cx.spawn(async move |this, cx| {
+            let fetched = cx
+                .background_executor()
+                .spawn(async move { load_profiles() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.profiles_fetching = false;
+                match fetched {
+                    Ok(profiles) => {
+                        this.profiles = profiles;
+                        cx.notify();
+                    }
+                    Err(err) => {
+                        // keep the old profiles; the next tick retries
+                        eprintln!("profiles fetch failed: {err:#}");
+                    }
+                }
+            });
+        })
+        .detach();
+    }
 
     /// Fetch the reviewer contact-list graph from indexd (startup and
     /// the refresh tick; the crawler over there refreshes on its own
@@ -1007,11 +1049,7 @@ impl StoreRoot {
                     if let Some(reviewer) = this.reviewer.as_mut() {
                         if reviewer.name.is_none() {
                             if let Some(raw) = raws.get(&reviewer.signer_pubkey) {
-                                let value: serde_json::Value =
-                                    serde_json::from_str(raw).unwrap_or_default();
-                                if let Some(name) = value["name"].as_str() {
-                                    reviewer.name = Some(name.to_string());
-                                }
+                                reviewer.name = ProfileBits::parse(raw).name;
                             }
                         }
                     }
@@ -2095,10 +2133,14 @@ impl StoreRoot {
                         .child(ui::icon("icons/check.svg", 12., ui::accent())),
                 )
                 .children(app.publisher.as_ref().map(|pubkey| {
+                    let label = match self.profiles.get(pubkey).and_then(|p| p.name.clone()) {
+                        Some(name) => format!("Published by {name}."),
+                        None => format!("Published by {}.", short_npub(pubkey)),
+                    };
                     div()
                         .text_size(px(ui::TEXT_SIZE))
                         .text_color(ui::text())
-                        .child(format!("Published by {}.", short_npub(pubkey)))
+                        .child(label)
                 }))
                 .children(digest_badge)
                 .children(digest_failed.clone().map(|err| {
@@ -2721,6 +2763,7 @@ impl StoreRoot {
                         .child(notes.join(" · ")),
                 );
             }
+            let mut avatar_urls: Vec<String> = Vec::new();
             for (index, review) in reviews.iter().enumerate() {
                 let author = review
                     .name
@@ -2732,6 +2775,19 @@ impl StoreRoot {
                 let fresh = is_new_key(&self.first_seen, &review.pubkey, now);
                 let in_circle = self.follows.contains(&review.pubkey);
                 let in_circle2 = !in_circle && circle2_set.contains(&review.pubkey);
+                // the author's picture when their profile carries one;
+                // the glyph stands in until the fetch lands
+                let picture = self
+                    .profiles
+                    .get(&review.pubkey)
+                    .and_then(|p| p.picture.clone());
+                if let Some(url) = &picture {
+                    avatar_urls.push(url.clone());
+                }
+                let avatar_path = picture
+                    .as_deref()
+                    .and_then(|url| self.fetched.get(url))
+                    .and_then(|f| f.as_deref());
                 let mut row = div().flex().flex_col().gap_1().w_full().child(
                     div()
                         .flex()
@@ -2739,6 +2795,7 @@ impl StoreRoot {
                         .gap_2()
                         .text_size(px(ui::TEXT_SIZE_LABEL))
                         .text_color(ui::text_dim())
+                        .child(avatar(avatar_path, 14., ui::text_dim()))
                         .child(div().child(author))
                         .children(review.rating.map(|value| {
                             div().text_color(ui::accent()).child(stars(value))
@@ -2823,6 +2880,8 @@ impl StoreRoot {
                 }
                 body = body.child(row);
             }
+            // the rows' avatar fetches: results notify and repaint
+            self.ensure_fetched(avatar_urls, cx);
 
             // compose or invitation, depending on session state (the
             // sign-in modal is window-level, not part of the section)
@@ -3781,6 +3840,20 @@ impl StoreRoot {
     /// The account control: the sign-in entry point when signed out,
     /// the session menu trigger when not.
     fn render_account_trigger(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        // the profile picture when the identity's kind 0 carries one;
+        // fetched through the shared cache, glyph until it lands
+        let picture = self
+            .reviewer
+            .as_ref()
+            .and_then(|r| self.profiles.get(&r.signer_pubkey))
+            .and_then(|p| p.picture.clone());
+        if let Some(url) = &picture {
+            self.ensure_fetched(vec![url.clone()], cx);
+        }
+        let path = picture
+            .as_deref()
+            .and_then(|url| self.fetched.get(url))
+            .and_then(|f| f.as_deref());
         match self.reviewer.as_ref() {
             Some(_reviewer) => {
                 div()
@@ -3798,7 +3871,7 @@ impl StoreRoot {
                         this.account_menu = Some(event.position());
                         cx.notify();
                     }))
-                    .child(ui::icon("icons/person.svg", 14., ui::text()))
+                    .child(avatar(path, 14., ui::text()))
                     .child(ui::icon("icons/chevron_down.svg", 11., ui::text_dim()))
                     .into_any_element()
             }
@@ -3957,6 +4030,35 @@ fn load_graph() -> anyhow::Result<std::collections::BTreeMap<String, Vec<String>
     Ok(file.graph)
 }
 
+/// What the UI needs from a kind 0 profile, parsed once on arrival.
+#[derive(Default, Clone)]
+struct ProfileBits {
+    name: Option<String>,
+    picture: Option<String>,
+}
+
+impl ProfileBits {
+    /// Pull the display fields out of a raw kind 0 payload. Extra
+    /// fields (and hostile JSON) are not our problem: wrong shapes
+    /// parse as absent.
+    fn parse(raw: &str) -> ProfileBits {
+        let value: serde_json::Value = serde_json::from_str(raw).unwrap_or_default();
+        ProfileBits {
+            name: value["name"].as_str().map(str::to_string),
+            picture: value["picture"].as_str().map(str::to_string),
+        }
+    }
+}
+
+/// Fetch and parse every profile indexd holds. Blocking: runs on the
+/// background pool.
+fn load_profiles() -> anyhow::Result<std::collections::BTreeMap<String, ProfileBits>> {
+    Ok(fetch_profile_raws()?
+        .into_iter()
+        .map(|(pubkey, raw)| (pubkey, ProfileBits::parse(&raw)))
+        .collect())
+}
+
 /// Sign and send one review event through the signer, then publish it
 /// to the review relays. Blocking: runs on the background pool.
 fn post_review(reviewer: &Reviewer, app_id: &str, rating: f32, content: String) -> anyhow::Result<()> {
@@ -4036,6 +4138,26 @@ impl Reviewer {
         self.name
             .clone()
             .unwrap_or_else(|| short_npub(&self.signer_pubkey))
+    }
+}
+
+/// A round avatar from a cached image path; a person glyph when
+/// there is none (or the fetch has not landed yet).
+fn avatar(path: Option<&std::path::Path>, size: f32, fallback: gpui::Rgba) -> gpui::AnyElement {
+    match path {
+        Some(path) => div()
+            .flex_none()
+            .w(px(size))
+            .h(px(size))
+            .overflow_hidden()
+            .rounded_full()
+            .child(
+                gpui::img(path)
+                    .size_full()
+                    .object_fit(gpui::ObjectFit::Cover),
+            )
+            .into_any_element(),
+        None => ui::icon("icons/person.svg", size * 0.85, fallback),
     }
 }
 
@@ -4407,6 +4529,20 @@ mod tests {
         assert_eq!(aggregate.counted, 3);
         // the followed key also shows its sprout
         assert_eq!(aggregate.new_keys, 1);
+    }
+
+    #[test]
+    fn profile_bits_parses_display_fields() {
+        let bits = ProfileBits::parse(r#"{"name":"Marta","picture":"https://x/m.png","nip05":"marta@x.org"}"#);
+        assert_eq!(bits.name.as_deref(), Some("Marta"));
+        assert_eq!(bits.picture.as_deref(), Some("https://x/m.png"));
+        // wrong shapes parse as absent, never crash
+        let junk = ProfileBits::parse("not json");
+        assert!(junk.name.is_none());
+        assert!(junk.picture.is_none());
+        let empty = ProfileBits::parse(r#"{"about":""}"#);
+        assert!(empty.name.is_none());
+        assert!(empty.picture.is_none());
     }
 
     #[test]

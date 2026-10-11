@@ -396,9 +396,11 @@ opening items because they need the push, the signing secret, and a tag.
       through Orchard in the GUI and let a later tag deliver an update through it.
       (The repo can flip public whenever; secrets and ghcr work on the private
       repo too.)
-- [ ] Avatars: kind 0 `picture` in the account trigger and review rows via the
-      image cache; person glyph as fallback.
-- [ ] Publisher profiles on listings: the publisher's kind 0 name beats the npub
+- [x] Avatars: kind 0 `picture` in the account trigger and review rows via the
+      image cache; person glyph as fallback. (Built: profiles fetched and parsed
+      once per refresh; avatars are round `img` crops, the glyph stands in until
+      a fetch lands.)
+- [x] Publisher profiles on listings: the publisher's kind 0 name beats the npub
       fallback in "Published by".
 - [ ] Multi-publisher listings: the same app id signed by two publishers is the
       permissionless case; the page must disambiguate (show both, let the reader
