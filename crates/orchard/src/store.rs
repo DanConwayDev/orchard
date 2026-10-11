@@ -121,6 +121,12 @@ pub struct StoreRoot {
     first_seen: std::collections::BTreeMap<String, u64>,
     /// A reviews fetch in flight (whole document; small at this scale).
     reviews_fetching: bool,
+    /// The signed-in identity's own follows (kind 3 `p` tags): the
+    /// personal web of trust. Review rows from these keys carry the
+    /// circle glyph; empty when signed out or not yet fetched.
+    follows: std::collections::HashSet<String>,
+    /// A follows fetch in flight.
+    follows_fetching: bool,
     /// The reviews list is collapsed by default; the header toggles it.
     reviews_expanded: bool,
     /// The signed-in reviewer: a NIP-46 session (the remote signer's
@@ -208,6 +214,8 @@ impl StoreRoot {
             reviews: HashMap::new(),
             first_seen: Default::default(),
             reviews_fetching: false,
+            follows: Default::default(),
+            follows_fetching: false,
             reviews_expanded: false,
             reviewer: load_reviewer(),
             signin_modal: false,
@@ -251,6 +259,11 @@ impl StoreRoot {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.apply_orchard_apps(orchard_apps, cx);
+                // a session restored from identity.json learns its
+                // circle right away, not on the first tick
+                if this.reviewer.is_some() {
+                    this.ensure_follows(cx);
+                }
             });
         })
         .detach();
@@ -272,6 +285,10 @@ impl StoreRoot {
                     // reviews only move while somebody is looking
                     if this.page_open {
                         this.ensure_reviews(cx);
+                    }
+                    // a restored session picks its circle up here
+                    if this.reviewer.is_some() && this.follows.is_empty() {
+                        this.ensure_follows(cx);
                     }
                 });
             }
@@ -631,6 +648,36 @@ impl StoreRoot {
         .detach();
     }
 
+    /// Fetch the signed-in identity's contact list from the social
+    /// relays: one kind 3 per relay, read-only and anonymous. Guarded
+    /// like the other fetches. An empty union keeps the old set: a
+    /// relay outage must not erase a known circle. Kind 3 edits mid
+    /// session are picked up on the next launch.
+    fn ensure_follows(&mut self, cx: &mut Context<Self>) {
+        let Some(reviewer) = self.reviewer.as_ref() else {
+            return;
+        };
+        if self.follows_fetching {
+            return;
+        }
+        self.follows_fetching = true;
+        let pubkey = reviewer.signer_pubkey.clone();
+        cx.spawn(async move |this, cx| {
+            let fetched = cx
+                .background_executor()
+                .spawn(async move { load_follows(&pubkey) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.follows_fetching = false;
+                if !fetched.is_empty() {
+                    this.follows = fetched;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     /// Post the draft review for the open page: sign with the local
     /// identity, send to the relays, refresh the section.
     fn post_review(&mut self, app_id: &str, cx: &mut Context<Self>) {
@@ -891,6 +938,7 @@ impl StoreRoot {
                         // past reviews by this key pick up the new
                         // name once the profile propagates
                         this.ensure_reviews(cx);
+                        this.ensure_follows(cx);
                     }
                     // keep the pairing: the name question stays up with
                     // the error under it, so the user can retry
@@ -2406,38 +2454,53 @@ fn is_new_key(
 /// The reviews aggregate for one app. Publisher self-reviews are
 /// excluded from the average and count (their rows stay, flagged);
 /// reviews from new keys count fully and are only reported: a weak
-/// heuristic never drops a vote. Returns the average, the counted
-/// review total, how many counted reviews come from new keys, and
-/// how many publisher reviews were excluded.
+/// heuristic never drops a vote. Circle reviews (the signed-in
+/// identity's follows) are counted for the circle disclosure and its
+/// own average, under the same publisher exclusion.
+#[derive(Default, Debug, PartialEq)]
+struct ReviewsAggregate {
+    average: Option<f32>,
+    counted: usize,
+    new_keys: usize,
+    publisher_reviews: usize,
+    circle: usize,
+    circle_average: Option<f32>,
+}
+
 fn reviews_aggregate(
     reviews: &[orchard_core::Review],
     publisher: Option<&str>,
     first_seen: &std::collections::BTreeMap<String, u64>,
     now: i64,
-) -> (Option<f32>, usize, usize, usize) {
+    follows: &std::collections::HashSet<String>,
+) -> ReviewsAggregate {
+    let mut aggregate = ReviewsAggregate::default();
     let mut rated: Vec<f32> = Vec::new();
-    let mut new_keys = 0usize;
-    let mut publisher_reviews = 0usize;
+    let mut circle_rated: Vec<f32> = Vec::new();
     for review in reviews {
         if is_publisher_review(review, publisher) {
-            publisher_reviews += 1;
+            aggregate.publisher_reviews += 1;
             continue;
         }
         if let Some(rating) = review.rating {
             rated.push(rating);
         }
         if is_new_key(first_seen, &review.pubkey, now) {
-            new_keys += 1;
+            aggregate.new_keys += 1;
+        }
+        if follows.contains(&review.pubkey) {
+            aggregate.circle += 1;
+            if let Some(rating) = review.rating {
+                circle_rated.push(rating);
+            }
         }
     }
-    let average = (!rated.is_empty())
+    aggregate.average = (!rated.is_empty())
         .then(|| rated.iter().sum::<f32>() / rated.len() as f32);
-    (
-        average,
-        reviews.len() - publisher_reviews,
-        new_keys,
-        publisher_reviews,
-    )
+    aggregate.circle_average = (!circle_rated.is_empty())
+        .then(|| circle_rated.iter().sum::<f32>() / circle_rated.len() as f32);
+    aggregate.counted = reviews.len() - aggregate.publisher_reviews;
+    aggregate
 }
 
 impl StoreRoot {
@@ -2464,8 +2527,14 @@ impl StoreRoot {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(i64::MAX);
-        let (average, counted, new_keys, publisher_reviews) =
-            reviews_aggregate(&reviews, publisher, &self.first_seen, now);
+        let ReviewsAggregate {
+            average,
+            counted,
+            new_keys,
+            publisher_reviews,
+            circle,
+            circle_average,
+        } = reviews_aggregate(&reviews, publisher, &self.first_seen, now, &self.follows);
         let label = if reviews.is_empty() {
             "No reviews yet".to_string()
         } else {
@@ -2514,6 +2583,13 @@ impl StoreRoot {
             if new_keys > 0 {
                 notes.push(format!("{new_keys} of {counted} from new keys"));
             }
+            if circle > 0 {
+                let mut circle_note = format!("{circle} in your circle");
+                if let Some(value) = circle_average {
+                    circle_note.push_str(&format!(", avg {value:.1}"));
+                }
+                notes.push(circle_note);
+            }
             if !notes.is_empty() {
                 body = body.child(
                     div()
@@ -2533,6 +2609,7 @@ impl StoreRoot {
                 let when = relative_time(review.created_at);
                 let flagged_publisher = is_publisher_review(review, publisher);
                 let fresh = is_new_key(&self.first_seen, &review.pubkey, now);
+                let in_circle = self.follows.contains(&review.pubkey);
                 let mut row = div().flex().flex_col().gap_1().w_full().child(
                     div()
                         .flex()
@@ -2568,6 +2645,22 @@ impl StoreRoot {
                                     .into()
                                 })
                                 .child(ui::icon("icons/sprout.svg", 11., ui::accent()))
+                        }))
+                        .children(in_circle.then(|| {
+                            // the circle glyph: a reviewer the signed-in
+                            // identity follows. Same hover rules as the
+                            // sprout (the style is the repaint trigger).
+                            div()
+                                .id("circle")
+                                .flex_none()
+                                .hover(|style| style.bg(gpui::transparent_black()))
+                                .tooltip(|_window, cx| {
+                                    cx.new(|_| {
+                                        TextTooltip("In your circle: you follow this reviewer")
+                                    })
+                                    .into()
+                                })
+                                .child(ui::icon("icons/person.svg", 11., ui::accent()))
                         })),
                 );
                 if !review.content.is_empty() {
@@ -3731,6 +3824,37 @@ fn review_relays() -> Vec<String> {
     }
 }
 
+/// Social relays to read the signed-in identity's own contact list
+/// from (ORCHARD_SOCIAL_RELAYS or a default public set). Read-only,
+/// anonymous: the fetch carries only the key, nothing else.
+fn social_relays() -> Vec<String> {
+    match std::env::var("ORCHARD_SOCIAL_RELAYS") {
+        Ok(value) if !value.trim().is_empty() => value
+            .split(',')
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .map(str::to_string)
+            .collect(),
+        _ => vec!["wss://nos.social".to_string(), "wss://relay.damus.io".to_string()],
+    }
+}
+
+/// Read the identity's contact list from every social relay; the
+/// union of the `p` tags each serves. Blocking: runs on the
+/// background pool. Relays that fail shrink the union silently; the
+/// caller keeps the old set when the union comes back empty.
+fn load_follows(pubkey: &str) -> std::collections::HashSet<String> {
+    let timeout = std::time::Duration::from_secs(5);
+    let mut follows = std::collections::HashSet::new();
+    for relay in social_relays() {
+        match orchard_nostr::relay::fetch_contacts(&relay, pubkey, timeout) {
+            Ok(contacts) => follows.extend(contacts),
+            Err(err) => eprintln!("follows: {relay}: {err:#}"),
+        }
+    }
+    follows
+}
+
 /// A live pairing session: the ephemeral client key, the QR image and
 /// URI on screen, and the relay both ends must reach. The
 /// anti-spoofing secret rides in the poll loop that waits for the
@@ -4052,12 +4176,17 @@ mod tests {
             trust_review("pub-b", Some(1.0)),
             trust_review("pub-a", None),
         ];
-        let (average, counted, new_keys, publisher_reviews) =
-            reviews_aggregate(&reviews, Some("pub-a"), &Default::default(), 0);
-        assert_eq!(average, Some(1.0));
-        assert_eq!(counted, 1);
-        assert_eq!(new_keys, 0);
-        assert_eq!(publisher_reviews, 2);
+        let aggregate = reviews_aggregate(
+            &reviews,
+            Some("pub-a"),
+            &Default::default(),
+            0,
+            &Default::default(),
+        );
+        assert_eq!(aggregate.average, Some(1.0));
+        assert_eq!(aggregate.counted, 1);
+        assert_eq!(aggregate.new_keys, 0);
+        assert_eq!(aggregate.publisher_reviews, 2);
     }
 
     #[test]
@@ -4070,11 +4199,32 @@ mod tests {
         first_seen.insert("fresh".to_string(), 0);
         // the fresh key is first seen a minute before now; the other
         // key is absent from the table, which means unknown, not new
-        let (average, counted, new_keys, publisher_reviews) =
-            reviews_aggregate(&reviews, None, &first_seen, 60);
-        assert_eq!(average, Some(3.0));
-        assert_eq!(counted, 2);
-        assert_eq!(new_keys, 1);
-        assert_eq!(publisher_reviews, 0);
+        let aggregate = reviews_aggregate(&reviews, None, &first_seen, 60, &Default::default());
+        assert_eq!(aggregate.average, Some(3.0));
+        assert_eq!(aggregate.counted, 2);
+        assert_eq!(aggregate.new_keys, 1);
+        assert_eq!(aggregate.publisher_reviews, 0);
+    }
+
+    #[test]
+    fn circle_reviews_are_counted_and_averaged() {
+        let reviews = vec![
+            trust_review("friend", Some(4.0)),
+            trust_review("stranger", Some(1.0)),
+            trust_review("mute", None),
+        ];
+        let mut follows = std::collections::HashSet::new();
+        follows.insert("friend".to_string());
+        follows.insert("mute".to_string());
+        let mut first_seen = std::collections::BTreeMap::new();
+        first_seen.insert("friend".to_string(), 0);
+        let aggregate = reviews_aggregate(&reviews, None, &first_seen, 60, &follows);
+        assert_eq!(aggregate.circle, 2);
+        assert_eq!(aggregate.circle_average, Some(4.0));
+        // the global aggregate is unchanged by the circle lens
+        assert_eq!(aggregate.average, Some(2.5));
+        assert_eq!(aggregate.counted, 3);
+        // the followed key also shows its sprout
+        assert_eq!(aggregate.new_keys, 1);
     }
 }

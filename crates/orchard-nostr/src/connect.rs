@@ -231,7 +231,10 @@ fn decrypt_message<T>(
 
 /// The websocket needs short read timeouts so a poll can give up in
 /// time; the underlying stream differs between ws:// and wss://.
-fn set_read_timeout(socket: &mut WebSocket<MaybeTlsStream<std::net::TcpStream>>, timeout: Duration) {
+pub(crate) fn set_read_timeout(
+    socket: &mut WebSocket<MaybeTlsStream<std::net::TcpStream>>,
+    timeout: Duration,
+) {
     let _ = match socket.get_ref() {
         MaybeTlsStream::Plain(stream) => stream.set_read_timeout(Some(timeout)),
         MaybeTlsStream::Rustls(stream) => stream.get_ref().set_read_timeout(Some(timeout)),

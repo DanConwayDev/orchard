@@ -314,7 +314,22 @@ window-level modal (dimmed backdrop, centered panel): the panel swallows the mou
 down (`stop_propagation`) so clicks on it never reach the backdrop's close, a lesson
 the dropdowns never exposed because closing was their click behavior anyway.
 Sign-in from the header does not open the review composer; from the reviews flow it
-drops into the composer after the pairing completes.
+drops into the composer after the pairing completes. Tooltips hide during window
+prepaint, and gpui registers its repaint-on-hover-change listener only for elements
+with a hover style: a tooltip target without any hover style never learns the pointer
+left and the tooltip sticks. Every tooltip target carries a no-op hover style (the
+review rows' sprout and circle glyphs).
+
+**M6, circle slice (built).** The personal web of trust, Zapstore's own answer
+(reviews constrained to the reader's graph), starts at distance 1: at sign-in and at
+launch for a restored session, the client fetches the signed-in identity's own kind 3
+read-only and anonymously from default social relays (`wss://nos.social`,
+`wss://relay.damus.io`; `ORCHARD_SOCIAL_RELAYS` overrides): one REQ whose only input
+is the key, deadline-guarded, union across relays. Reviewers in that set carry a
+person glyph with a hover tooltip, and the details line gains "n in your circle,
+avg x.y"; the global aggregate is unchanged. A union that comes back empty keeps the
+old set (a relay outage must not erase a known circle); kind 3 edits mid session land
+on the next launch. Distance 2 comes later via indexd crawling reviewer kind 3s.
 
 **M6: reviews + web of trust; self-distribution.** CI builds Orchard's own `.flatpak`
 bundle; dogfood the update path by updating Orchard through Orchard.

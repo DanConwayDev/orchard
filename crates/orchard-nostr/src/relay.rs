@@ -101,8 +101,7 @@ fn handle_frame(text: &str, feed: &Arc<Mutex<Feed>>) -> Result<bool> {
 /// Publish signed events to one relay and wait for every OK. A rejection
 /// or notice is a hard error: a relay that silently drops events would
 /// strand the release.
-pub fn send(relay_url: &str, events: &[Event]) -> Result<()> {
-    let (mut socket, _response) = tungstenite::connect(relay_url)?;
+pub fn send(relay_url: &str, events: &[Event]) -> Result<()> {    let (mut socket, _response) = tungstenite::connect(relay_url)?;
     for event in events {
         socket.send(Message::text(
             serde_json::json!(["EVENT", event]).to_string(),
@@ -137,4 +136,94 @@ pub fn send(relay_url: &str, events: &[Event]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// One read-only, anonymous query for a key's kind 3 contact list:
+/// connect, REQ (kinds [3], authors [pubkey], limit 1), read until
+/// EOSE or the deadline, return the newest event's `p` tag pubkeys.
+/// Blocking with a hard deadline; run on a worker thread. The fetch
+/// carries only the key: no read receipt, no profile exposure.
+pub fn fetch_contacts(relay_url: &str, pubkey: &str, timeout: Duration) -> Result<Vec<String>> {
+    let req = serde_json::json!([
+        "REQ",
+        "orchard-contacts",
+        { "kinds": [Kind::ContactList], "authors": [pubkey], "limit": 1u16 },
+    ])
+    .to_string();
+    let (mut socket, _response) = tungstenite::connect(relay_url)?;
+    crate::connect::set_read_timeout(&mut socket, timeout);
+    socket.send(Message::text(req))?;
+    let mut contacts: Vec<String> = Vec::new();
+    loop {
+        let message = match socket.read() {
+            Ok(message) => message,
+            // the read deadline: serve whatever arrived
+            Err(tungstenite::Error::Io(err))
+                if err.kind() == std::io::ErrorKind::WouldBlock
+                    || err.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                break
+            }
+            Err(err) => return Err(err.into()),
+        };
+        match message {
+            Message::Text(text) => {
+                let frame: serde_json::Value = serde_json::from_str(text.as_str())?;
+                let label = frame
+                    .as_array()
+                    .and_then(|rows| rows.first())
+                    .and_then(|v| v.as_str());
+                match label {
+                    Some("EVENT") => {
+                        let raw = frame
+                            .get(2)
+                            .ok_or_else(|| anyhow::anyhow!("EVENT frame without event"))?;
+                        let event: Event = serde_json::from_value(raw.clone())?;
+                        // guard against relays that ignore the authors
+                        // filter; only the newest kind 3 wins
+                        if event.kind == Kind::ContactList && event.pubkey.to_string() == pubkey {
+                            contacts = contacts_from_event(&event);
+                        }
+                    }
+                    Some("EOSE") => break,
+                    _ => {}
+                }
+            }
+            Message::Ping(payload) => socket.send(Message::Pong(payload))?,
+            Message::Close(_) => break,
+            _ => {}
+        }
+    }
+    Ok(contacts)
+}
+
+/// The `p` tag pubkeys of a contact-list event, in tag order.
+fn contacts_from_event(event: &Event) -> Vec<String> {
+    event
+        .tags
+        .iter()
+        .filter(|tag| tag.as_slice().first().is_some_and(|name| name.as_str() == "p"))
+        .filter_map(|tag| tag.as_slice().get(1).map(|v| v.to_string()))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The contact list's follows are its p tags, in tag order.
+    #[test]
+    fn contacts_from_event_reads_p_tags() {
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::ContactList, "")
+            .tag(Tag::custom("p", ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "follows-something"]))
+            .tag(Tag::custom("p", ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]))
+            .tag(Tag::custom("t", ["hashtag"]))
+            .finalize(&keys)
+            .unwrap();
+        let contacts = contacts_from_event(&event);
+        assert_eq!(contacts.len(), 2);
+        assert!(contacts[0].starts_with("aaaaaaaa"));
+        assert!(contacts[1].starts_with("bbbbbbbb"));
+    }
 }
