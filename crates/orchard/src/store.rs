@@ -1871,7 +1871,7 @@ impl StoreRoot {
             .text_size(px(ui::TEXT_SIZE_SMALL))
             .cursor_pointer()
             .when(active, |chip| {
-                chip.bg(ui::accent()).text_color(ui::accent_text())
+                chip.bg(ui::accent()).text_color(ui::accent_fg())
             })
             .when(!active, |chip| {
                 chip.text_color(ui::text_dim())
@@ -2078,11 +2078,15 @@ impl StoreRoot {
                                 .gap_2()
                                 .children(app.version.as_deref().map(|v| badge(v, ui::text_dim())))
                                 .child(
+                                    // the row's primary action wears the
+                                    // accent, like the details page's
+                                    // install; the dim secondary style left
+                                    // it barely legible
                                     ui::small_button(
                                         format!("row-install-{action_id}"),
                                         Some("icons/plus.svg"),
                                         if confirming { "Sure?" } else { "Install" },
-                                        false,
+                                        true,
                                     )
                                     .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
                                         cx.stop_propagation();

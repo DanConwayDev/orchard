@@ -82,8 +82,21 @@ pub(crate) fn text_dim() -> Rgba {
 pub(crate) fn accent() -> Rgba {
     get(&ACCENT)
 }
-pub(crate) fn accent_text() -> Rgba {
-    get(&ACCENT_TEXT)
+/// The readable foreground on the current accent: the palette's
+/// accent text on a light accent (the wallpaper picked it for
+/// exactly that), near white on a dark one, where the palette text
+/// was meant for a light accent and would vanish.
+pub(crate) fn accent_fg() -> Rgba {
+    let value = ACCENT.load(Ordering::Relaxed) & 0xFFFFFF;
+    let r = ((value >> 16) & 0xFF) as f32;
+    let g = ((value >> 8) & 0xFF) as f32;
+    let b = (value & 0xFF) as f32;
+    // Rec. 601 luma, the usual pick-a-legible-ink rule
+    if 0.299 * r + 0.587 * g + 0.114 * b > 155. {
+        get(&ACCENT_TEXT)
+    } else {
+        rgb(0xf8f8fc)
+    }
 }
 pub(crate) fn urgent() -> Rgba {
     get(&URGENT)
@@ -286,11 +299,11 @@ pub fn button(
         .rounded_sm()
         .text_size(px(TEXT_SIZE))
         .cursor_pointer();
-    let fg = if accent { accent_text() } else { text() };
+    let fg = if accent { accent_fg() } else { text() };
     let base = base.children(glyph.map(|path| icon(path, 13., fg)));
     if accent {
         base.bg(get(&ACCENT))
-            .text_color(accent_text())
+            .text_color(accent_fg())
             .hover(|style| style.bg(get(&ACCENT_HOVER)))
             .child(label.to_string())
     } else {
@@ -360,11 +373,11 @@ pub fn small_button(
         .rounded_sm()
         .text_size(px(TEXT_SIZE_SMALL))
         .cursor_pointer();
-    let fg = if accent { accent_text() } else { text_dim() };
+    let fg = if accent { accent_fg() } else { text_dim() };
     let base = base.children(glyph.map(|path| icon(path, 11., fg)));
     if accent {
         base.bg(get(&ACCENT))
-            .text_color(accent_text())
+            .text_color(accent_fg())
             .hover(|style| style.bg(get(&ACCENT_HOVER)))
             .child(label.to_string())
     } else {
