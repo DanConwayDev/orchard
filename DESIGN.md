@@ -484,6 +484,19 @@ opening items because they need the push, the signing secret, and a tag.
       visible end of the multi-thousand-row All list once the undated
       arms were fixed). Zero (no release) stays undated; a pre-listed
       future stamp is governed like AppStream's ("dated" until true).
+- [x] The update path is trustworthy end to end. A publisher-channel
+      app is deployed at an immutable digest ref, so `flatpak update`
+      could never move it: an update now re-runs the verified install
+      against the newest release's digest (Flathub apps keep the
+      origin-remote update). Updates take the two-press confirm on the
+      row and the page like install and remove, and the client records
+      which publisher key is deployed (continuity file, `installed_from`),
+      so an update whose row key differs from the deployed key arms in
+      the warn amber with a "Update from a new publisher key" badge and
+      a line above the action bar. At any confirm, medium-and-high
+      permission grants repeat in one line ("This app asks for: …"),
+      colored by the worst risk present; low-risk confirms stay silent.
+      Starting any action disarms every pending confirm.
 - [x] Future-dated releases do not rank: the list sorts on the newest
       release date that has arrived, so an upstream pre-listing a future
       release (or re-listing one forward forever) cannot hold the top of

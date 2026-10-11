@@ -246,6 +246,12 @@ pub fn danger() -> Rgba {
     get(&URGENT)
 }
 
+/// The cautionary color: the medium-risk amber, worn by an action
+/// that deserves a second look, not a refusal.
+pub fn warn() -> Rgba {
+    rgb(RISK_MED)
+}
+
 /// The two-hop web-of-trust color.
 pub fn circle2() -> Rgba {
     rgb(CIRCLE2)
@@ -261,12 +267,14 @@ pub const TEXT_SIZE_EMPHASIS: f32 = 13.;
 // ---------- shared elements ----------
 
 /// A button's severity. `Quiet` is filler, `Accent` the primary
-/// action, `Danger` the destructive one: it wears the same red as
-/// the high-risk permission badges and goes solid on hover.
+/// action, `Danger` the destructive one (the same red as the
+/// high-risk permission badges), `Warn` the cautionary one (the
+/// medium-risk amber): both colored tones go solid on hover.
 pub enum Tone {
     Quiet,
     Accent,
     Danger,
+    Warn,
 }
 
 /// The whisper behind a colored label: keep the rgb bytes, swap in a
@@ -324,6 +332,7 @@ pub fn button(
         Tone::Accent => accent_fg(),
         Tone::Quiet => text(),
         Tone::Danger => danger(),
+        Tone::Warn => warn(),
     };
     let base = base.children(glyph.map(|path| icon(path, 13., fg)));
     match tone {
@@ -352,6 +361,18 @@ pub fn button(
                 style
                     .bg(danger())
                     .border_color(danger())
+                    .text_color(accent_fg())
+            })
+            .child(label.to_string()),
+        Tone::Warn => base
+            .bg(tint(warn()))
+            .border_1()
+            .border_color(warn())
+            .text_color(warn())
+            .hover(|style| {
+                style
+                    .bg(warn())
+                    .border_color(warn())
                     .text_color(accent_fg())
             })
             .child(label.to_string()),
@@ -440,6 +461,7 @@ pub fn small_button(
         Tone::Accent => accent_fg(),
         Tone::Quiet => text_dim(),
         Tone::Danger => danger(),
+        Tone::Warn => warn(),
     };
     let base = base.children(glyph.map(|path| icon(path, 11., fg)));
     match tone {
@@ -464,6 +486,18 @@ pub fn small_button(
                 style
                     .bg(danger())
                     .border_color(danger())
+                    .text_color(accent_fg())
+            })
+            .child(label.to_string()),
+        Tone::Warn => base
+            .bg(tint(warn()))
+            .border_1()
+            .border_color(warn())
+            .text_color(warn())
+            .hover(|style| {
+                style
+                    .bg(warn())
+                    .border_color(warn())
                     .text_color(accent_fg())
             })
             .child(label.to_string()),

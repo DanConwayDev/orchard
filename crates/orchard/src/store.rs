@@ -119,6 +119,9 @@ pub struct StoreRoot {
     /// a page close, or another action dismisses it. Mirrors
     /// `confirm_install` and dies in the same places.
     confirm_remove: Option<String>,
+    /// The app awaiting an update confirmation, the third arm of the
+    /// same idiom: starting any action disarms all of them.
+    confirm_update: Option<String>,
     error: Option<String>,
     flathub_loading: bool,
     /// Remote images resolved through the disk cache: url -> path, or
@@ -287,6 +290,7 @@ impl StoreRoot {
             jobs: HashMap::new(),
             confirm_install: None,
             confirm_remove: None,
+            confirm_update: None,
             verified: HashMap::new(),
             continuity: load_continuity(),
             error: None,
@@ -1364,6 +1368,7 @@ impl StoreRoot {
         self.reviews_expanded = false;
         self.confirm_install = None;
         self.confirm_remove = None;
+        self.confirm_update = None;
         self.close_signin();
         cx.notify();
     }
@@ -1685,6 +1690,7 @@ impl StoreRoot {
     fn install(&mut self, app_id: &str, cx: &mut Context<Self>) {
         self.confirm_install = None;
         self.confirm_remove = None;
+        self.confirm_update = None;
         // the selection's publisher names the twin: two publishers of
         // one app id install from different artifacts
         let Some(app) = self
@@ -1715,17 +1721,39 @@ impl StoreRoot {
         cx.notify();
     }
 
-    /// Update an installed app from its origin remote. Detection is
-    /// version-based; the update itself lets flatpak resolve the
-    /// origin's current commit.
+    /// Update an installed app. A Flathub app updates from its origin
+    /// remote; a publisher-channel app re-runs the verified install
+    /// against the newest release's digest, because the deployed ref
+    /// is an immutable digest pin only a fresh verify-and-install can
+    /// move. Detection is version-based either way.
     fn update(&mut self, app_id: &str, cx: &mut Context<Self>) {
+        self.confirm_install = None;
+        self.confirm_remove = None;
+        self.confirm_update = None;
         if self.jobs.contains_key(app_id) {
             return;
         }
-        self.jobs
-            .insert(app_id.to_string(), JobState::Updating);
-        let cmd = orchard_flatpak::update_ref(app_id);
-        self.run_command(cmd, app_id, "Update", cx);
+        // the row names the twin: two publishers of one app id update
+        // from different artifacts
+        let Some(app) = self
+            .apps
+            .iter()
+            .find(|a| {
+                a.app_id == app_id
+                    && a.publisher.as_deref() == self.selected_publisher.as_deref()
+            })
+            .cloned()
+        else {
+            return;
+        };
+        match app.source {
+            Source::Reviewed => {
+                self.jobs.insert(app.app_id.clone(), JobState::Updating);
+                let cmd = orchard_flatpak::update_ref(&app.app_id);
+                self.run_command(cmd, &app.app_id, "Update", cx);
+            }
+            Source::Publisher => self.verify_then_install(app, cx),
+        }
         cx.notify();
     }
 
@@ -1777,6 +1805,12 @@ impl StoreRoot {
                         let cmd = orchard_flatpak::install_image(&install_arg);
                         this.jobs
                             .insert(app.app_id.clone(), JobState::Installing);
+                        // the deployment's key baseline: updates are
+                        // compared against this from now on
+                        this.record_installed_from(
+                            &app.app_id,
+                            app.publisher.as_deref(),
+                        );
                         this.run_command_detached(cmd, &app.app_id, cx);
                     }
                     Err(err) => {
@@ -1791,11 +1825,40 @@ impl StoreRoot {
         .detach();
     }
 
+    /// Record the publisher key whose artifact is deployed for an
+    /// installed app (None clears the record, at uninstall).
+    fn record_installed_from(&mut self, app_id: &str, publisher: Option<&str>) {
+        match publisher {
+            Some(key) => {
+                self.continuity
+                    .installed_from
+                    .insert(app_id.to_string(), key.to_string());
+            }
+            None => {
+                self.continuity.installed_from.remove(app_id);
+            }
+        }
+        save_continuity(&self.continuity);
+    }
+
+    /// The publisher key whose artifact is deployed for an installed
+    /// app, recorded at install time: the update path compares the
+    /// row's key against it to warn about updates from a new key.
+    fn installed_from(&self, app_id: &str) -> Option<&str> {
+        self.continuity
+            .installed_from
+            .get(app_id)
+            .map(|key| key.as_str())
+    }
+
     fn uninstall(&mut self, app_id: &str, cx: &mut Context<Self>) {
+        self.confirm_install = None;
         self.confirm_remove = None;
+        self.confirm_update = None;
         if self.jobs.contains_key(app_id) {
             return;
         }
+        self.record_installed_from(app_id, None);
         let cmd = orchard_flatpak::uninstall(app_id);
         self.jobs
             .insert(app_id.to_string(), JobState::Removing);
@@ -2111,6 +2174,7 @@ impl StoreRoot {
                 // then text, then row selection
                 self.confirm_install = None;
                 self.confirm_remove = None;
+                self.confirm_update = None;
                 if self.lightbox.is_some() {
                     self.lightbox = None;
                 } else if self.page_open {
@@ -2654,15 +2718,32 @@ impl StoreRoot {
                             let remove_confirming = self.confirm_remove.as_deref()
                                 == Some(action_id.as_str());
                             let remove_id = action_id.clone();
+                            // the newest release is signed by a key
+                            // other than the deployed artifact's: the
+                            // update arms amber and the badge says so
+                            let key_changed = self
+                                .installed_from(action_id.as_str())
+                                .is_some_and(|from| {
+                                    Some(from) != row_publisher.as_deref()
+                                });
+                            let update_confirming = self.confirm_update.as_deref()
+                                == Some(action_id.as_str());
                             div()
                                 .flex()
                                 .items_center()
                                 .gap_2()
                                 .child(if outdated {
-                                    badge(
-                                        "Update available",
-                                        ui::risk_color(orchard_core::Risk::Medium),
-                                    )
+                                    if key_changed {
+                                        badge(
+                                            "Update from a new publisher key",
+                                            ui::risk_color(orchard_core::Risk::Medium),
+                                        )
+                                    } else {
+                                        badge(
+                                            "Update available",
+                                            ui::risk_color(orchard_core::Risk::Medium),
+                                        )
+                                    }
                                 } else {
                                     badge("Installed", ui::risk_color(orchard_core::Risk::Low))
                                 })
@@ -2678,6 +2759,7 @@ impl StoreRoot {
                                 })))
                                 .when(outdated, |slot| {
                                     let update_id = row_update_id.clone();
+                                    let update_publisher = row_publisher.clone();
                                     slot.child(
                                         ui::small_button(
                                             format!(
@@ -2685,13 +2767,21 @@ impl StoreRoot {
                                                 row_publisher.as_deref().unwrap_or("")
                                             ),
                                             Some("icons/update.svg"),
-                                            "Update",
-                                            Tone::Quiet,
+                                            if update_confirming { "Sure?" } else { "Update" },
+                                            if key_changed { Tone::Warn } else { Tone::Quiet },
                                         )
                                         .on_click(cx.listener(
                                             move |this, _e: &ClickEvent, _w, cx| {
                                                 cx.stop_propagation();
-                                                this.update(update_id.as_str(), cx);
+                                                this.selected_publisher =
+                                                    update_publisher.clone();
+                                                if update_confirming {
+                                                    this.update(update_id.as_str(), cx);
+                                                } else {
+                                                    this.confirm_update =
+                                                        Some(update_id.clone());
+                                                    cx.notify();
+                                                }
                                             },
                                         )),
                                     )
@@ -3103,6 +3193,22 @@ impl StoreRoot {
         }
 
         let has_sandbox = sandbox_metadata.is_some();
+        // the update's key differs from the deployed artifact's: the
+        // fact rides above the action bar, amber, a fact not a
+        // verdict
+        let update_changed = self
+            .installed
+            .get(&app_id)
+            .is_some_and(|info| update_available(&app, info))
+            && self
+                .installed_from(app_id.as_str())
+                .is_some_and(|from| Some(from) != app.publisher.as_deref());
+        // at a confirm, medium-and-high grants repeat here: quiet by
+        // default, loud exactly once
+        let risk_note = (self.confirm_install.as_deref() == Some(app_id.as_str())
+            || self.confirm_update.as_deref() == Some(app_id.as_str()))
+        .then(|| risk_echo(sandbox_metadata.as_deref()))
+        .flatten();
         content = content
             .child(
                 div()
@@ -3204,6 +3310,30 @@ impl StoreRoot {
                 // action bar: pinned under the scrolling content
                 div().flex().items_center().gap_2().px_8().py_3().border_t_1()
                     .border_color(ui::divider()).bg(ui::panel())
+                    .children(update_changed.then(|| {
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .text_size(px(ui::TEXT_SIZE))
+                            .text_color(ui::risk_color(Risk::Medium))
+                            .child(ui::icon(
+                                "icons/shield.svg",
+                                13.,
+                                ui::risk_color(Risk::Medium),
+                            ))
+                            .child("This update is signed by a new publisher key.")
+                    }))
+                    .children(risk_note.map(|(color, text)| {
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .text_size(px(ui::TEXT_SIZE))
+                            .text_color(color)
+                            .child(ui::icon("icons/shield.svg", 13., color))
+                            .child(text)
+                    }))
                     .children(match job {
                         Some(state) => vec![badge(
                             state.label(),
@@ -3229,16 +3359,28 @@ impl StoreRoot {
                                     .is_some_and(|info| update_available(&app, info))
                                 {
                                     let update_id = app_id.clone();
+                                    let update_confirming = self.confirm_update.as_deref()
+                                        == Some(app_id.as_str());
                                     buttons.push(
                                         button(
                                             "btn-update",
                                             Some("icons/update.svg"),
-                                            "Update",
-                                            Tone::Quiet,
+                                            if update_confirming { "Sure?" } else { "Update" },
+                                            if update_changed {
+                                                Tone::Warn
+                                            } else {
+                                                Tone::Quiet
+                                            },
                                         )
                                         .on_click(cx.listener(
                                             move |this, _e: &ClickEvent, _w, cx| {
-                                                this.update(update_id.as_str(), cx);
+                                                if update_confirming {
+                                                    this.update(update_id.as_str(), cx);
+                                                } else {
+                                                    this.confirm_update =
+                                                        Some(update_id.clone());
+                                                    cx.notify();
+                                                }
                                             },
                                         ))
                                         .into_any_element(),
@@ -3319,6 +3461,33 @@ fn risk_label(risk: Risk) -> &'static str {
         Risk::Medium => "medium",
         Risk::High => "high",
     }
+}
+
+/// The medium-and-high grants as one line for the confirm moment,
+/// with the worst risk present as the color: a low-risk app stays
+/// silent. Capped at three names, then a count.
+fn risk_echo(metadata: Option<&str>) -> Option<(gpui::Rgba, String)> {
+    let meta = metadata?;
+    let loud: Vec<String> = orchard_core::permissions::grants_from_metadata(meta)
+        .into_iter()
+        .filter(|grant| grant.risk != Risk::Low)
+        .map(|grant| match grant.risk {
+            Risk::High => format!("{} (high)", grant.summary),
+            _ => grant.summary,
+        })
+        .collect();
+    let worst = loud
+        .iter()
+        .any(|line| line.contains("(high)"))
+        .then(|| Risk::High)
+        .unwrap_or(Risk::Medium);
+    let named = loud.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+    let names = if loud.len() > 3 {
+        format!("{named} and {} more", loud.len() - 3)
+    } else {
+        named
+    };
+    (!loud.is_empty()).then(|| (ui::risk_color(worst), format!("This app asks for: {names}.")))
 }
 
 /// Fixed list row height: `uniform_list` needs uniform items, and a
@@ -4622,6 +4791,7 @@ impl StoreRoot {
                             // survive a channel switch
                             this.confirm_install = None;
                             this.confirm_remove = None;
+                            this.confirm_update = None;
                             cx.notify();
                         }))
                         .child(f.label().to_string())
@@ -6120,6 +6290,21 @@ fn update_available(app: &StoreApp, installed: &InstalledInfo) -> bool {
 mod tests {
     use super::*;
     use orchard_core::{CatalogApp, Publisher};
+
+    #[test]
+    fn risk_echo_speaks_only_when_it_matters() {
+        // windowing alone is low risk: the confirm stays silent
+        let quiet = "[Context]\nsockets=wayland\n";
+        assert_eq!(risk_echo(Some(quiet)), None);
+        // a home-directory grant is high risk: the line names it and
+        // wears the high color
+        let meta = "[Context]\nsockets=wayland\nfilesystems=home\n";
+        let (color, text) = risk_echo(Some(meta)).expect("high grant speaks");
+        assert_eq!(color, ui::risk_color(orchard_core::Risk::High));
+        assert!(text.starts_with("This app asks for: "));
+        assert!(text.contains("Home directory (read/write) (high)"));
+    }
+
 
     /// A minimal publisher-channel row for order tests.
     fn dated_app(name: &str, date: Option<&str>) -> StoreApp {

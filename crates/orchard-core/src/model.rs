@@ -149,6 +149,11 @@ pub struct ContinuityFile {
     /// app id -> the publisher keys seen for it.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub apps: std::collections::BTreeMap<String, ContinuityKeys>,
+    /// app id -> the publisher key whose artifact is deployed,
+    /// recorded at install time: the update path compares the row's
+    /// key against it to warn about updates from a new key.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub installed_from: std::collections::BTreeMap<String, String>,
 }
 
 /// The keys seen for one app id, and the ones already disclosed as a
