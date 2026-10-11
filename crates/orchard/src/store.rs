@@ -2497,10 +2497,11 @@ impl StoreRoot {
                 .child(label),
         );
 
-        // the reviews themselves, flush with the other fields: no
-        // border chrome, the author line and text start at the same
-        // edge as the description above
+        // the reviews themselves: indented one step from the header,
+        // the same inset the permissions box uses, so the page reads
+        // as header, then its content
         if self.reviews_expanded {
+            let mut body = div().flex().flex_col().gap_2().pl_3();
             // the trust breakdown, disclosed rather than hidden: what
             // the aggregate left out and which reviews are young keys
             let mut notes: Vec<String> = Vec::new();
@@ -2514,7 +2515,7 @@ impl StoreRoot {
                 notes.push(format!("{new_keys} of {counted} from new keys"));
             }
             if !notes.is_empty() {
-                section = section.child(
+                body = body.child(
                     div()
                         .text_size(px(ui::TEXT_SIZE_LABEL))
                         .text_color(ui::text_dim())
@@ -2584,13 +2585,13 @@ impl StoreRoot {
                             ),
                     );
                 }
-                section = section.child(row);
+                body = body.child(row);
             }
 
             // compose or invitation, depending on session state (the
             // sign-in modal is window-level, not part of the section)
             if self.composing {
-                section = section.child(self.render_review_compose(app_id, font.clone(), cx));
+                body = body.child(self.render_review_compose(app_id, font.clone(), cx));
             } else {
                 let signed_in = self.reviewer.is_some();
                 let invitation = div().flex().items_center().gap_2().child(
@@ -2609,8 +2610,9 @@ impl StoreRoot {
                             "Sign in to review".to_string()
                         }),
                 );
-                section = section.child(invitation);
+                body = body.child(invitation);
             }
+            section = section.child(body);
         }
 
         section.into_any_element()
