@@ -96,6 +96,8 @@ pub struct CatalogApp {
     pub description: Option<String>,
     #[serde(default)]
     pub icon_url: Option<String>,
+    #[serde(default)]
+    pub categories: Vec<String>,
     pub publisher: Publisher,
     pub version: String,
     /// Full flatpak ref, e.g. `app/com.example.Hello/x86_64/stable`.
@@ -181,7 +183,7 @@ impl StoreApp {
             source: Source::Publisher,
             icon_path: None,
             icon_url: app.icon_url.clone(),
-            categories: Vec::new(),
+            categories: app.categories.clone(),
             screenshots: Vec::new(),
             publisher: Some(app.publisher.pubkey.clone()),
             metadata: app.metadata.clone(),

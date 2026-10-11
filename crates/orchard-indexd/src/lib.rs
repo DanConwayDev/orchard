@@ -177,6 +177,7 @@ mod tests {
                 summary: "Demo app".into(),
                 description: None,
                 icon_url: None,
+                categories: Vec::new(),
                 publisher: orchard_core::Publisher {
                     pubkey: "demo-pubkey".into(),
                     nip05: None,

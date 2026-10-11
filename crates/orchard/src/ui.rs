@@ -249,9 +249,9 @@ pub fn badge(text: &str, fg: Rgba) -> Div {
 /// A button. `accent` styles the primary action: solid accent with
 /// dark text, matching the active filter chips. Secondary buttons are
 /// quiet surfaces with a border that brightens on hover.
-pub fn button(id: &'static str, label: &str, accent: bool) -> gpui::Stateful<Div> {
+pub fn button(id: impl Into<SharedString>, label: &str, accent: bool) -> gpui::Stateful<Div> {
     let base = div()
-        .id(SharedString::from(id))
+        .id(id.into())
         .px_3()
         .py_1()
         .rounded_sm()
@@ -312,20 +312,28 @@ pub fn app_icon(icon_path: Option<&std::path::Path>, name: &str, size: f32) -> g
     }
 }
 
-/// A small square icon button (the dock chevron, the lock).
-pub fn icon_button(id: &'static str, icon: &'static str, fg: Rgba) -> gpui::Stateful<Div> {
-    div()
-        .id(SharedString::from(id))
-        .flex()
-        .h(px(22.))
-        .w(px(24.))
-        .items_center()
-        .justify_center()
+/// A compact quiet button for inline row actions.
+pub fn small_button(id: impl Into<SharedString>, label: &str, accent: bool) -> gpui::Stateful<Div> {
+    let base = div()
+        .id(id.into())
+        .px_2()
+        .py_0p5()
         .rounded_sm()
-        .cursor_pointer()
-        .text_color(fg)
-        .hover(|style| style.bg(surface()).text_color(text()))
-        .child(gpui::svg().path(icon).size(px(14.)).text_color(fg))
+        .text_size(px(TEXT_SIZE_SMALL))
+        .cursor_pointer();
+    if accent {
+        base.bg(get(&ACCENT))
+            .text_color(accent_text())
+            .hover(|style| style.bg(get(&ACCENT_HOVER)))
+            .child(label.to_string())
+    } else {
+        base.bg(surface())
+            .border_1()
+            .border_color(divider())
+            .text_color(text_dim())
+            .hover(|style| style.text_color(text()).bg(surface_hover()))
+            .child(label.to_string())
+    }
 }
 
 #[cfg(test)]

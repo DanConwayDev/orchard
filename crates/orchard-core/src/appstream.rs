@@ -470,15 +470,72 @@ impl Component {
             license: self.license.take().map(String::from),
             icon_path,
             icon_url: self.icon_url.take(),
-            categories: self.categories,
+            categories: canonicalize_categories(&self.categories),
             screenshots,
         })
     }
 }
 
+/// Fold an AppStream category onto the top-level set the store browses
+/// by: subcategories map to their parent (ArcadeGame to Games), and
+/// names outside the browse set drop out. `None` for anything the
+/// browse row does not show.
+pub fn canonical_category(raw: &str) -> Option<&'static str> {
+    let name = match raw {
+        "Game" | "ArcadeGame" | "Adventure" | "BlocksGame" | "BoardGame" | "CardGame"
+        | "Emulator" | "KidsGame" | "LogicGame" | "RolePlaying" | "ShooterGame"
+        | "SimulationGame" | "SportsGame" | "StrategyGame" | "Sports" => "Games",
+        "AudioVideo" | "Audio" | "Video" | "Music" | "Player" | "Midi" | "Mixer"
+        | "Recorder" | "DiscBurning" | "Tuner" => "Audio & Video",
+        "Development" | "IDE" | "Debugger" | "GUIDesigner" | "Profiling"
+        | "RevisionControl" | "Translation" | "WebDevelopment" => "Development",
+        "Network" | "Chat" | "Email" | "FileTransfer" | "HamRadio" | "InstantMessaging"
+        | "IRCClient" | "Monitor" | "News" | "P2P" | "RemoteAccess" | "Telephony"
+        | "VideoConference" | "WebBrowser" => "Network",
+        "Office" | "Calendar" | "ContactManagement" | "Chart" | "Finance" | "FlowChart"
+        | "Notebook" | "Presentation" | "ProjectManagement" | "Publishing"
+        | "Spreadsheet" | "WordProcessor" => "Office",
+        "Graphics" | "2DGraphics" | "3DGraphics" | "VectorGraphics" | "RasterGraphics"
+        | "Scanning" | "Photography" | "Art" => "Graphics",
+        "Science" | "Astronomy" | "Biology" | "Chemistry" | "Geology" | "Math"
+        | "NumericalAnalysis" | "Physics" | "Robotics" => "Science",
+        "Education" | "Languages" | "Literature" | "ArtificialIntelligence" => "Education",
+        "System" | "Core" | "Electric" | "Emergency" | "HardwareSettings"
+        | "PackageManager" | "Settings" | "TerminalEmulator" => "System",
+        "Utility" | "Accessibility" | "Archiving" | "Calculator" | "Clock" | "Compression"
+        | "Security" | "TextEditor" | "Dictionary" | "Viewer" => "Utilities",
+        _ => return None,
+    };
+    Some(name)
+}
+
+/// Canonicalize and deduplicate, keeping first-occurrence order.
+pub fn canonicalize_categories(raw: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for name in raw.iter().filter_map(|raw| canonical_category(raw)) {
+        if !out.iter().any(|seen| seen == name) {
+            out.push(name.to_string());
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_categories_fold_and_dedup() {
+        let raw: Vec<String> = ["ArcadeGame", "Game", "Widget", "Utility", "Player"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            canonicalize_categories(&raw),
+            ["Games", "Utilities", "Audio & Video"]
+        );
+        assert_eq!(canonical_category("CompletelyMadeUp"), None);
+    }
 
     /// A tiny but representative appstream: two components, one with every
     /// field we care about, one minimal.
@@ -553,7 +610,7 @@ mod tests {
         assert_eq!(full.summary, "Does everything");
         assert_eq!(full.version.as_deref(), Some("1.2.3"));
         assert_eq!(full.license.as_deref(), Some("MIT"));
-        assert_eq!(full.categories, ["Utility", "Game"]);
+        assert_eq!(full.categories, ["Utilities", "Games"]);
         // Description keeps the text, drops the markup.
         assert!(full
             .description

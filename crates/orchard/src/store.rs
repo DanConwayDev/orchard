@@ -1,24 +1,25 @@
-//! The store view: catalog list, search, detail pane, install actions.
+//! The store view: catalog list, search, full-page app details, install
+//! actions.
 //!
-//! MVP interaction model: type to search, click a row for the detail pane,
-//! click Install. All flatpak work runs on background threads through the
-//! single CLI seam (`orchard-flatpak`); the UI polls nothing, results land
-//! via `cx.spawn` updates.
+//! MVP interaction model: type to search, arrow through the list, Enter
+//! or click opens the app page. All flatpak work runs on background
+//! threads through the single CLI seam (`orchard-flatpak`); the UI polls
+//! nothing, results land via `cx.spawn` updates.
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use gpui::{
-    div, prelude::*, px, uniform_list, AnyElement, ClickEvent, Context, CursorStyle,
-    DragMoveEvent, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, MouseUpEvent,
-    ParentElement, Point, Pixels, Render, ScrollStrategy, SharedString, Styled,
+    div, prelude::*, px, uniform_list, AnyElement, AnimationExt, ClickEvent, Context, FocusHandle,
+    KeyDownEvent, ParentElement, Render, ScrollStrategy, SharedString, Styled,
     UniformListScrollHandle, Window,
 };
 
 use orchard_core::{oci, permissions, CatalogFile, Risk, Source, StoreApp};
 
-use crate::ui::{self, app_icon, badge, button, icon_button};
+use crate::ui::{self, app_icon, badge, button};
 
 /// Port the in-process indexd listens on. The client is the remote.
 pub const INDEXD_PORT: u16 = 7780;
@@ -62,23 +63,11 @@ impl Filter {
             Filter::Installed => "Installed",
         }
     }
-
-    fn next(&self) -> Self {
-        match self {
-            Filter::All => Filter::Reviewed,
-            Filter::Reviewed => Filter::Publisher,
-            Filter::Publisher => Filter::Installed,
-            Filter::Installed => Filter::All,
-        }
-    }
 }
 
 /// What `flatpak list` reported for an installed app.
 #[derive(Debug, Clone)]
-pub struct InstalledInfo {
-    pub version: Option<String>,
-    pub origin: Option<String>,
-}
+pub struct InstalledInfo;
 
 pub struct StoreRoot {
     pub(crate) focus_handle: FocusHandle,
@@ -92,21 +81,16 @@ pub struct StoreRoot {
     verified: HashMap<String, String>,
     error: Option<String>,
     flathub_loading: bool,
-    /// Detail dock: true = bottom edge, false = right edge.
-    detail_bottom: bool,
-    /// None = auto (window-width rule), Some(dock) = pinned by the lock.
-    detail_lock: Option<bool>,
     /// Remote images resolved through the disk cache: url -> path, or
     /// None when the fetch failed.
     fetched: HashMap<String, Option<PathBuf>>,
     /// Fetches in flight, keyed by url.
     fetching: HashSet<String>,
-    /// Detail pane height while bottom-docked (set by the handle).
-    bottom_size: f32,
-    /// Detail pane width while right-docked (set by the handle).
-    right_size: f32,
-    /// Active resize drag: pointer position and size at drag start.
-    resize_anchor: Option<ResizeAnchor>,
+    /// Detail page open? Selection survives closing, so keyboard
+    /// navigation resumes where it left off.
+    page_open: bool,
+    /// Active browse category (None = all).
+    category: Option<String>,
     /// Scroll handle for the virtualized list (keyboard reveal).
     list_handle: UniformListScrollHandle,
 }
@@ -124,13 +108,10 @@ impl StoreRoot {
             verified: HashMap::new(),
             error: None,
             flathub_loading: true,
-            detail_bottom: false,
-            detail_lock: None,
             fetched: HashMap::new(),
             fetching: HashSet::new(),
-            bottom_size: 380.0,
-            right_size: 420.0,
-            resize_anchor: None,
+            page_open: false,
+            category: None,
             list_handle: UniformListScrollHandle::new(),
         };
 
@@ -170,8 +151,9 @@ impl StoreRoot {
 
     // ----- catalog helpers -----
 
-    /// Indices into `apps` matching the search and filter, in display
-    /// order. Returns indices (not clones) so renders stay cheap.
+    /// Indices into `apps` matching the search, source filter, and
+    /// category, in display order. Returns indices (not clones) so
+    /// renders stay cheap.
     fn filtered(&self) -> Vec<usize> {
         let needle = self.search.to_lowercase();
         self.apps
@@ -182,6 +164,10 @@ impl StoreRoot {
                 Filter::Reviewed => app.source == Source::Reviewed,
                 Filter::Publisher => app.source == Source::Publisher,
                 Filter::Installed => self.installed.contains_key(&app.app_id),
+            })
+            .filter(|(_, app)| match &self.category {
+                Some(want) => app.categories.iter().any(|c| c == want),
+                None => true,
             })
             .filter(|(_, app)| {
                 needle.is_empty()
@@ -212,13 +198,24 @@ impl StoreRoot {
         .detach();
     }
 
-    /// Select an app and queue its remote images (icon fallback and
-    /// screenshots) for the disk cache.
-    fn select_app(&mut self, app_id: &str, cx: &mut Context<Self>) {
+    /// Select an app (keyboard) without opening the page. Images are
+    /// fetched when the page opens, not per arrow press.
+    fn set_selected(&mut self, app_id: &str, cx: &mut Context<Self>) {
         if self.selected.as_deref() == Some(app_id) {
             return;
         }
         self.selected = Some(app_id.to_string());
+        cx.notify();
+    }
+
+    /// Open the detail page for an app and queue its remote images
+    /// (icon fallback and screenshots) for the disk cache.
+    fn open_page(&mut self, app_id: &str, cx: &mut Context<Self>) {
+        self.selected = Some(app_id.to_string());
+        if self.page_open {
+            return;
+        }
+        self.page_open = true;
         let urls: Vec<String> = self
             .apps
             .iter()
@@ -234,13 +231,20 @@ impl StoreRoot {
                 urls
             })
             .unwrap_or_default();
-        // failed fetches get one retry per selection
+        // failed fetches get one retry per page open
         for url in &urls {
             if self.fetched.get(url) == Some(&None) {
                 self.fetched.remove(url);
             }
         }
         self.ensure_fetched(urls, cx);
+        cx.notify();
+    }
+
+    /// Close the detail page. Selection survives so keyboard
+    /// navigation resumes where it left off.
+    fn close_page(&mut self, cx: &mut Context<Self>) {
+        self.page_open = false;
         cx.notify();
     }
 
@@ -273,94 +277,6 @@ impl StoreRoot {
             }
         })
         .detach();
-    }
-
-    // ----- detail dock (kuma-files' inspector pattern) -----
-
-    /// Follow the window width while unlocked: right when wide, bottom
-    /// when narrow, hysteresis band between so a window resting near a
-    /// threshold never flickers between docks. Frozen mid-resize so a
-    /// drag near a threshold cannot flip the dock under the pointer.
-    fn auto_dock(&mut self, window: &Window) {
-        if self.detail_lock.is_some() || self.resize_anchor.is_some() {
-            return;
-        }
-        let width = f32::from(window.viewport_size().width);
-        if let Some(bottom) = auto_dock_for(width, self.detail_bottom) {
-            self.detail_bottom = bottom;
-        }
-    }
-
-    /// Move the detail pane between the right edge and the bottom edge.
-    /// Auto mode would snap the dock straight back on the next render,
-    /// so a manual flip pins the pane where it is put.
-    fn flip_dock(&mut self, cx: &mut Context<Self>) {
-        self.detail_bottom = !self.detail_bottom;
-        self.detail_lock = Some(self.detail_bottom);
-        cx.notify();
-    }
-
-    /// Pin the pane to its current dock, or release it back to the
-    /// window-width rule.
-    fn toggle_dock_lock(&mut self, cx: &mut Context<Self>) {
-        self.detail_lock = match self.detail_lock {
-            None => Some(self.detail_bottom),
-            Some(_) => None,
-        };
-        cx.notify();
-    }
-
-    /// Track an active pane resize: the size follows the pointer
-    /// relative to where the drag started, clamped to the dock's
-    /// minimum and to what leaves the list breathing room.
-    fn on_resize_move(
-        &mut self,
-        event: &DragMoveEvent<DockDrag>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(anchor) = self.resize_anchor else {
-            // drag started without the handle's mousedown (should not
-            // happen): anchor at the first move instead
-            let bottom = self.detail_bottom;
-            let size = if bottom {
-                self.bottom_size
-            } else {
-                self.right_size
-            };
-            self.resize_anchor = Some(ResizeAnchor {
-                bottom,
-                pos: event.event.position,
-                size,
-            });
-            return;
-        };
-        let cursor = event.event.position;
-        let viewport = window.viewport_size();
-        let new_size = if anchor.bottom {
-            let max = (f32::from(viewport.height) - LIST_MIN_AXIS).max(MIN_BOTTOM_HEIGHT);
-            (anchor.size + f32::from(anchor.pos.y) - f32::from(cursor.y))
-                .clamp(MIN_BOTTOM_HEIGHT, max)
-        } else {
-            let max = (f32::from(viewport.width) - LIST_MIN_AXIS).max(MIN_RIGHT_WIDTH);
-            (anchor.size + f32::from(cursor.x) - f32::from(anchor.pos.x))
-                .clamp(MIN_RIGHT_WIDTH, max)
-        };
-        // parked at a clamp: every move would otherwise re-render the
-        // whole tree for no visual change
-        let changed = if anchor.bottom {
-            self.bottom_size != new_size
-        } else {
-            self.right_size != new_size
-        };
-        if anchor.bottom {
-            self.bottom_size = new_size;
-        } else {
-            self.right_size = new_size;
-        }
-        if changed {
-            cx.notify();
-        }
     }
 
     // ----- actions -----
@@ -556,16 +472,26 @@ impl StoreRoot {
         let key = event.keystroke.key.as_str();
         match key {
             "backspace" => {
-                self.search.pop();
+                if self.page_open {
+                    self.close_page(cx);
+                } else {
+                    self.search.pop();
+                }
             }
             "escape" => {
-                if !self.search.is_empty() {
+                // back out one level: page first, then search text
+                if self.page_open {
+                    self.close_page(cx);
+                } else if !self.search.is_empty() {
                     self.search.clear();
                 } else if self.selected.is_some() {
                     self.selected = None;
                 }
             }
             "up" | "down" => {
+                if self.page_open {
+                    self.close_page(cx);
+                }
                 let rows = self.filtered();
                 if rows.is_empty() {
                     return;
@@ -581,23 +507,40 @@ impl StoreRoot {
                     (Some(ix), "down") => (ix + 1).min(rows.len() - 1),
                     (Some(ix), "up") => ix.saturating_sub(1),
                     (None, "down") => 0,
-                    (None, _) => rows.len() - 1,
+                    (None, "up") => rows.len() - 1,
                     _ => return,
                 };
                 let app_id = self.apps[rows[next]].app_id.clone();
-                self.select_app(&app_id, cx);
+                self.set_selected(&app_id, cx);
                 self.reveal_row(next, window);
             }
             "enter" => {
-                if self.selected.is_none() {
-                    if let Some(&first) = self.filtered().first() {
-                        let app_id = self.apps[first].app_id.clone();
-                        self.select_app(&app_id, cx);
-                    }
+                // install stays a click action; Enter only opens pages
+                if self.page_open {
+                    return;
+                }
+                let target = match &self.selected {
+                    Some(id) => Some(id.clone()),
+                    None => self
+                        .filtered()
+                        .first()
+                        .map(|&first| self.apps[first].app_id.clone()),
+                };
+                if let Some(app_id) = target {
+                    self.open_page(&app_id, cx);
                 }
             }
-            "space" => self.search.push(' '),
+            "space" => {
+                if self.page_open {
+                    // typing means back to the list
+                    self.close_page(cx);
+                }
+                self.search.push(' ');
+            }
             other if other.chars().count() == 1 => {
+                if self.page_open {
+                    self.close_page(cx);
+                }
                 self.search.push_str(other);
             }
             _ => return,
@@ -626,45 +569,180 @@ impl StoreRoot {
 
     // ----- rendering -----
 
-    /// The app list, virtualized: uniform_list builds only the rows
-    /// in the visible range, so a 4000-app catalog costs the same as
-    /// a screenful. This matters twice over: every notify (typing,
-    /// drag moves, image loads) re-renders, and a full element tree
-    /// per frame made the whole app crawl.
-    fn render_list(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// The browse surface: category chip row over the virtualized
+    /// list, with skeleton rows while the catalog loads and an
+    /// actionable empty state otherwise.
+    fn render_browse(&self, cx: &mut Context<Self>) -> AnyElement {
         let rows = self.filtered();
-
-        if rows.is_empty() {
-            return div()
-                .id("app-list")
+        let body: AnyElement = if !rows.is_empty() {
+            let view = cx.entity();
+            uniform_list("app-list", rows.len(), move |range, window, cx| {
+                view.update(cx, |root, cx| root.render_rows(&rows, range, window, cx))
+            })
+            .track_scroll(self.list_handle.clone())
+            .flex_1()
+            .min_w_0()
+            .bg(ui::inset())
+            .into_any_element()
+        } else if self.flathub_loading {
+            self.render_skeleton()
+        } else if self.filter == Filter::Installed {
+            div()
                 .flex_1()
                 .min_w_0()
                 .flex()
+                .flex_col()
                 .items_center()
                 .justify_center()
+                .gap_2()
                 .bg(ui::inset())
                 .child(
                     div()
-                        .text_color(ui::text_dim())
-                        .text_size(px(ui::TEXT_SIZE))
-                        .child(if self.flathub_loading {
-                            "Loading Flathub catalog…".to_string()
-                        } else {
-                            "No apps match.".to_string()
-                        }),
+                        .text_size(px(ui::TEXT_SIZE_EMPHASIS))
+                        .text_color(ui::text())
+                        .child("Nothing installed yet"),
                 )
-                .into_any_element();
-        }
+                .child(
+                    div()
+                        .text_size(px(ui::TEXT_SIZE))
+                        .text_color(ui::text_dim())
+                        .child("Apps you install will show up here."),
+                )
+                .into_any_element()
+        } else {
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .bg(ui::inset())
+                .child(
+                    div()
+                        .text_size(px(ui::TEXT_SIZE_EMPHASIS))
+                        .text_color(ui::text())
+                        .child("No apps match"),
+                )
+                .child(
+                    div()
+                        .text_size(px(ui::TEXT_SIZE))
+                        .text_color(ui::text_dim())
+                        .child(format!(
+                            "Nothing matches {:?}. Escape clears the search.",
+                            self.search
+                        )),
+                )
+                .into_any_element()
+        };
 
-        let view = cx.entity();
-        uniform_list("app-list", rows.len(), move |range, window, cx| {
-            view.update(cx, |root, cx| root.render_rows(&rows, range, window, cx))
-        })
-        .track_scroll(self.list_handle.clone())
-        .flex_1()
-        .min_w_0()
-        .bg(ui::inset())
-        .into_any_element()
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(self.render_category_bar(cx))
+            .child(body)
+            .into_any_element()
+    }
+
+    /// The category chip row: the browse dimension. Only categories
+    /// present in the catalog get a chip.
+    fn render_category_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_1()
+            .px_4()
+            .py_1p5()
+            .border_b_1()
+            .border_color(ui::divider())
+            .bg(ui::panel())
+            .child(self.category_chip("All categories", None, cx))
+            .children(self.category_counts().into_iter().map(|(name, _)| {
+                self.category_chip(name, Some(name.to_string()), cx)
+            }))
+            .into_any_element()
+    }
+
+    fn category_chip(&self, label: &str, value: Option<String>, cx: &mut Context<Self>) -> AnyElement {
+        let active = self.category == value;
+        div()
+            .id(SharedString::from(format!("cat-{label}")))
+            .px_2()
+            .py_0p5()
+            .rounded_sm()
+            .text_size(px(ui::TEXT_SIZE_SMALL))
+            .cursor_pointer()
+            .when(active, |chip| {
+                chip.bg(ui::accent()).text_color(ui::accent_text())
+            })
+            .when(!active, |chip| {
+                chip.text_color(ui::text_dim())
+                    .hover(|style| style.bg(ui::surface()).text_color(ui::text()))
+            })
+            .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
+                this.category = value.clone();
+                cx.notify();
+            }))
+            .child(label.to_string())
+            .into_any_element()
+    }
+
+    /// Counts per browse category across the whole catalog, in chip
+    /// order.
+    fn category_counts(&self) -> Vec<(&'static str, usize)> {
+        BROWSE_CATEGORIES
+            .into_iter()
+            .map(|name| {
+                let count = self
+                    .apps
+                    .iter()
+                    .filter(|app| app.categories.iter().any(|c| c == name))
+                    .count();
+                (name, count)
+            })
+            .filter(|(_, count)| *count > 0)
+            .collect()
+    }
+
+    /// Dim placeholder rows while the catalog loads: same rhythm as
+    /// real rows so the swap does not jump.
+    fn render_skeleton(&self) -> AnyElement {
+        div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .bg(ui::inset())
+            .children((0..12).map(|_| {
+                div()
+                    .h(px(ROW_HEIGHT))
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .px_4()
+                    .border_b_1()
+                    .border_color(ui::divider_soft())
+                    .child(div().w(px(40.)).h(px(40.)).rounded_full().bg(ui::surface()))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1p5()
+                            .child(div().w(px(180.)).h(px(10.)).rounded_sm().bg(ui::surface()))
+                            .child(div().w(px(280.)).h(px(8.)).rounded_sm().bg(ui::surface())),
+                    )
+            }))
+            .with_animation(
+                "skeleton",
+                gpui::Animation::new(Duration::from_millis(1400)).repeat(),
+                |rows, delta| rows.opacity(0.55 + 0.35 * delta),
+            )
+            .into_any_element()
     }
 
     /// Build one screenful of rows for the virtualized list.
@@ -681,6 +759,7 @@ impl StoreRoot {
             .map(|&app_ix| {
                 let app = &self.apps[app_ix];
                 let app_id = app.app_id.clone();
+                let action_id = app_id.clone();
                 let is_selected = selected == Some(app.app_id.as_str());
                 let is_installed = self.installed.contains_key(&app.app_id);
                 let job = self.jobs.get(&app.app_id).map(|job| job.label().to_string());
@@ -700,9 +779,9 @@ impl StoreRoot {
                     .hover(|style| style.bg(ui::surface()))
                     .when(is_selected, |row| row.bg(ui::row_selected()))
                     .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
-                        this.select_app(&app_id, cx);
+                        this.open_page(&app_id, cx);
                     }))
-                    .child(app_icon(app.icon_path.as_deref(), &app.name, 36.))
+                    .child(app_icon(app.icon_path.as_deref(), &app.name, 40.))
                     .child(
                         div()
                             .flex_1()
@@ -744,277 +823,236 @@ impl StoreRoot {
                             ),
                     )
                     .child(match job {
-                        Some(label) => badge(&label, ui::risk_color(orchard_core::Risk::Medium)),
-                        None => {
-                            if is_installed {
-                                badge("Installed", ui::risk_color(orchard_core::Risk::Low))
-                            } else {
-                                badge(
-                                    app.version.as_deref().unwrap_or(""),
-                                    ui::text_dim(),
+                        Some(label) => badge(
+                            &label,
+                            ui::risk_color(orchard_core::Risk::Medium),
+                        )
+                        .into_any_element(),
+                        None if is_installed => div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(badge(
+                                "Installed",
+                                ui::risk_color(orchard_core::Risk::Low),
+                            ))
+                            .child(ui::small_button(format!("row-open-{action_id}"), "Open", false)
+                                .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
+                                    cx.stop_propagation();
+                                    this.open(action_id.as_str(), cx);
+                                })))
+                            .into_any_element(),
+                        None => div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .children(app.version.as_deref().map(|v| badge(v, ui::text_dim())))
+                            .child(
+                                ui::small_button(
+                                    format!("row-install-{action_id}"),
+                                    "Install",
+                                    false,
                                 )
-                            }
-                        }
+                                .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
+                                    cx.stop_propagation();
+                                    this.install(action_id.as_str(), cx);
+                                })),
+                            )
+                            .into_any_element(),
                     })
                     .into_any_element()
             })
             .collect()
     }
 
-    fn render_detail(
-        &self,
-        app: StoreApp,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    /// The full app page: identity, screenshots, provenance,
+    /// permissions, and the install action in one scrollable view.
+    /// The page is where the install decision happens, so the action
+    /// bar stays pinned while the content scrolls.
+    fn render_page(&self, app: StoreApp, cx: &mut Context<Self>) -> AnyElement {
         let app_id = app.app_id.clone();
         let installed = self.installed.contains_key(&app_id);
         let job = self.jobs.get(&app_id);
         let verified = self.verified.get(&app_id).cloned();
-        let bottom = self.detail_bottom;
-        let locked = self.detail_lock == Some(bottom);
-
-        // pane size: user-dragged, clamped to the dock's minimum and
-        // to what leaves the list breathing room
-        let viewport = window.viewport_size();
-        let pane_size = if bottom {
-            let max = (f32::from(viewport.height) - LIST_MIN_AXIS).max(MIN_BOTTOM_HEIGHT);
-            self.bottom_size.clamp(MIN_BOTTOM_HEIGHT, max)
-        } else {
-            let max = (f32::from(viewport.width) - LIST_MIN_AXIS).max(MIN_RIGHT_WIDTH);
-            self.right_size.clamp(MIN_RIGHT_WIDTH, max)
-        };
 
         // the header icon: cached AppStream PNG, or a disk-cache fetch
         // of the remote icon, or the initials tile
         let header_icon = match (&app.icon_path, &app.icon_url) {
-            (Some(path), _) => app_icon(Some(path), &app.name, 40.),
+            (Some(path), _) => app_icon(Some(path), &app.name, 56.),
             (None, Some(url)) => match self.fetched.get(url) {
-                Some(Some(path)) => app_icon(Some(path), &app.name, 40.),
-                _ => app_icon(None, &app.name, 40.),
+                Some(Some(path)) => app_icon(Some(path), &app.name, 56.),
+                _ => app_icon(None, &app.name, 56.),
             },
-            (None, None) => app_icon(None, &app.name, 40.),
+            (None, None) => app_icon(None, &app.name, 56.),
         };
 
-        // the grab strip along the edge that faces the list: drag it
-        // to resize the pane (kuma-files' drag machinery: marker
-        // payload, empty ghost, move events on the root)
-        let handle = div()
-            .id("dock-handle")
-            .flex_none()
-            .cursor(if bottom {
-                CursorStyle::ResizeUpDown
-            } else {
-                CursorStyle::ResizeLeftRight
-            })
-            .hover(|style| style.bg(ui::accent()))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                    let bottom = this.detail_bottom;
-                    this.resize_anchor = Some(ResizeAnchor {
-                        bottom,
-                        pos: event.position,
-                        size: if bottom {
-                            this.bottom_size
-                        } else {
-                            this.right_size
-                        },
-                    });
-                    cx.notify();
-                }),
-            )
-            .on_drag(DockDrag, |_, _, _, cx| cx.new(|_| DockDragGhost))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _: &MouseUpEvent, _, cx| {
-                    if this.resize_anchor.take().is_some() {
-                        cx.notify();
-                    }
-                }),
-            );
-        let handle = if bottom {
-            handle.w_full().h(px(6.))
-        } else {
-            handle.w(px(6.)).h_full()
+        // the quiet provenance line: what the user is relying on,
+        // without cryptographic jargon by default
+        let provenance = match app.source {
+            Source::Reviewed => div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap_2()
+                .child(badge("Reviewed by Flathub", ui::text_dim()))
+                .child(
+                    div()
+                        .text_size(px(ui::TEXT_SIZE))
+                        .text_color(ui::text_dim())
+                        .child("Moderator-reviewed listing; installs from your flathub remote."),
+                )
+                .into_any_element(),
+            Source::Publisher => div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap_2()
+                .child(badge("Publisher-verified", ui::accent()))
+                .children(verified.clone().map(|digest| {
+                    let short = &digest[..digest.len().min(12)];
+                    badge(&format!("digest {short}"), ui::risk_color(Risk::Low))
+                }))
+                .children(app.publisher.as_ref().map(|pubkey| {
+                    let short = &pubkey[..pubkey.len().min(16)];
+                    div()
+                        .text_size(px(ui::TEXT_SIZE))
+                        .text_color(ui::text_dim())
+                        .child(format!(
+                            "Published by {short}…; the artifact digest is checked before install."
+                        ))
+                }))
+                .into_any_element(),
         };
 
-        let pane = div().flex().flex_col().bg(ui::panel()).overflow_hidden();
-        let pane = if bottom {
-            pane.w_full()
-                .flex_none()
-                .h(px(pane_size))
-                .border_t_1()
-                .border_color(ui::divider())
-        } else {
-            pane.w(px(pane_size))
-                .flex_none()
-                .h_full()
-                .border_l_1()
-                .border_color(ui::divider())
-        };
-
-        let pane = pane.child(
-                // header
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .px_4()
-                    .py_3()
-                    .border_b_1()
-                    .border_color(ui::divider())
-                    .child(
-                        div()
-                            .id("back")
-                            .cursor_pointer()
-                            .text_color(ui::accent())
-                            .hover(|style| style.text_color(ui::text()))
-                            .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
-                                this.selected = None;
-                                cx.notify();
-                            }))
-                            .child("← Back"),
-                    )
-                    .child(header_icon)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .text_size(px(ui::TEXT_SIZE_EMPHASIS))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(ui::text())
-                                    .child(app.name.clone()),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(ui::TEXT_SIZE_LABEL + 0.5))
-                                    .text_color(ui::text_dim())
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .child(app.app_id.clone()),
-                            ),
-                    )
-                    .child(icon_button(
-                        "dock-flip",
-                        if bottom {
-                            "icons/chevron_right.svg"
-                        } else {
-                            "icons/chevron_down.svg"
-                        },
-                        ui::text_dim(),
-                    ).on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
-                        this.flip_dock(cx);
-                    })))
-                    .child(icon_button(
-                        "dock-lock",
-                        if locked {
-                            "icons/lock.svg"
-                        } else {
-                            "icons/lock_open.svg"
-                        },
-                        if locked {
-                            ui::accent()
-                        } else {
-                            ui::text_dim()
-                        },
-                    ).on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
-                        this.toggle_dock_lock(cx);
-                    }))),
-            )
+        let mut content = div()
+            .w_full()
+            .max_w(px(760.))
+            .px_8()
+            .py_6()
+            .flex()
+            .flex_col()
+            .gap_5()
             .child(
                 div()
-                    .id("detail-scroll")
+                    .id("back")
+                    .cursor_pointer()
+                    .text_color(ui::accent())
+                    .hover(|style| style.text_color(ui::text()))
+                    .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
+                        this.close_page(cx);
+                    }))
+                    .child("← All apps"),
+            )
+            .child(
+                // identity header
+                div().flex().items_start().gap_4().child(header_icon).child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_size(px(ui::TEXT_SIZE_EMPHASIS + 4.))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(ui::text())
+                                .child(app.name.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .items_center()
+                                .gap_2()
+                                .text_size(px(ui::TEXT_SIZE_SMALL))
+                                .text_color(ui::text_dim())
+                                .overflow_hidden()
+                                .child(div().child(app.app_id.clone()))
+                                .children(app.version.clone().map(|v| div().child(format!("· {v}"))))
+                                .children(
+                                    app.license.clone().map(|l| div().child(format!("· {l}"))),
+                                ),
+                        )
+                        .child(provenance),
+                ),
+            );
+
+        if !app.screenshots.is_empty() {
+            content = content.child(
+                div()
+                    .id("screenshots")
+                    .flex()
+                    .gap_2()
+                    .overflow_x_scroll()
+                    .children(app.screenshots.iter().take(6).map(|url| {
+                        match self.fetched.get(url) {
+                            Some(Some(path)) => gpui::img(path.clone())
+                                .w(px(280.))
+                                .h(px(158.))
+                                .flex_none()
+                                .object_fit(gpui::ObjectFit::Cover)
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(ui::divider())
+                                .into_any_element(),
+                            slot => image_placeholder(slot.is_none()),
+                        }
+                    })),
+            );
+        }
+
+        content = content
+            .child(
+                div()
+                    .text_size(px(ui::TEXT_SIZE_EMPHASIS))
+                    .text_color(ui::text())
+                    .child(app.summary.clone()),
+            )
+            .children(app.description.clone().map(|description| {
+                div()
+                    .text_size(px(ui::TEXT_SIZE))
+                    .text_color(ui::text_dim())
+                    .child(description)
+            }))
+            .when(
+                app.source == Source::Publisher || app.metadata.is_some(),
+                |section| {
+                    section.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_size(px(ui::TEXT_SIZE_EMPHASIS - 1.))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(ui::text())
+                                    .child("What it can access"),
+                            )
+                            .child(render_permissions_static(&app)),
+                    )
+                },
+            );
+
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .bg(ui::panel())
+            .child(
+                div()
+                    .id("page-scroll")
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .p_4()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child(
-                        // badges row
-                        div().flex().flex_wrap().items_center().gap_2().child(match app.source {
-                            Source::Reviewed => badge("Reviewed on Flathub", ui::text_dim()),
-                            Source::Publisher => {
-                                badge("Publisher-verified", ui::accent())
-                            }
-                        })
-                        .when(app.source == Source::Publisher, |row| {
-                            row.children(verified.clone().map(|digest| {
-                                badge(&format!("digest {digest}"), ui::risk_color(Risk::Low))
-                            }))
-                        })
-                        .children(app.version.clone().map(|v| badge(&v, ui::text())))
-                        .children(
-                            app.license
-                                .clone()
-                                .map(|license| badge(&license, ui::text_dim())),
-                        ),
-                    )
-                    .when(!app.screenshots.is_empty(), |section| {
-                        section.child(
-                            div()
-                                .id("screenshots")
-                                .flex()
-                                .gap_2()
-                                .overflow_x_scroll()
-                                .children(app.screenshots.iter().take(4).map(|url| {
-                                    match self.fetched.get(url) {
-                                        Some(Some(path)) => gpui::img(path.clone())
-                                            .w(px(176.))
-                                            .h(px(108.))
-                                            .flex_none()
-                                            .object_fit(gpui::ObjectFit::Cover)
-                                            .rounded_sm()
-                                            .border_1()
-                                            .border_color(ui::divider())
-                                            .into_any_element(),
-                                        slot => image_placeholder(slot.is_none()),
-                                    }
-                                })),
-                        )
-                    })
-                    .child(
-                        div()
-                            .text_size(px(ui::TEXT_SIZE_EMPHASIS - 0.5))
-                            .text_color(ui::text())
-                            .child(app.summary.clone()),
-                    )
-                    .children(app.description.clone().map(|description| {
-                        div()
-                            .text_size(px(ui::TEXT_SIZE))
-                            .text_color(ui::text_dim())
-                            .child(description)
-                    }))
-                    .when(app.source == Source::Publisher, |section| {
-                        section.children(app.publisher.clone().map(|publisher| {
-                            div()
-                                .text_size(px(ui::TEXT_SIZE))
-                                .text_color(ui::text_dim())
-                                .child(format!("Publisher key: {}", publisher))
-                        }))
-                    })
-                    .when(
-                        app.source == Source::Publisher
-                            || app.metadata.is_some(),
-                        |section| {
-                            section.child(render_permissions_static(&app))
-                        },
-                    ),
+                    .child(div().flex().justify_center().child(content)),
             )
             .child(
-                // action bar
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .px_4()
-                    .py_3()
-                    .border_t_1()
-                    .border_color(ui::divider())
+                // action bar: pinned under the scrolling content
+                div().flex().items_center().gap_2().px_8().py_3().border_t_1()
+                    .border_color(ui::divider()).bg(ui::panel())
                     .children(match job {
                         Some(state) => vec![badge(
                             state.label(),
@@ -1058,24 +1096,8 @@ impl StoreRoot {
                             buttons
                         }
                     }),
-            );
-
-        if bottom {
-            div()
-                .w_full()
-                .flex_none()
-                .flex()
-                .flex_col()
-                .child(handle)
-                .child(pane)
-        } else {
-            div()
-                .flex_none()
-                .h_full()
-                .flex()
-                .child(handle)
-                .child(pane)
-        }
+            )
+            .into_any_element()
     }
 }
 
@@ -1087,52 +1109,24 @@ fn risk_label(risk: Risk) -> &'static str {
     }
 }
 
-/// Detail pane sizing: the smallest draggable size for each dock and
-/// the breathing room the list keeps on the other axis.
-const MIN_BOTTOM_HEIGHT: f32 = 200.0;
-const MIN_RIGHT_WIDTH: f32 = 320.0;
-const LIST_MIN_AXIS: f32 = 160.0;
-
 /// Fixed list row height: `uniform_list` needs uniform items, and a
 /// pinned height keeps the layout work per frame trivial.
-const ROW_HEIGHT: f32 = 52.0;
+const ROW_HEIGHT: f32 = 56.0;
 
-/// Marker payload for the detail-pane resize drag.
-struct DockDrag;
-
-/// The drag ghost for the resize handle: nothing, the moving edge is
-/// the feedback.
-struct DockDragGhost;
-
-impl Render for DockDragGhost {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-    }
-}
-
-/// Where a pane resize started: the pointer position and the pane
-/// size at that moment.
-#[derive(Clone, Copy)]
-struct ResizeAnchor {
-    bottom: bool,
-    pos: Point<Pixels>,
-    size: f32,
-}
-
-/// The auto-dock rule behind the detail pane: right when the window
-/// is wide (1024 and up), bottom when narrow (below 950), keep the
-/// current dock in the hysteresis band between the two thresholds.
-/// `Some` only when the dock changes.
-fn auto_dock_for(width: f32, current_bottom: bool) -> Option<bool> {
-    if width >= 1024.0 {
-        Some(false)
-    } else if width < 950.0 {
-        Some(true)
-    } else {
-        None
-    }
-    .filter(|bottom| *bottom != current_bottom)
-}
+/// Canonical browse categories, display order: the chip row folds to
+/// this set, anything absent from it never shows a chip.
+const BROWSE_CATEGORIES: [&str; 10] = [
+    "Games",
+    "Utilities",
+    "Audio & Video",
+    "Development",
+    "Network",
+    "Office",
+    "Graphics",
+    "Science",
+    "Education",
+    "System",
+];
 
 /// The screenshot slot while its image fetch is in flight, or after it
 /// failed.
@@ -1202,11 +1196,12 @@ fn render_permissions_static(app: &StoreApp) -> gpui::AnyElement {
 
 impl Render for StoreRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.auto_dock(window);
+        let page_open = self.page_open;
         let selected = self.selected_app().cloned();
         let filter = self.filter;
         let total = self.apps.len();
         let installed_count = self.installed.len();
+        let search_focused = self.focus_handle.is_focused(window);
 
         div()
             .key_context("StoreRoot")
@@ -1245,7 +1240,11 @@ impl Render for StoreRoot {
                             .rounded_sm()
                             .bg(ui::inset())
                             .border_1()
-                            .border_color(ui::divider())
+                            .border_color(if search_focused {
+                                ui::accent()
+                            } else {
+                                ui::divider()
+                            })
                             .text_size(px(ui::TEXT_SIZE))
                             .text_color(if self.search.is_empty() {
                                 ui::text_dim()
@@ -1259,56 +1258,52 @@ impl Render for StoreRoot {
                             }),
                     )
                     .child(div().flex_1())
-                    .child(div().flex().gap_1().children(
-                        [
-                            Filter::All,
-                            Filter::Reviewed,
-                            Filter::Publisher,
-                            Filter::Installed,
-                        ]
-                        .iter()
-                        .map(|f| {
-                            let active = *f == filter;
-                            div()
-                                .id(("filter", *f as usize))
-                                .px_2()
-                                .py_1()
-                                .rounded_sm()
-                                .text_size(px(ui::TEXT_SIZE))
-                                .cursor_pointer()
-                                .when(active, |chip| {
-                                    chip.bg(ui::accent()).text_color(ui::accent_text())
-                                })
-                                .when(!active, |chip| {
-                                    chip.text_color(ui::text_dim()).hover(|style| {
-                                        style.bg(ui::surface())
+                    // source filters are a browse concern; the page
+                    // hides them
+                    .when(!page_open, |bar| {
+                        bar.child(div().flex().gap_1().children(
+                            [
+                                Filter::All,
+                                Filter::Reviewed,
+                                Filter::Publisher,
+                                Filter::Installed,
+                            ]
+                            .iter()
+                            .map(|f| {
+                                let active = *f == filter;
+                                div()
+                                    .id(("filter", *f as usize))
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .text_size(px(ui::TEXT_SIZE))
+                                    .cursor_pointer()
+                                    .when(active, |chip| {
+                                        chip.bg(ui::accent()).text_color(ui::accent_text())
                                     })
-                                })
-                                .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
-                                    this.filter = *f;
-                                    cx.notify();
-                                }))
-                                .child(f.label().to_string())
-                        }),
-                    )),
+                                    .when(!active, |chip| {
+                                        chip.text_color(ui::text_dim()).hover(|style| {
+                                            style.bg(ui::surface())
+                                        })
+                                    })
+                                    .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
+                                        this.filter = *f;
+                                        cx.notify();
+                                    }))
+                                    .child(f.label().to_string())
+                            }),
+                        ))
+                    }),
             )
-            // body: the detail pane docks right when the window is
-            // wide, bottom when narrow (auto_dock above, unless locked)
-            .child(if self.detail_bottom {
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .flex_col()
-                    .child(self.render_list(cx))
-                    .children(selected.map(|app| self.render_detail(app, window, cx)))
+            // body: browse (category chips + virtualized list) or the
+            // full app page
+            .child(if page_open {
+                match selected {
+                    Some(app) => self.render_page(app, cx).into_any_element(),
+                    None => self.render_browse(cx),
+                }
             } else {
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .child(self.render_list(cx))
-                    .children(selected.map(|app| self.render_detail(app, window, cx)))
+                self.render_browse(cx)
             })
             // status bar
             .child(
@@ -1340,20 +1335,6 @@ impl Render for StoreRoot {
             .on_click(cx.listener(|this, _e: &ClickEvent, window, _cx| {
                 // Keep the keyboard attached to the search context.
                 window.focus(&this.focus_handle);
-            }))
-            .on_drag_move::<DockDrag>(cx.listener(Self::on_resize_move))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _: &MouseUpEvent, _, cx| {
-                    if this.resize_anchor.take().is_some() {
-                        cx.notify();
-                    }
-                }),
-            )
-            .on_drop(cx.listener(|this, _: &DockDrag, _window, cx| {
-                if this.resize_anchor.take().is_some() {
-                    cx.notify();
-                }
             }))
     }
 }
@@ -1419,14 +1400,9 @@ fn list_installed() -> HashMap<String, InstalledInfo> {
                 return None;
             }
             let version = fields.next().map(|f| f.trim().to_string());
-            let origin = fields.next().map(|f| f.trim().to_string());
-            Some((
-                app_id,
-                InstalledInfo {
-                    version: version.filter(|v| !v.is_empty()),
-                    origin: origin.filter(|o| !o.is_empty()),
-                },
-            ))
+            let _origin = fields.next().map(|f| f.trim().to_string());
+            let _ = version;
+            Some((app_id, InstalledInfo))
         })
         .collect()
 }
