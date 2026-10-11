@@ -118,12 +118,21 @@ pub struct StoreRoot {
     reviews: HashMap<String, Vec<orchard_core::Review>>,
     /// A reviews fetch in flight (whole document; small at this scale).
     reviews_fetching: bool,
+    /// The reviews list is collapsed by default; the header toggles it.
+    reviews_expanded: bool,
+    /// The signed-in reviewer: local key plus display name. None until
+    /// the user signs in; the key file survives restarts.
+    reviewer: Option<Reviewer>,
+    /// The sign-in form is open: the shared input holds the name.
+    signin_open: bool,
     /// Compose mode: keystrokes go to the review draft, not the search
     /// box or the page's type-to-close. Entered by clicking the compose
     /// box or pressing r on a page; left by Escape or a successful post.
     composing: bool,
-    /// The draft review: (rating 1.0 to 5.0, text). Kept across
-    /// accidental Escapes, cleared on post and on page switch.
+    /// The draft review (or, while the sign-in form is open, the name):
+    /// (rating 1.0 to 5.0, text). The two forms never show at once, so
+    /// one input serves both. Kept across accidental Escapes, cleared on
+    /// post and on page switch.
     review_draft: (Option<f32>, String),
     /// Draft text cursor (byte index) and selection anchor, mirroring
     /// the search box fields.
@@ -181,6 +190,9 @@ impl StoreRoot {
             verify_errors: HashMap::new(),
             reviews: HashMap::new(),
             reviews_fetching: false,
+            reviews_expanded: false,
+            reviewer: load_reviewer(),
+            signin_open: false,
             composing: false,
             review_draft: (None, String::new()),
             review_cursor: 0,
@@ -344,6 +356,8 @@ impl StoreRoot {
             self.lightbox = None;
             // a half-written review belongs to the app it was for
             self.composing = false;
+            self.signin_open = false;
+            self.reviews_expanded = false;
             self.review_draft = (None, String::new());
             self.review_cursor = 0;
             self.review_anchor = None;
@@ -597,11 +611,18 @@ impl StoreRoot {
         if self.review_posting {
             return;
         }
-        let Some((rating, _)) = self.review_draft.0.map(|r| (r, ())) else {
+        if self.reviewer.is_none() {
+            self.review_error = Some("Sign in to post.".into());
+            cx.notify();
+            return;
+        };
+        let reviewer = self.reviewer.as_ref().unwrap();
+        let Some(rating) = self.review_draft.0 else {
             self.review_error = Some("Pick a rating first (keys 1 to 5).".into());
             cx.notify();
             return;
         };
+        let key_hex = reviewer.keys.secret_key().to_secret_hex();
         let content = self.review_draft.1.trim().to_string();
         self.review_posting = true;
         self.review_error = None;
@@ -609,7 +630,7 @@ impl StoreRoot {
         cx.spawn(async move |this, cx| {
             let posted = cx
                 .background_executor()
-                .spawn(async move { post_review(&app_id, rating, content) })
+                .spawn(async move { post_review(&key_hex, &app_id, rating, content) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.review_posting = false;
@@ -632,12 +653,71 @@ impl StoreRoot {
         .detach();
     }
 
+    /// Enter the review flow from the page: compose when signed in,
+    /// the sign-in form when not. Both expand the section.
+    fn start_review(&mut self, cx: &mut Context<Self>) {
+        self.reviews_expanded = true;
+        self.review_error = None;
+        if self.reviewer.is_some() {
+            self.composing = true;
+        } else {
+            // the shared input holds the display name until sign-in
+            self.signin_open = true;
+            self.review_draft = (None, String::new());
+            self.review_cursor = 0;
+            self.review_anchor = None;
+            self.review_layout = None;
+        }
+        cx.notify();
+    }
+
+    /// Finish sign-in: create or rename the device identity, close the
+    /// form, drop into compose.
+    fn sign_in(&mut self, cx: &mut Context<Self>) {
+        let name = self.review_draft.1.trim().to_string();
+        if name.is_empty() {
+            self.review_error = Some("Pick a display name first.".into());
+            cx.notify();
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let created = cx
+                .background_executor()
+                .spawn(async move { create_reviewer(&name) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                match created {
+                    Ok(reviewer) => {
+                        this.reviewer = Some(reviewer);
+                        this.signin_open = false;
+                        this.composing = true;
+                        this.review_draft = (None, String::new());
+                        this.review_cursor = 0;
+                        this.review_anchor = None;
+                        this.review_layout = None;
+                        this.review_error = None;
+                        // the profile event announces the name; the
+                        // next fetch resolves it onto past reviews too
+                        this.ensure_reviews(cx);
+                    }
+                    Err(err) => {
+                        this.review_error = Some(format!("{err:#}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// Close the detail page. Selection survives so keyboard
     /// navigation resumes where it left off.
     fn close_page(&mut self, cx: &mut Context<Self>) {
         self.page_open = false;
         self.lightbox = None;
         self.composing = false;
+        self.signin_open = false;
+        self.reviews_expanded = false;
         cx.notify();
     }
 
@@ -880,6 +960,29 @@ impl StoreRoot {
 
         // ----- review compose: keystrokes go to the draft, not the
         // search box, and typing does not close the page -----
+        if self.signin_open {
+            match key {
+                "escape" => {
+                    self.signin_open = false;
+                    self.review_draft = (None, String::new());
+                    self.review_cursor = 0;
+                    self.review_anchor = None;
+                    self.review_layout = None;
+                    self.review_error = None;
+                }
+                "enter" => self.sign_in(cx),
+                "left" | "right" | "home" | "end" | "backspace" | "delete" => {
+                    self.move_draft_cursor(key, shift)
+                }
+                "space" => self.insert_draft_text(" "),
+                other if other.chars().count() == 1 && !ctrl => {
+                    self.insert_draft_text(other)
+                }
+                _ => {}
+            }
+            cx.notify();
+            return;
+        }
         if self.composing {
             match key {
                 "escape" => {
@@ -902,6 +1005,7 @@ impl StoreRoot {
                 "left" | "right" | "home" | "end" | "backspace" | "delete" => {
                     self.move_draft_cursor(key, shift);
                 }
+                "space" => self.insert_draft_text(" "),
                 other if other.chars().count() == 1 && !ctrl => {
                     self.insert_draft_text(other);
                 }
@@ -914,7 +1018,7 @@ impl StoreRoot {
         // r starts a review from the page, before the type-to-close
         // rule eats the keystroke
         if self.page_open && key == "r" && !ctrl {
-            self.composing = true;
+            self.start_review(cx);
             cx.notify();
             return;
         }
@@ -1987,10 +2091,10 @@ fn image_placeholder(loading: bool) -> gpui::AnyElement {
 }
 
 impl StoreRoot {
-    /// The reviews section of the app page: the list (newest first)
-    /// plus the compose box. Compose is a mode, not an always-live
-    /// input: keystrokes reach the draft only once it is active, so
-    /// type-to-close keeps working elsewhere on the page.
+    /// The reviews section of the app page: a quiet header that doubles
+    /// as the expand/collapse toggle (the list is hidden until asked
+    /// for), the review list flush with the other page fields, and the
+    /// compose or sign-in form when expanded.
     fn render_reviews(&mut self, app_id: &str, font: gpui::Font, cx: &mut Context<Self>) -> gpui::AnyElement {
         let reviews = self
             .reviews
@@ -1998,74 +2102,73 @@ impl StoreRoot {
             .cloned()
             .unwrap_or_default();
 
-        let section = div().flex().flex_col().gap_2().w_full();
-
-        // header: count and average, quiet
+        // header: same shape as the other section headers, so the text
+        // lines up; the score formats with one decimal, no float junk
         let average = if reviews.is_empty() {
             None
         } else {
             let rated: Vec<f32> = reviews.iter().filter_map(|r| r.rating).collect();
             (!rated.is_empty()).then(|| rated.iter().sum::<f32>() / rated.len() as f32)
         };
-        let section = section.child(
+        let label = if reviews.is_empty() {
+            "No reviews yet".to_string()
+        } else {
+            let score = average
+                .map(|value| format!(" · {:.1} {}", value, stars(value)))
+                .unwrap_or_default();
+            format!("Reviews{} · {}", score, reviews.len())
+        };
+        let mut section = div().flex().flex_col().gap_2().w_full().child(
             div()
+                .id("reviews-toggle")
                 .flex()
                 .items_center()
-                .gap_2()
+                .gap_1p5()
+                .cursor_pointer()
                 .text_size(px(ui::TEXT_SIZE_EMPHASIS - 1.))
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(ui::text())
-                .child(ui::icon("icons/star.svg", 13., ui::text()))
-                .child(if reviews.is_empty() {
-                    "No reviews yet".to_string()
+                .hover(|style| style.text_color(ui::accent()))
+                .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
+                    this.reviews_expanded = !this.reviews_expanded;
+                    cx.notify();
+                }))
+                .child(if self.reviews_expanded {
+                    ui::icon("icons/chevron_down.svg", 13., ui::text())
                 } else {
-                    match average {
-                        Some(value) => format!(
-                            "Reviews · {} ({} {})",
-                            reviews.len(),
-                            value,
-                            stars(value)
-                        ),
-                        None => format!("Reviews · {}", reviews.len()),
-                    }
-                }),
+                    ui::icon("icons/chevron_right.svg", 13., ui::text())
+                })
+                .child(label),
         );
 
-        // the reviews themselves
-        let mut section = section;
-        for review in &reviews {
-            let author = review
-                .name
-                .clone()
-                .or_else(|| review.nip05.clone())
-                .unwrap_or_else(|| format!("{}…", &review.pubkey[..review.pubkey.len().min(12)]));
-            let when = relative_time(review.created_at);
-            section = section.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(ui::divider_soft())
-                    .px_3()
-                    .py_2()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .text_size(px(ui::TEXT_SIZE_LABEL))
-                            .text_color(ui::text_dim())
-                            .child(div().child(author))
-                            .children(review.rating.map(|value| {
-                                div()
-                                    .text_color(ui::accent())
-                                    .child(stars(value))
-                            }))
-                            .child(div().child(when)),
-                    )
-                    .children((!review.content.is_empty()).then(|| {
+        // the reviews themselves, flush with the other fields: no
+        // border chrome, the author line and text start at the same
+        // edge as the description above
+        if self.reviews_expanded {
+            for review in &reviews {
+                let author = review
+                    .name
+                    .clone()
+                    .or_else(|| review.nip05.clone())
+                    .unwrap_or_else(|| {
+                        format!("{}…", &review.pubkey[..review.pubkey.len().min(12)])
+                    });
+                let when = relative_time(review.created_at);
+                let mut row = div().flex().flex_col().gap_1().w_full().child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_size(px(ui::TEXT_SIZE_LABEL))
+                        .text_color(ui::text_dim())
+                        .child(div().child(author))
+                        .children(review.rating.map(|value| {
+                            div().text_color(ui::accent()).child(stars(value))
+                        }))
+                        .child(div().child(when)),
+                );
+                if !review.content.is_empty() {
+                    row = row.child(
                         div()
                             .flex()
                             .flex_col()
@@ -2076,41 +2179,186 @@ impl StoreRoot {
                                     .content
                                     .lines()
                                     .map(|line| div().w_full().child(line.to_string())),
-                            )
-                    })),
-            );
+                            ),
+                    );
+                }
+                section = section.child(row);
+            }
+
+            // compose or sign-in, depending on session state
+            if self.signin_open {
+                section = section.child(self.render_review_signin(font.clone(), cx));
+            } else if self.composing {
+                section = section.child(self.render_review_compose(app_id, font.clone(), cx));
+            } else {
+                let invitation = if self.reviewer.is_some() {
+                    format!("Write a review (r) as {}", self.reviewer.as_ref().unwrap().name)
+                } else {
+                    "Write a review (r)".to_string()
+                };
+                section = section.child(
+                    div()
+                        .id("write-review")
+                        .flex()
+                        .items_center()
+                        .gap_1p5()
+                        .cursor_pointer()
+                        .text_size(px(ui::TEXT_SIZE))
+                        .text_color(ui::accent())
+                        .hover(|style| style.text_color(ui::text()))
+                        .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
+                            this.start_review(cx);
+                        }))
+                        .child(invitation),
+                );
+            }
         }
 
-        // compose: either the live draft or the quiet invitation
-        section = if self.composing {
-            section.child(self.render_review_compose(app_id, font.clone(), cx))
-        } else {
-            section.child(
+        section.into_any_element()
+    }
+
+    /// The sign-in form: one input for the display name. Signing in
+    /// creates (or renames) the device's reviewer identity and
+    /// announces it as a kind 0 profile.
+    fn render_review_signin(&mut self, font: gpui::Font, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let name = self.review_draft.1.clone();
+        let input = self.render_text_input("signin-input", &name, "Your display name", font);
+
+        let mut form = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .rounded_sm()
+            .border_1()
+            .border_color(ui::accent())
+            .px_3()
+            .py_2()
+            .child(
                 div()
-                    .id("write-review")
+                    .text_size(px(ui::TEXT_SIZE))
+                    .text_color(ui::text())
+                    .child("Sign in to review"),
+            )
+            .child(input)
+            .child(
+                div()
                     .flex()
                     .items_center()
-                    .gap_1p5()
-                    .cursor_pointer()
-                    .text_size(px(ui::TEXT_SIZE))
-                    .text_color(ui::accent())
-                    .hover(|style| style.text_color(ui::text()))
-                    .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
-                        this.composing = true;
-                        cx.notify();
-                    }))
-                    .child("Write a review (r)"),
-            )
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(ui::TEXT_SIZE_LABEL))
+                            .text_color(ui::text_dim())
+                            .child(
+                                "A local key is created on sign-in and never leaves this device.",
+                            ),
+                    )
+                    .child(
+                        button("btn-sign-in", None, "Sign in", true).on_click(cx.listener(
+                            |this, _e: &ClickEvent, _w, cx| {
+                                this.sign_in(cx);
+                            },
+                        )),
+                    ),
+            );
+        if let Some(error) = &self.review_error {
+            form = form.child(
+                div()
+                    .text_size(px(ui::TEXT_SIZE_LABEL))
+                    .text_color(ui::risk_color(Risk::Medium))
+                    .child(error.clone()),
+            );
+        }
+        form.into_any_element()
+    }
+
+    /// The shared single-line text input: StyledText with selection
+    /// runs, a static caret, click-to-enter. Used by the review draft
+    /// and the sign-in form (the search box keeps its own wiring in
+    /// render, where the window's font style is at hand).
+    fn render_text_input(
+        &mut self,
+        id: &'static str,
+        text: &str,
+        placeholder: &str,
+        font: gpui::Font,
+    ) -> gpui::Stateful<gpui::Div> {
+        let empty = text.is_empty();
+        let mut styled = StyledText::new(text.to_string());
+        if !empty {
+            let (start, end) = self.draft_selection();
+            let plain: Hsla = ui::text().into();
+            let mut highlighted: Hsla = ui::accent().into();
+            highlighted.a = 0.35;
+            let mut runs: Vec<TextRun> = Vec::new();
+            let make_run = |len: usize, bg: Option<Hsla>| TextRun {
+                len,
+                font: font.clone(),
+                color: plain,
+                background_color: bg,
+                underline: None,
+                strikethrough: None,
+            };
+            if start > 0 {
+                runs.push(make_run(start, None));
+            }
+            if end > start {
+                runs.push(make_run(end - start, Some(highlighted)));
+            }
+            if end < text.len() {
+                runs.push(make_run(text.len() - end, None));
+            }
+            styled = styled.with_runs(runs);
+        }
+        let live_layout = styled.layout().clone();
+        let prev_layout = self.review_layout.clone();
+        if !empty {
+            self.review_layout = Some(live_layout);
+        }
+        let caret_x = if empty {
+            Some(px(0.))
+        } else {
+            prev_layout.and_then(|layout| {
+                layout
+                    .position_for_index(self.review_cursor.min(text.len()))
+                    .map(|pos| pos.x - layout.bounds().origin.x)
+            })
         };
 
-        section.into_any_element()
+        let mut input = div()
+            .id(SharedString::from(id))
+            .cursor_pointer()
+            .relative()
+            .flex()
+            .items_center()
+            .min_h(px(22.))
+            .text_size(px(ui::TEXT_SIZE))
+            .text_color(if empty { ui::text_dim() } else { ui::text() })
+            .when(empty, |slot| slot.child(placeholder.to_string()))
+            // the StyledText itself must paint: measurement happens at
+            // paint time, and the caret's next-frame position_for_index
+            // panics on an unmeasured handle
+            .when(!empty, |slot| slot.child(styled));
+
+        if let Some(caret_x) = caret_x {
+            input = input.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left_0()
+                    .flex()
+                    .items_center()
+                    .child(div().ml(caret_x).w(px(1.5)).h(px(16.)).bg(ui::text())),
+            );
+        }
+        input
     }
 
     /// The live compose box: star row, draft input with a real caret,
     /// post button, error line.
     fn render_review_compose(&mut self, app_id: &str, font: gpui::Font, cx: &mut Context<Self>) -> gpui::AnyElement {
         let (draft_rating, draft_text) = (self.review_draft.0, self.review_draft.1.clone());
-        let placeholder = draft_text.is_empty();
 
         // star row: five clicks, or keys 1 to 5
         let mut star_row = div().flex().items_center().gap_1();
@@ -2132,90 +2380,12 @@ impl StoreRoot {
             );
         }
 
-        // the draft input mirrors the search box: StyledText carries the
-        // selection, the layout handle maps the caret, one frame stale
-        let mut styled = StyledText::new(draft_text.clone());
-        if !placeholder {
-            let (start, end) = self.draft_selection();
-            let plain: Hsla = ui::text().into();
-            let mut highlighted: Hsla = ui::accent().into();
-            highlighted.a = 0.35;
-            let mut runs: Vec<TextRun> = Vec::new();
-            let make_run = |len: usize, bg: Option<Hsla>| TextRun {
-                len,
-                font: font.clone(),
-                color: plain,
-                background_color: bg,
-                underline: None,
-                strikethrough: None,
-            };
-            if start > 0 {
-                runs.push(make_run(start, None));
-            }
-            if end > start {
-                runs.push(make_run(end - start, Some(highlighted)));
-            }
-            if end < draft_text.len() {
-                runs.push(make_run(draft_text.len() - end, None));
-            }
-            styled = styled.with_runs(runs);
-        }
-        let prev_layout = self.review_layout.clone();
-        let live_layout = styled.layout().clone();
-        if !placeholder {
-            self.review_layout = Some(live_layout.clone());
-        }
-        let caret_x = if placeholder {
-            Some(px(0.))
-        } else {
-            prev_layout.and_then(|layout| {
-                layout
-                    .position_for_index(self.review_cursor.min(draft_text.len()))
-                    .map(|pos| pos.x - layout.bounds().origin.x)
-            })
-        };
-
-        let input = div()
-            .id("review-input")
-            .cursor_pointer()
-            .relative()
-            .flex()
-            .items_center()
-            .min_h(px(22.))
-            .text_size(px(ui::TEXT_SIZE))
-            .text_color(if placeholder {
-                ui::text_dim()
-            } else {
-                ui::text()
-            })
-            .when(placeholder, |slot| {
-                slot.child("What did you think? Optional; Enter posts your review.")
-            })
-            // the StyledText itself must paint: measurement happens at
-            // paint time, and the caret's next-frame position_for_index
-            // panics on an unmeasured handle
-            .when(!placeholder, |slot| slot.child(styled));
-
-        // the caret rides inside the input (its relative parent) as a
-        // plain absolute overlay: it carries no id, so clicks land on
-        // the input itself
-        let input = if let Some(caret_x) = caret_x {
-            input.child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .left_0()
-                    .flex()
-                    .items_center()
-                    .child(
-                        div().ml(caret_x).w(px(1.5)).h(px(16.)).bg(ui::text()),
-                    ),
-            )
-        } else {
-            input
-        };
-
+        let input = self.render_text_input(
+            "review-input",
+            &draft_text,
+            "What did you think? Optional; Enter posts your review.",
+            font,
+        );
         let mut compose = div()
             .flex()
             .flex_col()
@@ -2758,9 +2928,11 @@ fn load_reviews() -> anyhow::Result<HashMap<String, Vec<orchard_core::Review>>> 
 }
 
 /// Sign and send one review event to the review relays. Blocking: runs
-/// on the background pool.
-fn post_review(app_id: &str, rating: f32, content: String) -> anyhow::Result<()> {
-    let keys = identity_keys()?;
+/// on the background pool. The key arrives as hex; the reviewer is
+/// always signed in by the time this runs.
+fn post_review(key_hex: &str, app_id: &str, rating: f32, content: String) -> anyhow::Result<()> {
+    use nostr::prelude::*;
+    let keys = Keys::parse(key_hex)?;
     let event = orchard_nostr::events::sign_review(
         &keys,
         &orchard_nostr::events::Review {
@@ -2789,30 +2961,85 @@ fn review_relays() -> Vec<String> {
     }
 }
 
-/// The reviewer identity: a local key, generated on first post and kept
-/// in the data directory. Reviews carry no personal data, but losing the
-/// file loses the reviewer identity (and the right to edit old reviews).
-fn identity_keys() -> anyhow::Result<nostr::prelude::Keys> {
+/// The signed-in reviewer: the local key in memory plus the display
+/// name shown on the reviews they post.
+pub struct Reviewer {
+    keys: nostr::prelude::Keys,
+    pub name: String,
+}
+
+/// Load the device's reviewer identity, if one has been created. The
+/// file holds the key hex and the chosen display name; the key is the
+/// identity, so it stays on disk across sign-outs.
+fn load_reviewer() -> Option<Reviewer> {
+    let path = identity_path()?;
+    let raw = std::fs::read_to_string(path).ok()?;
+    let saved: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let keys = nostr::prelude::Keys::parse(saved["secret_key"].as_str()?).ok()?;
+    Some(Reviewer {
+        name: saved["name"].as_str().unwrap_or("anonymous").to_string(),
+        keys,
+    })
+}
+
+/// Create (or rename) the device's reviewer identity: generate the key
+/// when none exists, persist name and key, and announce the kind 0
+/// profile so other readers can resolve the name.
+fn create_reviewer(name: &str) -> anyhow::Result<Reviewer> {
     use nostr::prelude::*;
-    let path = match std::env::var_os("XDG_DATA_HOME") {
-        Some(data) => std::path::PathBuf::from(data).join("orchard/identity.key"),
-        None => anyhow::bail!("XDG_DATA_HOME not set"),
+    let path = identity_path().ok_or_else(|| anyhow::anyhow!("XDG_DATA_HOME not set"))?;
+    // an existing key is reused: the identity lives on this device,
+    // sign-in only (re)names it
+    let keys = match load_reviewer() {
+        Some(existing) => existing.keys,
+        None => Keys::generate(),
     };
-    if path.exists() {
-        let raw = std::fs::read_to_string(&path)?;
-        return Ok(Keys::parse(raw.trim())?);
-    }
-    let keys = Keys::generate();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&path, keys.secret_key().to_secret_hex())?;
+    let saved = serde_json::json!({
+        "secret_key": keys.secret_key().to_secret_hex(),
+        "name": name,
+    });
+    std::fs::write(&path, serde_json::to_vec_pretty(&saved)?)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
     }
-    Ok(keys)
+    let reviewer = Reviewer {
+        name: name.to_string(),
+        keys,
+    };
+    // best effort: a review still reads fine as a pubkey until the
+    // profile propagates
+    if let Err(err) = announce_reviewer(&reviewer) {
+        eprintln!("profile announce failed: {err:#}");
+    }
+    Ok(reviewer)
+}
+
+/// Publish the reviewer's kind 0 profile so review authors resolve to
+/// names. Best effort: a review still reads fine as a pubkey until the
+/// profile propagates.
+fn announce_reviewer(reviewer: &Reviewer) -> anyhow::Result<()> {
+    let event = orchard_nostr::events::sign_profile(
+        &reviewer.keys,
+        &orchard_nostr::events::Profile {
+            name: Some(reviewer.name.clone()),
+            nip05: None,
+        },
+    )?;
+    for url in review_relays() {
+        orchard_nostr::relay::send(&url, std::slice::from_ref(&event))?;
+    }
+    Ok(())
+}
+
+fn identity_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("XDG_DATA_HOME").map(|data| {
+        std::path::PathBuf::from(data).join("orchard/identity.json")
+    })
 }
 
 /// Parse `flatpak list --app --columns=application,version,origin,installation`.

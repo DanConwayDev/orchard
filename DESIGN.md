@@ -258,9 +258,14 @@ review text, `rating` = optional 0.0 to 5.0 one-decimal tag. Replaceable per (pu
 app id), so editing is republishing and one identity holds one review per app; a
 malformed rating is a hard error like any other protocol violation. indexd serves the
 merged document at `/v1/reviews`; the client fetches on page open and while a page is
-open on the refresh tick, renders reviews under the description, and posts with a local
-reviewer identity (key generated on first post, kept at `$XDG_DATA_HOME/orchard/identity.key`,
-mode 0600). Compose is a mode (r, or click "Write a review"): keystrokes go to the draft
+open on the refresh tick. Posting requires signing in: a local reviewer identity (key
+plus display name, kept at `$XDG_DATA_HOME/orchard/identity.json`, mode 0600); the
+sign-in form asks for a display name, publishes it as a kind 0 profile (best effort,
+so relay downtime cannot block sign-in), and an existing key is reused rather than
+regenerated: the identity lives on the device, sign-in only names it. The reviews
+section is collapsed by default; its header (count and one-decimal average, aligned
+with the other section headers) toggles it, and rows sit flush with the other page
+fields. Compose is a mode (r, or click "Write a review"): keystrokes go to the draft
 instead of the search box, digits 1 to 5 rate, Enter posts, Escape leaves compose before
 it closes the page. Sybil resistance and the web of trust stay open.
 
