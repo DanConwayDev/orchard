@@ -416,9 +416,12 @@ opening items because they need the push, the signing secret, and a tag.
       publisher; the page, digest badge, verify state, and install all key off the
       clicked twin (bookkeeping keyed app id plus publisher). Rows are named in
       the list ("by <publisher>") and carry unique element ids per publisher.
-- [ ] Key-continuity pinning: a publisher key that changes for the same app id
-      gets a disclosure. Rotation is legitimate; sudden rotation with no history
-      is the sybil-shaped case.
+- [x] Key-continuity pinning: the client privately remembers which publisher keys
+      it has seen per app id (continuity.json beside identity.json, never
+      published). A key new for a known app id gets a "New publisher key" badge on
+      the page (amber, with an on-hover explanation); first sight of an app seeds
+      all its keys unflagged, so a fresh client discloses nothing. Rotation is
+      legitimate; the badge is a fact, not a verdict.
 - [ ] NIP-05 verification: check the domain claim against the profile's address
       instead of displaying it as given.
 - [ ] Client relay configuration: a settings surface over the rendezvous set

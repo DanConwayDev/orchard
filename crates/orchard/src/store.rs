@@ -121,6 +121,9 @@ pub struct StoreRoot {
     /// app id -> verified manifest digest (publisher channel,
     /// post-verify).
     verified: HashMap<String, String>,
+    /// Which publisher keys this client has seen per app id: the
+    /// continuity record behind the new-key disclosure.
+    continuity: orchard_core::ContinuityFile,
     /// Reviews from indexd (kind 30065): app id -> newest first.
     reviews: HashMap<String, Vec<orchard_core::Review>>,
     /// The earliest event per reviewer pubkey, from the reviews
@@ -226,6 +229,7 @@ impl StoreRoot {
             jobs: HashMap::new(),
             confirm_install: None,
             verified: HashMap::new(),
+            continuity: load_continuity(),
             error: None,
             flathub_loading: true,
             fetched: HashMap::new(),
@@ -592,7 +596,21 @@ impl StoreRoot {
         // an app that vanished (unpublished, key revoked) closes the
         // page; so does the selected publisher vanishing while another
         // keeps the same app id alive
+        // publisher-key continuity: fold the fresh rows in (they are
+        // the whole publisher catalog); a key new for a known app id
+        // is the change the page will disclose
+        let batch: Vec<(String, String)> = incoming
+            .iter()
+            .filter_map(|app| {
+                app.publisher
+                    .as_ref()
+                    .map(|pubkey| (app.app_id.clone(), pubkey.clone()))
+            })
+            .collect();
         self.apps.extend(incoming);
+        if !batch.is_empty() && absorb_continuity(&mut self.continuity, &batch) {
+            save_continuity(&self.continuity);
+        }
         if self.page_open && self.selected_app().is_none() {
             self.selected = None;
             self.selected_publisher = None;
@@ -2305,6 +2323,34 @@ impl StoreRoot {
                         .text_size(px(ui::TEXT_SIZE))
                         .text_color(ui::text())
                         .child(label)
+                }))
+                // continuity: this app id was published by another key
+                // before this client ever saw this one
+                .children(app.publisher.as_ref().filter(|pubkey| {
+                    self.continuity
+                        .apps
+                        .get(&app.app_id)
+                        .is_some_and(|entry| entry.flagged.contains(pubkey))
+                }).map(|pubkey| {
+                    div()
+                        .id(SharedString::from(format!(
+                            "key-changed-{}-{pubkey}",
+                            app.app_id
+                        )))
+                        .flex_none()
+                        .hover(|style| style.bg(gpui::transparent_black()))
+                        .tooltip(|_window, cx| {
+                            cx.new(|_| {
+                                TextTooltip(
+                                    "This app id was published by another key before; this key is new since then. The digest pin is what your install verifies.",
+                                )
+                            })
+                            .into()
+                        })
+                        .child(badge(
+                            "New publisher key",
+                            ui::risk_color(Risk::Medium),
+                        ))
                 }))
                 .children(digest_badge)
                 .children(digest_failed.clone().map(|err| {
@@ -4113,6 +4159,66 @@ fn app_key(app_id: &str, publisher: Option<&str>) -> String {
     format!("{app_id}\u{1}{}", publisher.unwrap_or(""))
 }
 
+/// Fold a catalog batch of `(app id, publisher key)` pairs into the
+/// continuity record. Keys new for an app id met before are flagged
+/// as a change (the fact sticks); an app id met for the first time
+/// seeds all its keys unflagged: a fresh client has no history to
+/// disclose. True when the record changed.
+fn absorb_continuity(
+    file: &mut orchard_core::ContinuityFile,
+    batch: &[(String, String)],
+) -> bool {
+    let mut current: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
+    for (app_id, pubkey) in batch {
+        current.entry(app_id).or_default().push(pubkey);
+    }
+    let mut changed = false;
+    for (app_id, keys) in &current {
+        let had_history = file.apps.contains_key(*app_id);
+        let entry = file.apps.entry((*app_id).to_string()).or_default();
+        for key in keys {
+            if entry.keys.iter().any(|known| known == key) {
+                continue;
+            }
+            changed = true;
+            if had_history {
+                entry.flagged.push((*key).to_string());
+            }
+            entry.keys.push((*key).to_string());
+        }
+    }
+    changed
+}
+
+/// The continuity record lives beside identity.json: private client
+/// state, never published.
+fn continuity_path() -> Option<std::path::PathBuf> {
+    identity_path().map(|path| path.with_file_name("continuity.json"))
+}
+
+/// Load the continuity record. A missing or unreadable file is a
+/// fresh client, not an error.
+fn load_continuity() -> orchard_core::ContinuityFile {
+    let Some(path) = continuity_path() else {
+        return Default::default();
+    };
+    std::fs::read(&path)
+        .map(|bytes| serde_json::from_slice(&bytes).unwrap_or_default())
+        .unwrap_or_default()
+}
+
+fn save_continuity(file: &orchard_core::ContinuityFile) {
+    let Some(path) = continuity_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(bytes) = serde_json::to_vec_pretty(file) {
+        let _ = std::fs::write(&path, bytes);
+    }
+}
+
 /// Human byte count, flatpak-style SI units: `9.8 MB`, `1.2 GB`.
 fn human_size(bytes: u64) -> String {
     const UNITS: [(&str, u64); 4] = [
@@ -4752,6 +4858,35 @@ mod tests {
         assert_eq!(aggregate.counted, 3);
         // the followed key also shows its sprout
         assert_eq!(aggregate.new_keys, 1);
+    }
+
+    #[test]
+    fn continuity_flags_only_changes_with_history() {
+        let mut file = orchard_core::ContinuityFile::default();
+        // first sight: two publishers of one app id seed unflagged (a
+        // fresh client has no history to disclose); the record saves
+        let batch = vec![
+            ("com.x.A".to_string(), "k1".to_string()),
+            ("com.x.A".to_string(), "k2".to_string()),
+        ];
+        assert!(absorb_continuity(&mut file, &batch));
+        assert_eq!(file.apps["com.x.A"].flagged.len(), 0);
+        // the same keys again: nothing changed
+        assert!(!absorb_continuity(&mut file, &batch));
+        // a third key joins a known app id: a change, flagged once
+        let third = vec![("com.x.A".to_string(), "k3".to_string())];
+        assert!(absorb_continuity(&mut file, &third));
+        assert_eq!(file.apps["com.x.A"].flagged, vec!["k3".to_string()]);
+        // and it stays flagged: the fact is not un-seen
+        assert!(!absorb_continuity(&mut file, &third));
+        assert_eq!(file.apps["com.x.A"].flagged, vec!["k3".to_string()]);
+        // a second app id, first sight: unflagged even though the key
+        // was seen elsewhere
+        let other = vec![("com.x.B".to_string(), "k1".to_string())];
+        assert!(absorb_continuity(&mut file, &other));
+        assert_eq!(file.apps["com.x.B"].flagged.len(), 0);
+        assert_eq!(file.apps["com.x.A"].keys.len(), 3);
+        assert_eq!(file.apps["com.x.B"].keys, vec!["k1".to_string()]);
     }
 
     #[test]

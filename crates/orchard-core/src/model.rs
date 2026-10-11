@@ -140,6 +140,28 @@ pub struct ProfilesFile {
     pub profiles: std::collections::BTreeMap<String, String>,
 }
 
+/// The client's private memory of which publisher keys it has seen
+/// per app id: the continuity record behind the new-key disclosure.
+/// Rotation is legitimate; the disclosure is a fact, not a verdict.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ContinuityFile {
+    pub version: u32,
+    /// app id -> the publisher keys seen for it.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub apps: std::collections::BTreeMap<String, ContinuityKeys>,
+}
+
+/// The keys seen for one app id, and the ones already disclosed as a
+/// change (the fact sticks: a disclosure is not un-seen).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ContinuityKeys {
+    /// Every publisher key ever seen for the app id, discovery order.
+    pub keys: Vec<String>,
+    /// Keys this client flagged as a change.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flagged: Vec<String>,
+}
+
 /// One published app in the MVP catalog: a [Listing] plus its latest [Release].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CatalogApp {
