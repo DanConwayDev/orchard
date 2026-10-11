@@ -33,6 +33,7 @@ const APPSTREAM_ARCH: &str = "x86_64";
 pub enum JobState {
     Verifying,
     Installing,
+    Updating,
     Removing,
 }
 
@@ -41,6 +42,7 @@ impl JobState {
         match self {
             JobState::Verifying => "Verifying digest…",
             JobState::Installing => "Installing…",
+            JobState::Updating => "Updating…",
             JobState::Removing => "Removing…",
         }
     }
@@ -70,6 +72,8 @@ impl Filter {
 #[derive(Debug, Clone)]
 /// An installed app, as `flatpak list` reports it.
 pub struct InstalledInfo {
+    /// Deploy version from `flatpak list`, e.g. `1.2.95.453`.
+    pub version: Option<String>,
     /// Human size from `flatpak info`, e.g. `1.0 GB`.
     pub size: Option<String>,
     /// Sandbox metadata ini read from the deploy, for the permissions view.
@@ -192,7 +196,8 @@ impl StoreRoot {
     /// renders stay cheap.
     fn filtered(&self) -> Vec<usize> {
         let needle = self.search.to_lowercase();
-        self.apps
+        let mut out = self
+            .apps
             .iter()
             .enumerate()
             .filter(|(_, app)| match self.filter {
@@ -212,7 +217,23 @@ impl StoreRoot {
                     || app.app_id.to_lowercase().contains(&needle)
             })
             .map(|(ix, _)| ix)
-            .collect()
+            .collect::<Vec<_>>();
+        // most recently updated first; the file order is alphabetical
+        // by app id, which reads as noise. Undated apps sink, name
+        // breaks ties.
+        out.sort_by(|&a, &b| {
+            let (a, b) = (&self.apps[a], &self.apps[b]);
+            let name = |app: &StoreApp| app.name.to_lowercase();
+            match (&b.release_date, &a.release_date) {
+                (Some(x), Some(y)) => x
+                    .cmp(y)
+                    .then_with(|| name(a).cmp(&name(b))),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => name(a).cmp(&name(b)),
+            }
+        });
+        out
     }
 
     fn selected_app(&self) -> Option<&StoreApp> {
@@ -406,6 +427,20 @@ impl StoreRoot {
                 self.verify_then_install(app, cx);
             }
         }
+        cx.notify();
+    }
+
+    /// Update an installed app from its origin remote. Detection is
+    /// version-based; the update itself lets flatpak resolve the
+    /// origin's current commit.
+    fn update(&mut self, app_id: &str, cx: &mut Context<Self>) {
+        if self.jobs.contains_key(app_id) {
+            return;
+        }
+        self.jobs
+            .insert(app_id.to_string(), JobState::Updating);
+        let cmd = orchard_flatpak::update_ref(app_id);
+        self.run_command(cmd, app_id, "Update", cx);
         cx.notify();
     }
 
@@ -981,8 +1016,13 @@ impl StoreRoot {
                 let action_id = app_id.clone();
                 let is_selected = selected == Some(app.app_id.as_str());
                 let is_installed = self.installed.contains_key(&app.app_id);
+                let outdated = self
+                    .installed
+                    .get(app.app_id.as_str())
+                    .is_some_and(|info| update_available(app, info));
                 let job = self.jobs.get(&app.app_id).map(|job| job.label().to_string());
                 let verified_digest = self.verified.get(&app.app_id).cloned();
+                let row_update_id = app_id.clone();
 
                 div()
                     .id(SharedString::from(format!("app-row-{app_id}")))
@@ -1051,10 +1091,14 @@ impl StoreRoot {
                             .flex()
                             .items_center()
                             .gap_2()
-                            .child(badge(
-                                "Installed",
-                                ui::risk_color(orchard_core::Risk::Low),
-                            ))
+                            .child(if outdated {
+                                badge(
+                                    "Update available",
+                                    ui::risk_color(orchard_core::Risk::Medium),
+                                )
+                            } else {
+                                badge("Installed", ui::risk_color(orchard_core::Risk::Low))
+                            })
                             .child(ui::small_button(
                                 format!("row-open-{action_id}"),
                                 Some("icons/play.svg"),
@@ -1065,6 +1109,23 @@ impl StoreRoot {
                                 cx.stop_propagation();
                                 this.open(action_id.as_str(), cx);
                             })))
+                            .when(outdated, |slot| {
+                                let update_id = row_update_id.clone();
+                                slot.child(
+                                    ui::small_button(
+                                        format!("row-update-{update_id}"),
+                                        Some("icons/update.svg"),
+                                        "Update",
+                                        false,
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _e: &ClickEvent, _w, cx| {
+                                            cx.stop_propagation();
+                                            this.update(update_id.as_str(), cx);
+                                        },
+                                    )),
+                                )
+                            })
                             .into_any_element(),
                         None => div()
                             .flex()
@@ -1181,6 +1242,9 @@ impl StoreRoot {
                     .text_color(ui::accent())
                     .hover(|style| style.text_color(ui::text()))
                     .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
+                        // a mouse close hands the list back clean; the
+                        // keyboard anchor only survives Esc
+                        this.selected = None;
                         this.close_page(cx);
                     }))
                     .child(ui::icon("icons/arrow_left.svg", 13., ui::accent()))
@@ -1402,6 +1466,27 @@ impl StoreRoot {
                                         )
                                         .into_any_element(),
                                 );
+                                if self
+                                    .installed
+                                    .get(&app_id)
+                                    .is_some_and(|info| update_available(&app, info))
+                                {
+                                    let update_id = app_id.clone();
+                                    buttons.push(
+                                        button(
+                                            "btn-update",
+                                            Some("icons/update.svg"),
+                                            "Update",
+                                            false,
+                                        )
+                                        .on_click(cx.listener(
+                                            move |this, _e: &ClickEvent, _w, cx| {
+                                                this.update(update_id.as_str(), cx);
+                                            },
+                                        ))
+                                        .into_any_element(),
+                                    );
+                                }
                                 let remove_id = app_id.clone();
                                 buttons.push(
                                     button("btn-remove", Some("icons/trash.svg"), "Remove", false)
@@ -1622,19 +1707,25 @@ impl Render for StoreRoot {
                         }
                         let prev_layout = self.search_layout.clone();
                         let live_layout = styled.layout().clone();
-                        self.search_layout = Some(live_layout.clone());
+                        // only a painted text can be queried next frame:
+                        // an unrendered layout panics on measurement
+                        if !placeholder {
+                            self.search_layout = Some(live_layout.clone());
+                        }
 
                         // the caret queries last frame's handle; it has
-                        // been measured by now; an empty layout may
-                        // not measure a position at all, but the caret
-                        // belongs at the slot's left edge then
-                        let caret_x = prev_layout
-                            .and_then(|layout| {
+                        // been measured by now. With the placeholder
+                        // showing, the caret belongs at the slot's left
+                        // edge without querying anything.
+                        let caret_x = if placeholder {
+                            Some(px(0.))
+                        } else {
+                            prev_layout.and_then(|layout| {
                                 layout
                                     .position_for_index(self.cursor.min(self.search.len()))
                                     .map(|pos| pos.x - layout.bounds().origin.x)
                             })
-                            .or_else(|| placeholder.then_some(px(0.)));
+                        };
 
                         div()
                             .id("search-box")
@@ -1665,7 +1756,13 @@ impl Render for StoreRoot {
                                 cx.listener(move |this, event: &MouseDownEvent, _window, _cx| {
                                     // place the caret where clicked; one
                                     // frame of layout lag, invisible in
-                                    // practice
+                                    // practice. Empty input: everything
+                                    // lands at the slot's left edge
+                                    if this.search.is_empty() {
+                                        this.cursor = 0;
+                                        this.anchor = None;
+                                        return;
+                                    }
                                     let local = event.position - live_layout.bounds().origin;
                                     let ix = match live_layout.index_for_position(local) {
                                         Ok(ix) | Err(ix) => ix,
@@ -1695,7 +1792,7 @@ impl Render for StoreRoot {
                                                 .child("Type to search…"),
                                         )
                                     })
-                                    .child(styled)
+                                    .when(!placeholder, |slot| slot.child(styled))
                                     .children(caret_x.map(|x| {
                                         div()
                                             .absolute()
@@ -1849,11 +1946,15 @@ fn list_installed() -> HashMap<String, InstalledInfo> {
             if app_id.is_empty() {
                 return None;
             }
-            let _version = fields.next().map(|f| f.trim().to_string());
+            let version = fields
+                .next()
+                .map(|f| f.trim().to_string())
+                .filter(|version| !version.is_empty() && version != "—");
             let _origin = fields.next().map(|f| f.trim().to_string());
             Some((
                 app_id.clone(),
                 InstalledInfo {
+                    version,
                     size: installed_size(&app_id),
                     metadata: orchard_flatpak::installed_metadata(&app_id),
                 },
@@ -1875,4 +1976,63 @@ fn installed_size(app_id: &str) -> Option<String> {
         .map(str::trim)
         .filter(|size| !size.is_empty())
         .map(String::from)
+}
+
+/// True when the remote's version is strictly newer than the
+/// installed one. Dot components compare numerically; anything
+/// non-numeric is inconclusive and reads as up to date — flatpak's
+/// deploy version `1.2.95.453.g0eeebbed` must not read as an update
+/// against the appstream's `1.2.95.453`.
+fn version_outdated(installed: &str, available: &str) -> bool {
+    if installed == available {
+        return false;
+    }
+    let mut installed = installed.split('.');
+    let mut available = available.split('.');
+    loop {
+        match (installed.next(), available.next()) {
+            (Some(a), Some(b)) => match (a.parse::<u64>(), b.parse::<u64>()) {
+                (Ok(a), Ok(b)) if a != b => return b > a,
+                // a non-numeric component on either side: different
+                // versioning scheme, cannot judge, stay quiet
+                (Err(_), _) | (Ok(_), Err(_)) => return false,
+                _ => {}
+            },
+            // trailing numeric components mean the remote moved ahead
+            (None, Some(b)) => return b.parse::<u64>().is_ok_and(|n| n > 0),
+            (Some(_), None) | (None, None) => return false,
+        }
+    }
+}
+
+/// Update-available detection for one app: both versions must be
+/// known and the remote's strictly newer by the numeric rule.
+fn update_available(app: &StoreApp, installed: &InstalledInfo) -> bool {
+    match (&app.version, &installed.version) {
+        (Some(available), Some(installed)) => version_outdated(installed, available),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_outdated_numeric_compare() {
+        assert!(version_outdated("0.5.21", "0.5.22"));
+        assert!(version_outdated("1.2.9", "1.2.10"));
+        assert!(!version_outdated("0.5.22", "0.5.22"));
+        assert!(!version_outdated("0.5.23", "0.5.22"));
+        // flatpak deploy suffixes must not read as updates
+        assert!(!version_outdated(
+            "1.2.95.453.g0eeebbed",
+            "1.2.95.453"
+        ));
+        assert!(!version_outdated("1.23.2b", "1.23.2b-x"));
+        assert!(!version_outdated("1.0", "1.0.0"));
+        // trailing numeric components mean the remote moved ahead
+        assert!(version_outdated("1.2", "1.2.1"));
+        assert!(!version_outdated("1.2.1", "1.2"));
+    }
 }
