@@ -6,12 +6,14 @@
 //! via `cx.spawn` updates.
 
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::path::PathBuf;
 
 use gpui::{
-    div, prelude::*, px, ClickEvent, Context, CursorStyle, DragMoveEvent, FocusHandle,
-    KeyDownEvent, MouseButton, MouseDownEvent, MouseUpEvent, ParentElement, Point, Pixels, Render,
-    SharedString, Styled, Window,
+    div, prelude::*, px, uniform_list, AnyElement, ClickEvent, Context, CursorStyle,
+    DragMoveEvent, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, MouseUpEvent,
+    ParentElement, Point, Pixels, Render, ScrollStrategy, SharedString, Styled,
+    UniformListScrollHandle, Window,
 };
 
 use orchard_core::{oci, permissions, CatalogFile, Risk, Source, StoreApp};
@@ -105,6 +107,8 @@ pub struct StoreRoot {
     right_size: f32,
     /// Active resize drag: pointer position and size at drag start.
     resize_anchor: Option<ResizeAnchor>,
+    /// Scroll handle for the virtualized list (keyboard reveal).
+    list_handle: UniformListScrollHandle,
 }
 
 impl StoreRoot {
@@ -127,6 +131,7 @@ impl StoreRoot {
             bottom_size: 380.0,
             right_size: 420.0,
             resize_anchor: None,
+            list_handle: UniformListScrollHandle::new(),
         };
 
         // Orchard channel: read the catalog over HTTP from the in-process
@@ -165,22 +170,26 @@ impl StoreRoot {
 
     // ----- catalog helpers -----
 
-    fn filtered(&self) -> Vec<&StoreApp> {
+    /// Indices into `apps` matching the search and filter, in display
+    /// order. Returns indices (not clones) so renders stay cheap.
+    fn filtered(&self) -> Vec<usize> {
         let needle = self.search.to_lowercase();
         self.apps
             .iter()
-            .filter(|app| match self.filter {
+            .enumerate()
+            .filter(|(_, app)| match self.filter {
                 Filter::All => true,
                 Filter::Reviewed => app.source == Source::Reviewed,
                 Filter::Publisher => app.source == Source::Publisher,
                 Filter::Installed => self.installed.contains_key(&app.app_id),
             })
-            .filter(|app| {
+            .filter(|(_, app)| {
                 needle.is_empty()
                     || app.name.to_lowercase().contains(&needle)
                     || app.summary.to_lowercase().contains(&needle)
                     || app.app_id.to_lowercase().contains(&needle)
             })
+            .map(|(ix, _)| ix)
             .collect()
     }
 
@@ -328,16 +337,30 @@ impl StoreRoot {
         };
         let cursor = event.event.position;
         let viewport = window.viewport_size();
-        if anchor.bottom {
+        let new_size = if anchor.bottom {
             let max = (f32::from(viewport.height) - LIST_MIN_AXIS).max(MIN_BOTTOM_HEIGHT);
-            self.bottom_size = (anchor.size + f32::from(anchor.pos.y) - f32::from(cursor.y))
-                .clamp(MIN_BOTTOM_HEIGHT, max);
+            (anchor.size + f32::from(anchor.pos.y) - f32::from(cursor.y))
+                .clamp(MIN_BOTTOM_HEIGHT, max)
         } else {
             let max = (f32::from(viewport.width) - LIST_MIN_AXIS).max(MIN_RIGHT_WIDTH);
-            self.right_size = (anchor.size + f32::from(cursor.x) - f32::from(anchor.pos.x))
-                .clamp(MIN_RIGHT_WIDTH, max);
+            (anchor.size + f32::from(cursor.x) - f32::from(anchor.pos.x))
+                .clamp(MIN_RIGHT_WIDTH, max)
+        };
+        // parked at a clamp: every move would otherwise re-render the
+        // whole tree for no visual change
+        let changed = if anchor.bottom {
+            self.bottom_size != new_size
+        } else {
+            self.right_size != new_size
+        };
+        if anchor.bottom {
+            self.bottom_size = new_size;
+        } else {
+            self.right_size = new_size;
         }
-        cx.notify();
+        if changed {
+            cx.notify();
+        }
     }
 
     // ----- actions -----
@@ -526,7 +549,7 @@ impl StoreRoot {
 
     // ----- keyboard -----
 
-    fn key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if event.keystroke.modifiers.modified() {
             return;
         }
@@ -542,10 +565,33 @@ impl StoreRoot {
                     self.selected = None;
                 }
             }
+            "up" | "down" => {
+                let rows = self.filtered();
+                if rows.is_empty() {
+                    return;
+                }
+                let current = self
+                    .selected
+                    .as_deref()
+                    .and_then(|id| {
+                        rows.iter()
+                            .position(|&ix| self.apps[ix].app_id == id)
+                    });
+                let next = match (current, key) {
+                    (Some(ix), "down") => (ix + 1).min(rows.len() - 1),
+                    (Some(ix), "up") => ix.saturating_sub(1),
+                    (None, "down") => 0,
+                    (None, _) => rows.len() - 1,
+                    _ => return,
+                };
+                let app_id = self.apps[rows[next]].app_id.clone();
+                self.select_app(&app_id, cx);
+                self.reveal_row(next, window);
+            }
             "enter" => {
                 if self.selected.is_none() {
-                    if let Some(first) = self.filtered().first() {
-                        let app_id = first.app_id.clone();
+                    if let Some(&first) = self.filtered().first() {
+                        let app_id = self.apps[first].app_id.clone();
                         self.select_app(&app_id, cx);
                     }
                 }
@@ -559,33 +605,95 @@ impl StoreRoot {
         cx.notify();
     }
 
+    /// Scroll the virtualized list so row `ix` is visible (keyboard
+    /// navigation). uniform_list 0.2.2 has no nearest strategy, so
+    /// pick top or bottom from the current offset.
+    fn reveal_row(&self, ix: usize, window: &Window) {
+        let state = self.list_handle.0.borrow();
+        let item_h = state
+            .last_item_size
+            .map(|size| f32::from(size.item.height))
+            .unwrap_or(ROW_HEIGHT);
+        let first_visible = -f32::from(state.base_handle.offset().y) / item_h;
+        drop(state);
+        let visible = (f32::from(window.viewport_size().height) / item_h).max(1.0);
+        if (ix as f32) < first_visible {
+            self.list_handle.scroll_to_item(ix, ScrollStrategy::Top);
+        } else if (ix as f32) >= first_visible + visible {
+            self.list_handle.scroll_to_item(ix, ScrollStrategy::Bottom);
+        }
+    }
+
     // ----- rendering -----
 
-    fn render_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let apps = self.filtered();
-        let selected = self.selected.clone();
-        let is_empty = apps.is_empty();
+    /// The app list, virtualized: uniform_list builds only the rows
+    /// in the visible range, so a 4000-app catalog costs the same as
+    /// a screenful. This matters twice over: every notify (typing,
+    /// drag moves, image loads) re-renders, and a full element tree
+    /// per frame made the whole app crawl.
+    fn render_list(&self, cx: &mut Context<Self>) -> AnyElement {
+        let rows = self.filtered();
 
-        div()
-            .id("app-list")
-            .flex_1()
-            .min_w_0()
-            .overflow_y_scroll()
-            .bg(ui::inset())
-            .children(apps.into_iter().map(|app| {
+        if rows.is_empty() {
+            return div()
+                .id("app-list")
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(ui::inset())
+                .child(
+                    div()
+                        .text_color(ui::text_dim())
+                        .text_size(px(ui::TEXT_SIZE))
+                        .child(if self.flathub_loading {
+                            "Loading Flathub catalog…".to_string()
+                        } else {
+                            "No apps match.".to_string()
+                        }),
+                )
+                .into_any_element();
+        }
+
+        let view = cx.entity();
+        uniform_list("app-list", rows.len(), move |range, window, cx| {
+            view.update(cx, |root, cx| root.render_rows(&rows, range, window, cx))
+        })
+        .track_scroll(self.list_handle.clone())
+        .flex_1()
+        .min_w_0()
+        .bg(ui::inset())
+        .into_any_element()
+    }
+
+    /// Build one screenful of rows for the virtualized list.
+    fn render_rows(
+        &self,
+        rows: &[usize],
+        range: Range<usize>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let selected = self.selected.as_deref();
+        range
+            .filter_map(|ix| rows.get(ix))
+            .map(|&app_ix| {
+                let app = &self.apps[app_ix];
                 let app_id = app.app_id.clone();
-                let is_selected = selected.as_deref() == Some(app.app_id.as_str());
+                let is_selected = selected == Some(app.app_id.as_str());
                 let is_installed = self.installed.contains_key(&app.app_id);
                 let job = self.jobs.get(&app.app_id).map(|job| job.label().to_string());
                 let verified_digest = self.verified.get(&app.app_id).cloned();
 
                 div()
                     .id(SharedString::from(format!("app-row-{app_id}")))
+                    .h(px(ROW_HEIGHT))
+                    .w_full()
                     .flex()
                     .items_center()
                     .gap_3()
                     .px_4()
-                    .py_2()
                     .border_b_1()
                     .border_color(ui::divider_soft())
                     .cursor_pointer()
@@ -612,6 +720,8 @@ impl StoreRoot {
                                             .text_size(px(ui::TEXT_SIZE_EMPHASIS))
                                             .font_weight(gpui::FontWeight::MEDIUM)
                                             .text_color(ui::text())
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
                                             .child(app.name.clone()),
                                     )
                                     .child(match app.source {
@@ -646,19 +756,9 @@ impl StoreRoot {
                             }
                         }
                     })
-            }))
-            .when(is_empty, |list| {
-                list.items_center().justify_center().child(
-                    div()
-                        .text_color(ui::text_dim())
-                        .text_size(px(ui::TEXT_SIZE))
-                        .child(if self.flathub_loading {
-                            "Loading Flathub catalog…".to_string()
-                        } else {
-                            "No apps match.".to_string()
-                        }),
-                )
+                    .into_any_element()
             })
+            .collect()
     }
 
     fn render_detail(
@@ -992,6 +1092,10 @@ fn risk_label(risk: Risk) -> &'static str {
 const MIN_BOTTOM_HEIGHT: f32 = 200.0;
 const MIN_RIGHT_WIDTH: f32 = 320.0;
 const LIST_MIN_AXIS: f32 = 160.0;
+
+/// Fixed list row height: `uniform_list` needs uniform items, and a
+/// pinned height keeps the layout work per frame trivial.
+const ROW_HEIGHT: f32 = 52.0;
 
 /// Marker payload for the detail-pane resize drag.
 struct DockDrag;
