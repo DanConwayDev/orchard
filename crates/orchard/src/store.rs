@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use gpui::{
     div, prelude::*, px, uniform_list, AnyElement, AnimationExt, ClickEvent, Context, FocusHandle,
-    KeyDownEvent, ParentElement, Render, ScrollStrategy, SharedString, Styled,
-    UniformListScrollHandle, Window,
+    KeyDownEvent, ParentElement, Point, Render, ScrollHandle, ScrollStrategy, ScrollWheelEvent,
+    SharedString, Styled, UniformListScrollHandle, Window,
 };
 
 use orchard_core::{oci, permissions, CatalogFile, Risk, Source, StoreApp};
@@ -67,7 +67,11 @@ impl Filter {
 
 /// What `flatpak list` reported for an installed app.
 #[derive(Debug, Clone)]
-pub struct InstalledInfo;
+/// An installed app, as `flatpak list` reports it.
+pub struct InstalledInfo {
+    /// Human size from `flatpak info`, e.g. `1.0 GB`.
+    pub size: Option<String>,
+}
 
 pub struct StoreRoot {
     pub(crate) focus_handle: FocusHandle,
@@ -91,6 +95,8 @@ pub struct StoreRoot {
     page_open: bool,
     /// Active browse category (None = all).
     category: Option<String>,
+    /// Scroll handle for the screenshot strip (wheel capture).
+    shot_handle: ScrollHandle,
     /// Scroll handle for the virtualized list (keyboard reveal).
     list_handle: UniformListScrollHandle,
 }
@@ -112,6 +118,7 @@ impl StoreRoot {
             fetching: HashSet::new(),
             page_open: false,
             category: None,
+            shot_handle: ScrollHandle::new(),
             list_handle: UniformListScrollHandle::new(),
         };
 
@@ -211,7 +218,12 @@ impl StoreRoot {
     /// Open the detail page for an app and queue its remote images
     /// (icon fallback and screenshots) for the disk cache.
     fn open_page(&mut self, app_id: &str, cx: &mut Context<Self>) {
+        let is_new = self.selected.as_deref() != Some(app_id);
         self.selected = Some(app_id.to_string());
+        if is_new {
+            // the strip's horizontal scroll must not leak between apps
+            self.shot_handle.set_offset(Point::new(px(0.), px(0.)));
+        }
         if self.page_open {
             return;
         }
@@ -971,6 +983,17 @@ impl StoreRoot {
                                 .child(div().child(app.app_id.clone()))
                                 .children(app.version.clone().map(|v| div().child(format!("· {v}"))))
                                 .children(
+                                    app.release_date
+                                        .clone()
+                                        .map(|date| div().child(format!("· updated {date}"))),
+                                )
+                                .children(
+                                    self.installed
+                                        .get(&app_id)
+                                        .and_then(|info| info.size.clone())
+                                        .map(|size| div().child(format!("· {size}"))),
+                                )
+                                .children(
                                     app.license.clone().map(|l| div().child(format!("· {l}"))),
                                 ),
                         )
@@ -985,6 +1008,22 @@ impl StoreRoot {
                     .flex()
                     .gap_2()
                     .overflow_x_scroll()
+                    .track_scroll(&self.shot_handle)
+                    // gpui hands every wheel axis to every scrollable
+                    // under the pointer, so a horizontal swipe's small
+                    // vertical drift would scroll the page too. Own
+                    // x-dominant gestures here and stop the event before
+                    // the page's scroll handler runs.
+                    .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
+                        let delta = event.delta.pixel_delta(window.line_height());
+                        if delta.x.abs() > delta.y.abs() {
+                            let mut offset = this.shot_handle.offset();
+                            offset.x += delta.x;
+                            this.shot_handle.set_offset(offset);
+                            cx.stop_propagation();
+                            cx.notify();
+                        }
+                    }))
                     .children(app.screenshots.iter().take(6).map(|url| {
                         match self.fetched.get(url) {
                             Some(Some(path)) => gpui::img(path.clone())
@@ -1010,10 +1049,29 @@ impl StoreRoot {
                     .child(app.summary.clone()),
             )
             .children(app.description.clone().map(|description| {
+                // block text: one line per div so paragraphs and bullet
+                // lists keep their structure
                 div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
                     .text_size(px(ui::TEXT_SIZE))
                     .text_color(ui::text_dim())
-                    .child(description)
+                    .children(description.lines().map(|line| div().child(line.to_string())))
+            }))
+            .children(app.homepage.clone().map(|url| {
+                let open = url.clone();
+                div()
+                    .id("homepage")
+                    .cursor_pointer()
+                    .text_size(px(ui::TEXT_SIZE))
+                    .text_color(ui::accent())
+                    .hover(|style| style.text_color(ui::text()))
+                    .on_click(move |_e: &ClickEvent, _window, _cx| {
+                        // host default handler, fire and forget
+                        let _ = std::process::Command::new("xdg-open").arg(&open).spawn();
+                    })
+                    .child(url)
             }))
             .when(
                 app.source == Source::Publisher || app.metadata.is_some(),
@@ -1031,6 +1089,20 @@ impl StoreRoot {
                                     .child("What it can access"),
                             )
                             .child(render_permissions_static(&app)),
+                    )
+                },
+            )
+            .when(
+                app.source == Source::Reviewed && app.metadata.is_none(),
+                |section| {
+                    // no sandbox data locally until flatpak installs it
+                    section.child(
+                        div()
+                            .text_size(px(ui::TEXT_SIZE))
+                            .text_color(ui::text_dim())
+                            .child(
+                                "Flatpak apps run in a sandbox; this app's specific permissions appear here once installed.",
+                            ),
                     )
                 },
             );
@@ -1399,10 +1471,24 @@ fn list_installed() -> HashMap<String, InstalledInfo> {
             if app_id.is_empty() {
                 return None;
             }
-            let version = fields.next().map(|f| f.trim().to_string());
+            let _version = fields.next().map(|f| f.trim().to_string());
             let _origin = fields.next().map(|f| f.trim().to_string());
-            let _ = version;
-            Some((app_id, InstalledInfo))
+            Some((app_id.clone(), InstalledInfo { size: installed_size(&app_id) }))
         })
         .collect()
+}
+
+/// The "Installed Size" line of `flatpak info`, e.g. `1.0 GB`. None when
+/// flatpak or the app is missing.
+fn installed_size(app_id: &str) -> Option<String> {
+    let output = orchard_flatpak::info(app_id).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Installed Size:"))
+        .map(str::trim)
+        .filter(|size| !size.is_empty())
+        .map(String::from)
 }

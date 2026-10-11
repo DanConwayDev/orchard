@@ -69,5 +69,4 @@ sharp edges learned building on an atomic host.
 
 ## License
 
-Dual licensed under MIT or Apache-2.0, your choice: see `LICENSE-MIT` and
-`LICENSE-APACHE`.
+MIT, see `LICENSE`.

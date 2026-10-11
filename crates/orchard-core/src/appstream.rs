@@ -18,10 +18,16 @@ pub struct AppstreamApp {
     pub id: String,
     pub name: String,
     pub summary: String,
-    /// First paragraphs of the (untranslated) description, markup stripped.
+    /// The full (untranslated) description as plain text: block elements
+    /// become lines, list items carry a bullet, inline markup stripped.
     pub description: Option<String>,
     /// Latest `<release>` version, if any.
     pub version: Option<String>,
+    /// Latest `<release>` date, ISO `YYYY-MM-DD` (from a `date` attribute
+    /// or a unix `timestamp`).
+    pub release_date: Option<String>,
+    /// `<url type="homepage">`, if any.
+    pub homepage: Option<String>,
     pub license: Option<String>,
     /// Resolved path of a cached icon on disk (type="cached", width >= 64).
     pub icon_path: Option<PathBuf>,
@@ -96,10 +102,10 @@ pub fn load(path: &Path, icons_root: &Path) -> Result<Vec<AppstreamApp>> {
                         // counter must not count this Start either.
                         if let Some(c) = current.as_mut() {
                             if c.description.is_none() {
-                                let text = subtree_text(&mut reader, &mut buf)?;
+                                let text = description_text(&mut reader, &mut buf)?;
                                 c.description = Some(text.into_boxed_str());
                             } else {
-                                let _ = subtree_text(&mut reader, &mut buf)?;
+                                let _ = description_text(&mut reader, &mut buf)?;
                             }
                         }
                     }
@@ -140,12 +146,28 @@ pub fn load(path: &Path, icons_root: &Path) -> Result<Vec<AppstreamApp>> {
                                     if c.version.is_none() {
                                         c.version = attr_value(e, b"version")?.map(Box::from);
                                     }
+                                    if c.release_date.is_none() {
+                                        c.release_date = release_date(e)?;
+                                    }
                                 }
                                 b"category" => {
                                     if let Some(cat) =
                                         leaf_text(&mut reader, &mut buf, e)?
                                     {
                                         c.categories.push(cat);
+                                    }
+                                    consumed = true;
+                                }
+                                b"url" if depth == comp_depth + 1 => {
+                                    // only direct `<url type="…">` children
+                                    // count; anything nested is noise
+                                    let kind = attr_value(e, b"type")?.unwrap_or_default();
+                                    if kind == "homepage" && c.homepage.is_none() {
+                                        c.homepage =
+                                            leaf_text(&mut reader, &mut buf, e)?
+                                                .map(String::into_boxed_str);
+                                    } else {
+                                        consume_element(&mut reader, &mut buf)?;
                                     }
                                     consumed = true;
                                 }
@@ -190,6 +212,9 @@ pub fn load(path: &Path, icons_root: &Path) -> Result<Vec<AppstreamApp>> {
                     if let Some(c) = current.as_mut() {
                         if c.version.is_none() {
                             c.version = attr_value(e, b"version")?.map(Box::from);
+                        }
+                        if c.release_date.is_none() {
+                            c.release_date = release_date(e)?;
                         }
                     }
                 }
@@ -287,33 +312,57 @@ fn first_leaf(
     leaf_text(reader, buf, start).map(|t| t.map(String::into_boxed_str))
 }
 
-/// Collect human text from a subtree (stops at the matching close tag).
-/// Runs are flushed at element boundaries so paragraphs join with single
-/// spaces while entity-split fragments stay glued together.
-fn subtree_text(
+/// Collect the human text of a description subtree (stops at the matching
+/// close tag). Block elements (`<p>`, `<li>`, headings, `<br/>`) close the
+/// current line and list items get a bullet prefix; inline markup
+/// (`<em>`, `<code>`, ...) continues the line. quick-xml splits text around
+/// general entity references (a `&quot;` arrives as its own `GeneralRef`
+/// event), so fragments are concatenated raw.
+fn description_text(
     reader: &mut quick_xml::Reader<impl BufRead>,
     buf: &mut Vec<u8>,
 ) -> Result<String> {
-    fn flush_run(run: &mut String, pieces: &mut Vec<String>) {
+    fn flush_run(run: &mut String, lines: &mut Vec<String>, item: bool) {
         let trimmed = run.trim();
         if !trimmed.is_empty() {
-            pieces.push(trimmed.to_string());
+            if item {
+                lines.push(format!("\u{2022} {trimmed}"));
+            } else {
+                lines.push(trimmed.to_string());
+            }
         }
         run.clear();
     }
 
     let mut depth = 0usize;
     let mut run = String::new();
-    let mut pieces: Vec<String> = Vec::new();
+    let mut lines: Vec<String> = Vec::new();
+    let mut in_item = false;
     loop {
         buf.clear();
         match reader.read_event_into(buf)? {
-            Event::Start(_) => {
-                flush_run(&mut run, &mut pieces);
+            Event::Start(e) => {
                 depth += 1;
+                match e.name().as_ref() {
+                    b"li" => {
+                        flush_run(&mut run, &mut lines, in_item);
+                        in_item = true;
+                    }
+                    b"p" | b"h1" | b"h2" | b"h3" | b"h4" => {
+                        flush_run(&mut run, &mut lines, in_item);
+                        in_item = false;
+                    }
+                    _ => {}
+                }
+            }
+            Event::Empty(e) => {
+                // <br/> and friends: a hard break closes the line
+                if e.name().as_ref() == b"br" {
+                    flush_run(&mut run, &mut lines, in_item);
+                }
             }
             Event::End(_) => {
-                flush_run(&mut run, &mut pieces);
+                flush_run(&mut run, &mut lines, in_item);
                 if depth == 0 {
                     break;
                 }
@@ -323,13 +372,13 @@ fn subtree_text(
             // Mid-sentence references continue the current run.
             Event::GeneralRef(r) => run.push_str(&resolve_ref(&r)),
             Event::Eof => {
-                flush_run(&mut run, &mut pieces);
+                flush_run(&mut run, &mut lines, in_item);
                 break;
             }
             _ => {}
         }
     }
-    Ok(pieces.join(" "))
+    Ok(lines.join("\n"))
 }
 
 fn attr_value(start: &BytesStart<'_>, key: &[u8]) -> Result<Option<String>> {
@@ -339,6 +388,39 @@ fn attr_value(start: &BytesStart<'_>, key: &[u8]) -> Result<Option<String>> {
         }
     }
     Ok(None)
+}
+
+/// The `<release>` date: the ISO `date` attribute if present, else the
+/// unix `timestamp` rendered as a civil date. Hand-rolled conversion keeps
+/// the parser free of a date-time dependency.
+fn release_date(start: &BytesStart<'_>) -> Result<Option<Box<str>>> {
+    if let Some(date) = attr_value(start, b"date")? {
+        let date = date.trim();
+        if !date.is_empty() {
+            return Ok(Some(date.to_string().into_boxed_str()));
+        }
+    }
+    let Some(stamp) = attr_value(start, b"timestamp")?.and_then(|t| t.trim().parse::<i64>().ok())
+    else {
+        return Ok(None);
+    };
+    let (y, m, d) = days_to_ymd(stamp.div_euclid(86_400));
+    Ok(Some(format!("{y:04}-{m:02}-{d:02}").into_boxed_str()))
+}
+
+/// Days since the unix epoch to a `(year, month, day)` civil date:
+/// Howard Hinnant's algorithm, the inverse of `days_from_civil`.
+fn days_to_ymd(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = yoe as i64 + era * 400 + i64::from(m <= 2);
+    (y, m, d)
 }
 
 fn is_translation(start: &BytesStart<'_>) -> bool {
@@ -422,6 +504,8 @@ struct Component {
     description: Option<Box<str>>,
     license: Option<Box<str>>,
     version: Option<Box<str>>,
+    release_date: Option<Box<str>>,
+    homepage: Option<Box<str>>,
     categories: Vec<String>,
     cached_icon_name: Option<String>,
     icon_url: Option<String>,
@@ -467,6 +551,8 @@ impl Component {
             summary,
             description: self.description.take().map(String::from),
             version: self.version.take().map(String::from),
+            release_date: self.release_date.take().map(String::from),
+            homepage: self.homepage.take().map(String::from),
             license: self.license.take().map(String::from),
             icon_path,
             icon_url: self.icon_url.take(),
@@ -557,9 +643,10 @@ mod tests {
     <developer id="com.example.Full">
       <name>Example Team</name>
     </developer>
+    <url type="homepage">https://example.com/full</url>
     <releases>
-      <release version="1.2.3" timestamp="1700000000"/>
-      <release version="1.2.2" timestamp="1600000000"/>
+      <release version="1.2.3" date="2026-02-01"/>
+      <release version="1.2.2" timestamp="1700000000"/>
     </releases>
     <categories><category>Utility</category><category>Game</category></categories>
     <icon height="64" type="cached" width="64">com.example.Full.png</icon>
@@ -586,6 +673,9 @@ mod tests {
     <description>
       <p>It&apos;s a game with &amp; symbols</p>
     </description>
+    <releases>
+      <release version="0.9.0" timestamp="1700000000"/>
+    </releases>
   </component>
 </components>"#;
 
@@ -609,17 +699,15 @@ mod tests {
         assert_eq!(full.name, "Full App");
         assert_eq!(full.summary, "Does everything");
         assert_eq!(full.version.as_deref(), Some("1.2.3"));
+        assert_eq!(full.release_date.as_deref(), Some("2026-02-01"));
+        assert_eq!(full.homepage.as_deref(), Some("https://example.com/full"));
         assert_eq!(full.license.as_deref(), Some("MIT"));
         assert_eq!(full.categories, ["Utilities", "Games"]);
-        // Description keeps the text, drops the markup.
-        assert!(full
-            .description
-            .as_deref()
-            .is_some_and(|d| d.contains("First paragraph.")));
-        assert!(full
-            .description
-            .as_deref()
-            .is_some_and(|d| d.contains("Point two")));
+        // Description keeps every block as a line; list items get bullets.
+        assert_eq!(
+            full.description.as_deref(),
+            Some("First paragraph.\n\u{2022} Point one\n\u{2022} Point two")
+        );
         // Cached icon resolves under 64x64.
         assert_eq!(
             full.icon_path.as_deref(),
@@ -647,6 +735,8 @@ mod tests {
         assert_eq!(minimal.id, "com.example.Minimal");
         assert!(minimal.description.is_none());
         assert!(minimal.version.is_none());
+        assert!(minimal.release_date.is_none());
+        assert!(minimal.homepage.is_none());
 
         // Text starting with an entity reference must not be lost
         // (quick-xml emits the reference as a separate event), and
@@ -658,6 +748,9 @@ mod tests {
             "\"Five in a row\" board & puzzle game"
         );
         assert_eq!(quoted.description.as_deref(), Some("It's a game with & symbols"));
+        // A unix timestamp release date renders as a civil date.
+        assert_eq!(quoted.version.as_deref(), Some("0.9.0"));
+        assert_eq!(quoted.release_date.as_deref(), Some("2023-11-14"));
     }
 
     #[test]

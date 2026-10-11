@@ -134,6 +134,10 @@ pub struct StoreApp {
     pub summary: String,
     pub description: Option<String>,
     pub version: Option<String>,
+    /// Latest release date, `YYYY-MM-DD` (reviewed channel).
+    pub release_date: Option<String>,
+    /// Project homepage URL (reviewed channel).
+    pub homepage: Option<String>,
     pub license: Option<String>,
     pub source: Source,
     pub icon_path: Option<std::path::PathBuf>,
@@ -159,6 +163,8 @@ impl StoreApp {
             summary: app.summary.clone(),
             description: app.description.clone(),
             version: app.version.clone(),
+            release_date: app.release_date.clone(),
+            homepage: app.homepage.clone(),
             license: app.license.clone(),
             source: Source::Reviewed,
             icon_path: app.icon_path.clone(),
@@ -179,6 +185,8 @@ impl StoreApp {
             summary: app.summary.clone(),
             description: app.description.clone(),
             version: Some(app.version.clone()),
+            release_date: None,
+            homepage: None,
             license: None,
             source: Source::Publisher,
             icon_path: None,

@@ -110,6 +110,14 @@ pub fn list_installed() -> Command {
     cmd
 }
 
+/// Info about one installed app: `flatpak info <app>`. Its text output
+/// carries the installed size among other fields.
+pub fn info(app_id: &str) -> Command {
+    let mut cmd = flatpak_command();
+    cmd.args(["info", "--system", app_id]);
+    cmd
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
