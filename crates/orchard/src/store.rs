@@ -2363,12 +2363,34 @@ fn image_placeholder(loading: bool) -> gpui::AnyElement {
         .into_any_element()
 }
 
+/// A hover tooltip: quiet chrome, one line of text. The new-key
+/// sprout uses it so the glyph stays quiet and the meaning is on
+/// demand.
+struct TextTooltip(&'static str);
+
+impl gpui::Render for TextTooltip {
+    fn render(
+        &mut self,
+        _window: &mut gpui::Window,
+        _cx: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        div()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .border_1()
+            .border_color(ui::divider())
+            .bg(ui::panel())
+            .text_size(px(ui::TEXT_SIZE_LABEL))
+            .text_color(ui::text())
+            .child(self.0.to_string())
+    }
+}
+
 /// Is this review written by the app's own publisher?
 fn is_publisher_review(review: &orchard_core::Review, publisher: Option<&str>) -> bool {
     publisher == Some(review.pubkey.as_str())
-}
-
-/// Is this reviewer's key new to the feed (first seen under a week
+}/// Is this reviewer's key new to the feed (first seen under a week
 /// ago)? Absence from the table means unknown age, never new.
 fn is_new_key(
     first_seen: &std::collections::BTreeMap<String, u64>,
@@ -2525,7 +2547,20 @@ impl StoreRoot {
                         .children(flagged_publisher.then(|| {
                             div().text_color(ui::text()).child("publisher")
                         }))
-                        .children(fresh.then(|| div().child("new key"))),
+                        .children(fresh.then(|| {
+                            // a sprout: a key young in the feed; the
+                            // words live on hover and in the line below
+                            div()
+                                .id("new-key")
+                                .flex_none()
+                                .tooltip(|_window, cx| {
+                                    cx.new(|_| {
+                                        TextTooltip("New key: first seen on the relays under a week ago")
+                                    })
+                                    .into()
+                                })
+                                .child(ui::icon("icons/sprout.svg", 11., ui::accent()))
+                        })),
                 );
                 if !review.content.is_empty() {
                     row = row.child(
