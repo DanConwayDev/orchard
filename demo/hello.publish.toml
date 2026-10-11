@@ -24,6 +24,9 @@ tree = "hello"
 [publish]
 relays = ["ws://127.0.0.1:8008"]
 tag = "latest"
+# the profile name rides the publisher's kind 0: review rows and the
+# "Published by" line show it
+author-name = "Orchard Demo"
 # the dev NIP-05 fixture: a local server answers for localhost:8443
 # and names the demo publisher's key, so the page can show a claim
 # that actually checks out. Public publishes get no claim from here.

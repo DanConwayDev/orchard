@@ -447,9 +447,11 @@ opening items because they need the push, the signing secret, and a tag.
       The check covers publishers and the signed-in identity's own claim. The
       address renders (with a check and a hover note, e.g. "{domain} lists
       {local} as this key") only when the record named the key; an unchecked or
-      failed claim falls back to the profile name or truncated npub. The account
-      menu wears the same check beside the name: "Signed in as <name>" plus the
-      check when the domain backed the claim, plain npub when there is neither.
+      failed claim falls back to the profile name or truncated npub. Review rows
+      and the account menu wear the same check beside the name: "Signed in as"
+      or a comment's author shows the profile name plus the check when the
+      domain backed the claim, plain npub when there is neither; a raw claim
+      never renders as a name.
       Dev fixture: the Hello manifest claims `orchard@localhost:8443`, answered
       by the same TLS cert the demo registry uses.
 - [ ] Client relay configuration: a settings surface over the rendezvous set

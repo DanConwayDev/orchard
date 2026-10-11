@@ -651,17 +651,27 @@ impl StoreRoot {
     /// the claim is the only party that can confirm it, so the client
     /// asks, once per claim per session, and renders the address only
     /// when the answer is yes. A claim on its own shows nothing. The
-    /// signed-in identity's own claim joins the scan: the account menu
-    /// wears the same check.
+    /// signed-in identity's own claim joins the scan (the account
+    /// menu wears the same check), and so do comment authors: the
+    /// review rows play by the same rule.
     fn ensure_nip05_checks(&mut self, cx: &mut Context<Self>) {
-        let pending: Vec<(String, String)> = self
+        let mut candidates: std::collections::BTreeSet<String> = self
             .apps
             .iter()
             .filter(|app| app.source == Source::Publisher)
             .filter_map(|app| app.publisher.clone())
             // the signed-in identity's own claim: the account menu
             .chain(self.reviewer.as_ref().map(|r| r.signer_pubkey.clone()))
-            .filter(|pubkey| !self.nip05.contains_key(pubkey) && !self.nip05_checking.contains(pubkey))
+            .collect();
+        // comment authors too: their rows get the same treatment
+        for review in self.reviews.values().flatten() {
+            candidates.insert(review.pubkey.clone());
+        }
+        let pending: Vec<(String, String)> = candidates
+            .into_iter()
+            .filter(|pubkey| {
+                !self.nip05.contains_key(pubkey) && !self.nip05_checking.contains(pubkey)
+            })
             .filter_map(|pubkey| {
                 let claim = self.profiles.get(&pubkey)?.nip05.clone()?;
                 Some((pubkey, claim))
@@ -882,6 +892,9 @@ impl StoreRoot {
                     Ok((grouped, first_seen)) => {
                         this.reviews = grouped;
                         this.first_seen = first_seen;
+                        // fresh comment authors may carry claims; the
+                        // scan covers them on arrival, not next tick
+                        this.ensure_nip05_checks(cx);
                         cx.notify();
                     }
                     Err(err) => {
@@ -3097,11 +3110,19 @@ impl StoreRoot {
             }
             let mut avatar_urls: Vec<String> = Vec::new();
             for (index, review) in reviews.iter().enumerate() {
+                // the author's identity on the row: the profile name
+                // when there is one, the truncated npub otherwise. A
+                // NIP-05 claim never renders as a name; it renders as
+                // the check beside one, and only when the domain
+                // backed it.
                 let author = review
                     .name
                     .clone()
-                    .or_else(|| review.nip05.clone())
                     .unwrap_or_else(|| short_npub(&review.pubkey));
+                let nip05_note = self.verified_nip05(&review.pubkey).and_then(|claim| {
+                    split_nip05(&claim)
+                        .map(|(local, domain)| format!("{domain} lists {local} as this key"))
+                });
                 let when = relative_time(review.created_at);
                 let flagged_publisher = is_publisher_review(review, publisher);
                 let fresh = is_new_key(&self.first_seen, &review.pubkey, now);
@@ -3129,6 +3150,19 @@ impl StoreRoot {
                         .text_color(ui::text_dim())
                         .child(avatar(avatar_path, 14., ui::text_dim()))
                         .child(div().child(author))
+                        .children(nip05_note.map(|note| {
+                            // the domain backed this author's claim;
+                            // the words live on hover, same rules as
+                            // the sprout
+                            div()
+                                .id(SharedString::from(format!("nip05-review-{index}")))
+                                .flex_none()
+                                .hover(|style| style.bg(gpui::transparent_black()))
+                                .tooltip(move |_window, cx| {
+                                    cx.new(|_| TextTooltip(note.clone().into())).into()
+                                })
+                                .child(ui::icon("icons/check.svg", 11., ui::accent()))
+                        }))
                         .children(review.rating.map(|value| {
                             div().text_color(ui::accent()).child(stars(value))
                         }))
@@ -4138,7 +4172,7 @@ impl StoreRoot {
                     .gap_1()
                     .items_center()
                     .text_size(px(ui::TEXT_SIZE_LABEL))
-                    .text_color(ui::text_dim())
+                    .text_color(ui::text())
                     .child(format!("Signed in as {display}"))
                     .children(note.map(|note| {
                         // the domain backed this identity's claim;
@@ -4150,7 +4184,7 @@ impl StoreRoot {
                             .tooltip(move |_window, cx| {
                                 cx.new(|_| TextTooltip(note.clone().into())).into()
                             })
-                            .child(ui::icon("icons/check.svg", 11., ui::accent()))
+                            .child(ui::icon("icons/check.svg", 11., ui::text()))
                     })),
             )
             .child(
