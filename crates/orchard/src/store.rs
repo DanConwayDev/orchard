@@ -1591,11 +1591,8 @@ impl Render for StoreRoot {
                         // pixels (caret x, click position). The caret
                         // queries last frame's handle: one frame stale,
                         // invisible at 120fps.
-                        let display: String = if self.search.is_empty() {
-                            "Type to search…".to_string()
-                        } else {
-                            self.search.clone()
-                        };
+                        let display: String = self.search.clone();
+                        let placeholder = self.search.is_empty();
                         let font = window.text_style().font();
                         let mut styled = StyledText::new(display.clone());
                         if !self.search.is_empty() {
@@ -1628,12 +1625,16 @@ impl Render for StoreRoot {
                         self.search_layout = Some(live_layout.clone());
 
                         // the caret queries last frame's handle; it has
-                        // been measured by now
-                        let caret_x = prev_layout.and_then(|layout| {
-                            layout
-                                .position_for_index(self.cursor.min(self.search.len()))
-                                .map(|pos| pos.x - layout.bounds().origin.x)
-                        });
+                        // been measured by now; an empty layout may
+                        // not measure a position at all, but the caret
+                        // belongs at the slot's left edge then
+                        let caret_x = prev_layout
+                            .and_then(|layout| {
+                                layout
+                                    .position_for_index(self.cursor.min(self.search.len()))
+                                    .map(|pos| pos.x - layout.bounds().origin.x)
+                            })
+                            .or_else(|| placeholder.then_some(px(0.)));
 
                         div()
                             .id("search-box")
@@ -1651,6 +1652,7 @@ impl Render for StoreRoot {
                             } else {
                                 ui::divider()
                             })
+                            .gap_2()
                             .text_size(px(ui::TEXT_SIZE))
                             .text_color(if self.search.is_empty() {
                                 ui::text_dim()
@@ -1682,6 +1684,17 @@ impl Render for StoreRoot {
                                     .relative()
                                     .flex_1()
                                     .min_w_0()
+                                    .when(placeholder, |slot| {
+                                        // the placeholder sits a step
+                                        // right of the caret slot so the
+                                        // caret does not touch the "T"
+                                        slot.child(
+                                            div()
+                                                .pl(px(4.))
+                                                .text_color(ui::text_dim())
+                                                .child("Type to search…"),
+                                        )
+                                    })
                                     .child(styled)
                                     .children(caret_x.map(|x| {
                                         div()
