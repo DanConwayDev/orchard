@@ -2419,12 +2419,12 @@ impl StoreRoot {
                 )
                 .children(app.publisher.as_ref().map(|pubkey| {
                     let profile = self.profiles.get(pubkey);
-                    // the address shows only when the domain backed
-                    // it: a claim alone is marketing, the check is
-                    // the fact. A claim that no longer matches the
-                    // profile reads as unverified until rechecked.
-                    let verified_claim = self.verified_nip05(pubkey);
-                    let label = match &verified_claim {
+                    // the identity: the domain-backed address when the
+                    // claim checked out, else the profile name, else
+                    // the truncated npub. The verified check earlier in
+                    // this row is about signatures; the address earns
+                    // its place by being one.
+                    let label = match self.verified_nip05(pubkey) {
                         Some(claim) => format!("Published by {claim}."),
                         None => {
                             match profile.and_then(|p| p.name.clone()) {
@@ -2433,10 +2433,6 @@ impl StoreRoot {
                             }
                         }
                     };
-                    let note = verified_claim.as_ref().and_then(|claim| {
-                        split_nip05(claim)
-                            .map(|(local, domain)| format!("{domain} lists {local} as this key"))
-                    });
                     div()
                         .flex()
                         .gap_1()
@@ -2444,16 +2440,6 @@ impl StoreRoot {
                         .text_size(px(ui::TEXT_SIZE))
                         .text_color(ui::text())
                         .child(label)
-                        .children(note.map(|note| {
-                            div()
-                                .id(SharedString::from(format!("nip05-{pubkey}")))
-                                .flex_none()
-                                .hover(|style| style.bg(gpui::transparent_black()))
-                                .tooltip(move |_window, cx| {
-                                    cx.new(|_| TextTooltip(note.clone().into())).into()
-                                })
-                                .child(ui::icon("icons/check.svg", 12., ui::accent()))
-                        }))
                 }))
                 // continuity: this app id was published by another key
                 // before this client ever saw this one; a signed
@@ -2758,6 +2744,29 @@ impl StoreRoot {
                 // action bar: pinned under the scrolling content
                 div().flex().items_center().gap_2().px_8().py_3().border_t_1()
                     .border_color(ui::divider()).bg(ui::panel())
+                    .children((app.source == Source::Publisher && !app.platforms.is_empty()).then(|| {
+                        // the platforms this app is published for,
+                        // resolved per arch on the device; the words
+                        // live on hover
+                        let list = app
+                            .platforms
+                            .iter()
+                            .filter_map(|platform| platform.strip_prefix("linux-"))
+                            .collect::<Vec<_>>()
+                            .join(" · ");
+                        div()
+                            .id("page-platforms")
+                            .flex_none()
+                            .hover(|style| style.bg(gpui::transparent_black()))
+                            .tooltip(|_window, cx| {
+                                cx.new(|_| {
+                                    TextTooltip("Builds published for these platforms".into())
+                                })
+                                .into()
+                            })
+                            .child(badge(&list, ui::text_dim()))
+                            .into_any_element()
+                    }))
                     .children(match job {
                         Some(state) => vec![badge(
                             state.label(),
