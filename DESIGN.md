@@ -382,8 +382,35 @@ gains "n in your circle's circle"; the circle and global aggregates are unchange
 Absence stamps too: a reviewer with no contact list on a relay is not re-asked
 every tick, only after the cadence.
 
-**M6: reviews + web of trust; self-distribution.** CI builds Orchard's own `.flatpak`
-bundle; dogfood the update path by updating Orchard through Orchard.
+**M6: reviews + web of trust; self-distribution. Code complete 2026-10-11.** All
+slices built and verified hands-on (reviews, trust flags, circle, distance 2,
+self-publish dry run, rendezvous topology). The first public CI run and the
+install-and-update-through-Orchard dogfood are the closing ops; they are M7's
+opening items because they need the push, the signing secret, and a tag.
+
+**M7: the public loop + trust polish.**
+
+- [ ] The public loop: push the branch, set the `ORCHARD_NSEC` secret (a key the
+      user owns; never a key that passed through a session), tag `v0.1.0`, watch
+      CI build and push to ghcr, flip the package public, then install Orchard
+      through Orchard in the GUI and let a later tag deliver an update through it.
+      (The repo can flip public whenever; secrets and ghcr work on the private
+      repo too.)
+- [ ] Avatars: kind 0 `picture` in the account trigger and review rows via the
+      image cache; person glyph as fallback.
+- [ ] Publisher profiles on listings: the publisher's kind 0 name beats the npub
+      fallback in "Published by".
+- [ ] Multi-publisher listings: the same app id signed by two publishers is the
+      permissionless case; the page must disambiguate (show both, let the reader
+      choose) instead of whichever row wins the merge.
+- [ ] Key-continuity pinning: a publisher key that changes for the same app id
+      gets a disclosure. Rotation is legitimate; sudden rotation with no history
+      is the sybil-shaped case.
+- [ ] NIP-05 verification: check the domain claim against the profile's address
+      instead of displaying it as given.
+- [ ] Client relay configuration: a settings surface over the rendezvous set
+      instead of env vars.
+- [ ] aarch64: second arch for the bundle (runner, runtime, ref arch plumbing).
 
 ## Risks / open questions
 
