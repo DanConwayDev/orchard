@@ -3835,7 +3835,7 @@ fn social_relays() -> Vec<String> {
             .filter(|url| !url.is_empty())
             .map(str::to_string)
             .collect(),
-        _ => vec!["wss://nos.social".to_string(), "wss://relay.damus.io".to_string()],
+        _ => vec!["wss://relay.primal.net".to_string(), "wss://nos.lol".to_string()],
     }
 }
 

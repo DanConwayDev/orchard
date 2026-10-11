@@ -323,8 +323,8 @@ review rows' sprout and circle glyphs).
 **M6, circle slice (built).** The personal web of trust, Zapstore's own answer
 (reviews constrained to the reader's graph), starts at distance 1: at sign-in and at
 launch for a restored session, the client fetches the signed-in identity's own kind 3
-read-only and anonymously from default social relays (`wss://nos.social`,
-`wss://relay.damus.io`; `ORCHARD_SOCIAL_RELAYS` overrides): one REQ whose only input
+read-only and anonymously from default social relays (`wss://relay.primal.net`,
+`wss://nos.lol`; `ORCHARD_SOCIAL_RELAYS` overrides): one REQ whose only input
 is the key, deadline-guarded, union across relays. Reviewers in that set carry a
 person glyph with a hover tooltip, and the details line gains "n in your circle,
 avg x.y"; the global aggregate is unchanged. A union that comes back empty keeps the
