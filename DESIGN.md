@@ -524,14 +524,16 @@ opening items because they need the push, the signing secret, and a tag.
       undated arms of the sort, which were inverted (undated apps rose
       to the top instead of sinking).
 - [x] A catalog sort picker, as a chosen option rather than a hidden
-      reordering: Updated (the recency rank, the default), Name
-      (alphabetical), Verified first (repo-verified rows, then rows
-      from followed publishers, recency inside each tier). The choice
-      persists in settings like the other view preferences. This
-      closes the cold-start ranking question: the client curates
-      nothing the user did not pick, so a hostile flood of fresh keys
-      is answered by channels plus an explicit trust sort, not by the
-      client quietly knowing better. Per-publisher clustering was
+      reordering: Updated (the recency rank, the default) and Name
+      (alphabetical). The choice persists in settings like the other
+      view preferences. This closes the cold-start ranking question:
+      the client curates nothing the user did not pick, so a hostile
+      flood of fresh keys is answered by the composition line and the
+      channel split, not by the client quietly knowing better. A
+      "verified first" sort was tried and removed: the trust signals
+      were already on the rows (the repo check) and in the
+      composition line, and a sort built from them re-ordered
+      nothing the reader could not see. Per-publisher clustering was
       dropped from the plan; its real content is publisher pages
       (everything from one key in one place), parked as a navigation
       feature for later.

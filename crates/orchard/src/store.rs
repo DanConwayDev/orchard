@@ -525,20 +525,7 @@ impl StoreRoot {
         // make.
         let sort = ListSort::from_settings(&settings.sort);
         let today = orchard_core::appstream::today_iso();
-        let tier = |app: &StoreApp| {
-            if self.row_verified(app) {
-                0u8
-            } else if app
-                .publisher
-                .as_deref()
-                .is_some_and(|key| self.follows.contains(key))
-            {
-                1u8
-            } else {
-                2u8
-            }
-        };
-        out.sort_by(|&a, &b| list_sort(&self.apps[a], &self.apps[b], sort, &today, &tier));
+        out.sort_by(|&a, &b| list_sort(&self.apps[a], &self.apps[b], sort, &today));
         out
     }
 
@@ -6085,21 +6072,18 @@ fn date_order(a: &StoreApp, b: &StoreApp, today: &str) -> std::cmp::Ordering {
 }
 
 /// The catalog list order, persisted in settings: recency by
-/// default, alphabetical, or the trust lens first. Always a chosen
-/// option, never a hidden reordering: the client curates nothing the
-/// user did not pick.
+/// default, alphabetical. Always a chosen option, never a hidden
+/// reordering: the client curates nothing the user did not pick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ListSort {
     Updated,
     Name,
-    VerifiedFirst,
 }
 
 impl ListSort {
     fn from_settings(sort: &str) -> Self {
         match sort {
             "name" => ListSort::Name,
-            "verified" => ListSort::VerifiedFirst,
             _ => ListSort::Updated,
         }
     }
@@ -6108,7 +6092,6 @@ impl ListSort {
         match self {
             ListSort::Updated => "Updated",
             ListSort::Name => "Name",
-            ListSort::VerifiedFirst => "Verified first",
         }
     }
 
@@ -6117,27 +6100,17 @@ impl ListSort {
         match self {
             ListSort::Updated => "updated",
             ListSort::Name => "name",
-            ListSort::VerifiedFirst => "verified",
         }
     }
 
-    fn all() -> [ListSort; 3] {
-        [ListSort::Updated, ListSort::Name, ListSort::VerifiedFirst]
+    fn all() -> [ListSort; 2] {
+        [ListSort::Updated, ListSort::Name]
     }
 }
 
 /// One catalog list ordering. Recency is the arrived-only date rank;
-/// name is alphabetical; verified puts trust tiers first, recency
-/// inside each tier. `tier` names a row's trust tier, lower first:
-/// repo-verified rows, then rows from followed publishers, then
-/// everything else.
-fn list_sort(
-    a: &StoreApp,
-    b: &StoreApp,
-    sort: ListSort,
-    today: &str,
-    tier: &impl Fn(&StoreApp) -> u8,
-) -> std::cmp::Ordering {
+/// name is alphabetical.
+fn list_sort(a: &StoreApp, b: &StoreApp, sort: ListSort, today: &str) -> std::cmp::Ordering {
     match sort {
         ListSort::Updated => date_order(a, b, today),
         ListSort::Name => a
@@ -6145,7 +6118,6 @@ fn list_sort(
             .to_lowercase()
             .cmp(&b.name.to_lowercase())
             .then_with(|| a.app_id.cmp(&b.app_id)),
-        ListSort::VerifiedFirst => tier(a).cmp(&tier(b)).then_with(|| date_order(a, b, today)),
     }
 }
 
@@ -6815,28 +6787,12 @@ mod tests {
         let newer = dated_app("Alpha", Some("2026-02-01"));
         // name: alphabetical wins, recency ignored
         assert_eq!(
-            list_sort(&older, &newer, ListSort::Name, "2026-10-11", &|_| 0),
+            list_sort(&older, &newer, ListSort::Name, "2026-10-11"),
             Ordering::Greater
         );
         // updated: recency wins, name ignored; the newer app ranks first
         assert_eq!(
-            list_sort(&older, &newer, ListSort::Updated, "2026-10-11", &|_| 0),
-            Ordering::Greater
-        );
-        // verified first: the trusted tier wins even when older...
-        assert_eq!(
-            list_sort(&older, &newer, ListSort::VerifiedFirst, "2026-10-11", &|app| {
-                if app.name == "Beta" {
-                    0
-                } else {
-                    2
-                }
-            }),
-            Ordering::Less
-        );
-        // ...and recency orders inside one tier: the newer app first
-        assert_eq!(
-            list_sort(&older, &newer, ListSort::VerifiedFirst, "2026-10-11", &|_| 2),
+            list_sort(&older, &newer, ListSort::Updated, "2026-10-11"),
             Ordering::Greater
         );
     }

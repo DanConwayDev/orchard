@@ -46,9 +46,8 @@ pub struct Settings {
     /// Fetch publisher-hosted images (icons, screenshots) from their
     /// URLs. Off: placeholders only, no contact with publisher hosts.
     pub remote_images: bool,
-    /// The catalog list order: `updated` (recency, arrived-only),
-    /// `name` (alphabetical), or `verified` (trusted rows first,
-    /// recency inside each tier).
+    /// The catalog list order: `updated` (recency, arrived-only) or
+    /// `name` (alphabetical).
     pub sort: String,
 }
 
