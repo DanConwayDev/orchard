@@ -1448,8 +1448,11 @@ impl StoreRoot {
     }
 
     /// Validate and add the draft: a ws:// or wss:// URL, not already
-    /// in the group. Empty or bad drafts are ignored silently: the
-    /// input keeps its text so the user can fix it.
+    /// in the group's effective set. Adding while the built-in set is
+    /// showing starts the file's list as the built-in set plus the
+    /// new URL, so adding never silently drops the built-ins. Empty
+    /// or bad drafts are ignored silently: the input keeps its text
+    /// so the user can fix it.
     fn add_relay_from_draft(&mut self, cx: &mut Context<Self>) {
         let Some(target) = self.relay_target else {
             return;
@@ -1462,8 +1465,13 @@ impl StoreRoot {
         if url.len() <= "ws://".len() {
             return;
         }
-        let already = self.relay_urls_for(target, &self.settings.get());
-        if already.iter().any(|listed| listed == &url) {
+        let custom = self.relay_urls_for(target, &self.settings.get());
+        let effective = if custom.is_empty() {
+            orchard_nostr::relay::relay_urls(None)
+        } else {
+            custom
+        };
+        if effective.iter().any(|listed| listed == &url) {
             self.relay_draft.clear();
             self.relay_cursor = 0;
             self.relay_anchor = None;
@@ -1471,9 +1479,15 @@ impl StoreRoot {
             return;
         }
         self.edit_settings(
-            |settings| match target {
-                RelayTarget::Events => settings.event_relays.push(url.clone()),
-                RelayTarget::Social => settings.social_relays.push(url.clone()),
+            |settings| {
+                let list = match target {
+                    RelayTarget::Events => &mut settings.event_relays,
+                    RelayTarget::Social => &mut settings.social_relays,
+                };
+                if list.is_empty() {
+                    *list = orchard_nostr::relay::relay_urls(None);
+                }
+                list.push(url.clone());
             },
             cx,
         );
@@ -1483,18 +1497,27 @@ impl StoreRoot {
         cx.notify();
     }
 
+    /// Remove one row. While the built-in set is showing (an empty
+    /// file list), removal switches the file to an explicit list: the
+    /// built-ins minus the removed one. The supervisor applies the
+    /// change within a second.
     fn remove_relay(&mut self, target: RelayTarget, index: usize, cx: &mut Context<Self>) {
         self.edit_settings(
-            |settings| match target {
-                RelayTarget::Events => {
-                    if index < settings.event_relays.len() {
-                        settings.event_relays.remove(index);
-                    }
-                }
-                RelayTarget::Social => {
-                    if index < settings.social_relays.len() {
-                        settings.social_relays.remove(index);
-                    }
+            |settings| {
+                let list = match target {
+                    RelayTarget::Events => &mut settings.event_relays,
+                    RelayTarget::Social => &mut settings.social_relays,
+                };
+                if list.is_empty() {
+                    let defaults = orchard_nostr::relay::relay_urls(None);
+                    *list = defaults
+                        .into_iter()
+                        .enumerate()
+                        .filter(|(position, _)| *position != index)
+                        .map(|(_, url)| url)
+                        .collect();
+                } else if index < list.len() {
+                    list.remove(index);
                 }
             },
             cx,
@@ -4509,8 +4532,9 @@ impl StoreRoot {
                 |_e: &MouseDownEvent, _w, cx: &mut gpui::App| cx.stop_propagation(),
             )
             .children(
-                // a hidden source loses its menu entry: the visibility
-                // switch governs the dropdown too, not just the rows
+                // a hidden source loses its menu entry, and a single
+                // visible source loses its own entry too: when one
+                // source is hidden, All already is that channel
                 [
                     Filter::All,
                     Filter::Reviewed,
@@ -4519,8 +4543,9 @@ impl StoreRoot {
                 ]
                 .iter()
                 .filter(|f| match f {
-                    Filter::Reviewed => self.settings.get().flathub_source,
-                    Filter::Publisher => self.settings.get().orchard_source,
+                    Filter::Reviewed | Filter::Publisher => {
+                        self.settings.get().flathub_source && self.settings.get().orchard_source
+                    }
                     _ => true,
                 })
                 .map(|f| {
@@ -4758,9 +4783,11 @@ impl StoreRoot {
             }))
     }
 
-    /// One relay group editor: the URL rows, an add input, reset.
-    /// Edits persist immediately and reach the relay threads within a
-    /// second; no restart note needed, because there is no restart.
+    /// One relay group editor: the effective set as rows (the
+    /// built-in rendezvous set until the file carries its own list),
+    /// an add input, reset. Edits persist immediately and reach the
+    /// relay threads within a second; no restart note needed, because
+    /// there is no restart.
     fn render_relay_group(
         &mut self,
         target: RelayTarget,
@@ -4771,8 +4798,16 @@ impl StoreRoot {
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let settings = self.settings.get();
-        let urls = self.relay_urls_for(target, &settings);
+        let custom = self.relay_urls_for(target, &settings);
         let defaults = orchard_nostr::relay::relay_urls(None);
+        // an empty file list means the built-in set: show it, so the
+        // active relays are visible and individually removable
+        let showing_defaults = custom.is_empty();
+        let urls = if showing_defaults {
+            defaults.clone()
+        } else {
+            custom.clone()
+        };
         let focused = self.relay_target == Some(target);
         let slot = match target {
             RelayTarget::Events => 0,
@@ -4851,7 +4886,6 @@ impl StoreRoot {
             .flex_col()
             .gap_1()
             .children(urls.iter().enumerate().map(|(index, url)| {
-                let is_default = defaults.contains(url);
                 div()
                     .flex()
                     .items_center()
@@ -4869,14 +4903,15 @@ impl StoreRoot {
                             .items_center()
                             .gap_2()
                             .min_w_0()
+                            .overflow_hidden()
                             .child(
                                 div()
                                     .text_size(px(ui::TEXT_SIZE))
                                     .text_color(ui::text())
                                     .child(url.clone()),
                             )
-                            .children(is_default.then(|| {
-                                ui::badge("default", ui::text_dim()).into_any_element()
+                            .children(showing_defaults.then(|| {
+                                ui::badge("built-in", ui::text_dim()).into_any_element()
                             })),
                     )
                     .child(
@@ -4945,7 +4980,7 @@ impl StoreRoot {
                             .text_color(ui::text())
                             .child(title.to_string()),
                     )
-                    .child(
+                    .children((!showing_defaults).then(|| {
                         ui::small_button(
                             SharedString::from(format!("{group_id}-reset")),
                             None,
@@ -4954,8 +4989,9 @@ impl StoreRoot {
                         )
                         .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
                             this.reset_relays(target, cx);
-                        })),
-                    ),
+                        }))
+                        .into_any_element()
+                    })),
             )
             .child(
                 div()
@@ -5007,6 +5043,19 @@ impl StoreRoot {
             .filter(|value| !value.trim().is_empty());
         let image_bytes = crate::cache::image_cache_bytes();
         let event_bytes = crate::cache::event_cache_bytes();
+        // with one source hidden there is one channel, so the startup
+        // choices collapse the same way the channel menu does
+        let both_visible = settings.flathub_source && settings.orchard_source;
+        let channel_options: &[(&'static str, &'static str)] = if both_visible {
+            &[
+                ("all", "All"),
+                ("flathub", "Flathub"),
+                ("orchard", "Orchard"),
+                ("installed", "Installed"),
+            ]
+        } else {
+            &[("all", "All"), ("installed", "Installed")]
+        };
 
         let sources_body = div()
             .flex()
@@ -5041,12 +5090,7 @@ impl StoreRoot {
                 "The channel the store starts on.",
                 self.settings_segmented(
                     "default-channel",
-                    &[
-                        ("all", "All"),
-                        ("flathub", "Flathub"),
-                        ("orchard", "Orchard"),
-                        ("installed", "Installed"),
-                    ],
+                    channel_options,
                     &settings.default_channel,
                     |this, name, cx| {
                         this.edit_settings(|s| s.default_channel = name.to_string(), cx);
@@ -5062,7 +5106,7 @@ impl StoreRoot {
             .child(self.render_relay_group(
                 RelayTarget::Events,
                 "Catalog relays",
-                "Where publisher listings, releases, and reviews are read from. Empty: the built-in rendezvous set.",
+                "Where publisher listings, releases, and reviews are read from. The built-in rows are the rendezvous set.",
                 env_events,
                 font.clone(),
                 cx,
@@ -5070,7 +5114,7 @@ impl StoreRoot {
             .child(self.render_relay_group(
                 RelayTarget::Social,
                 "Profile relays",
-                "Where reviewer names, avatars, and contact lists come from. Empty: the built-in rendezvous set.",
+                "Where reviewer names, avatars, and contact lists come from. The built-in rows are the rendezvous set.",
                 env_social,
                 font.clone(),
                 cx,
@@ -5124,6 +5168,8 @@ impl StoreRoot {
             .id("settings-scroll")
             .flex_1()
             .min_h_0()
+            .flex()
+            .flex_col()
             .overflow_y_scroll()
             .track_scroll(&self.settings_scroll)
             .child(
@@ -5131,6 +5177,10 @@ impl StoreRoot {
                     .flex()
                     .flex_col()
                     .gap_4()
+                    // one definite width for every section: the
+                    // content stretches to it, nothing shrink-wraps
+                    // wider than another
+                    .w_full()
                     .max_w(px(640.))
                     .mx_auto()
                     .py_4()
