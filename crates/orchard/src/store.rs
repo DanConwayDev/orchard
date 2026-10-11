@@ -526,9 +526,7 @@ impl StoreRoot {
         let sort = ListSort::from_settings(&settings.sort);
         let today = orchard_core::appstream::today_iso();
         let tier = |app: &StoreApp| {
-            if self
-                .repo_verified(app.repository.as_deref().unwrap_or(""), app.publisher.as_deref())
-            {
+            if self.row_verified(app) {
                 0u8
             } else if app
                 .publisher
@@ -831,6 +829,14 @@ impl StoreRoot {
             return false;
         };
         pubkey.is_some_and(|key| keys.iter().any(|k| k == key))
+    }
+
+    /// Does this row's listing carry a verified repository proof?
+    fn row_verified(&self, app: &StoreApp) -> bool {
+        self.repo_verified(
+            app.repository.as_deref().unwrap_or(""),
+            app.publisher.as_deref(),
+        )
     }
 
     fn ensure_nip05_checks(&mut self, cx: &mut Context<Self>) {
@@ -2507,6 +2513,38 @@ impl StoreRoot {
     /// actionable empty state otherwise.
     fn render_browse(&self, cx: &mut Context<Self>) -> AnyElement {
         let rows = self.filtered();
+        // the composition line: what this view is made of, quiet
+        // facts only, between the chips and the rows. Computed before
+        // the list closure moves the rows.
+        let composition = (!rows.is_empty()).then(|| {
+            let mut publishers = std::collections::HashSet::new();
+            let mut verified = 0;
+            let mut circle = 0;
+            for &i in &rows {
+                let app = &self.apps[i];
+                if let Some(key) = app.publisher.as_deref() {
+                    publishers.insert(key);
+                    if self.follows.contains(key) {
+                        circle += 1;
+                    }
+                }
+                if self.row_verified(app) {
+                    verified += 1;
+                }
+            }
+            div()
+                .px_4()
+                .py_1()
+                .bg(ui::inset())
+                .text_size(px(ui::TEXT_SIZE_LABEL))
+                .text_color(ui::text_dim())
+                .child(composition_line(
+                    rows.len(),
+                    publishers.len(),
+                    verified,
+                    circle,
+                ))
+        });
         let body: AnyElement = if !rows.is_empty() {
             let view = cx.entity();
             uniform_list("app-list", rows.len(), move |range, window, cx| {
@@ -2578,9 +2616,13 @@ impl StoreRoot {
             .flex()
             .flex_col()
             .child(self.render_category_bar(cx))
+            .children(composition)
             .child(body)
             .into_any_element()
     }
+
+    /// The category chip row: the browse dimension. Only categories
+    /// present in the catalog get a chip.
 
     /// The category chip row: the browse dimension. Only categories
     /// present in the catalog get a chip.
@@ -3712,6 +3754,26 @@ impl gpui::Render for TextTooltip {
 /// Is this review written by the app's own publisher?
 fn is_publisher_review(review: &orchard_core::Review, publisher: Option<&str>) -> bool {
     publisher == Some(review.pubkey.as_str())
+}
+
+/// The catalog's composition line: quiet facts about the current
+/// view, never a judgment. Rows, distinct publishers, verified
+/// listings, rows from followed publishers. A flood reads as
+/// composition, not as rank.
+fn composition_line(rows: usize, publishers: usize, verified: usize, circle: usize) -> String {
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    let mut head = format!("{} app{}", rows, plural(rows));
+    if publishers > 0 {
+        head.push_str(&format!(" from {} publisher{}", publishers, plural(publishers)));
+    }
+    let mut parts = vec![head];
+    if verified > 0 {
+        parts.push(format!("{} verified", verified));
+    }
+    if circle > 0 {
+        parts.push(format!("{} in your circle", circle));
+    }
+    parts.join(" · ")
 }
 
 /// The review display order. The circle lens (the signed-in default)
@@ -6933,6 +6995,18 @@ mod tests {
         // so does a listing edit
         app.summary = "Edited summary".into();
         assert_ne!(same, orchard_fingerprint(std::slice::from_ref(&app)));
+    }
+
+    #[test]
+    fn composition_line_states_quiet_facts() {
+        assert_eq!(composition_line(0, 0, 0, 0), "0 apps");
+        assert_eq!(composition_line(1, 1, 0, 0), "1 app from 1 publisher");
+        assert_eq!(
+            composition_line(12, 3, 2, 1),
+            "12 apps from 3 publishers · 2 verified · 1 in your circle"
+        );
+        // a Flathub-only view has no publisher keys to count
+        assert_eq!(composition_line(2, 0, 0, 0), "2 apps");
     }
 
     #[test]

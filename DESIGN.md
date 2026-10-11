@@ -544,6 +544,13 @@ opening items because they need the push, the signing secret, and a tag.
       ignored. Signed out, the lenses are the same list and the
       toggle hides. New-key sprouts, the circle glyphs, the publisher
       flag, and the trust notes line stay on in every lens.
+- [x] A composition line above the catalog rows: quiet facts about
+      the current view only, never a judgment. Rows, distinct
+      publishers among them, verified listings, rows from followed
+      publishers; segments with nothing to say are left out, and an
+      empty view shows nothing. A flood reads as composition ("48
+      apps from 3 publishers"), not as rank: the client states what
+      is here and leaves the judging to the person reading.
 - [x] Client relay configuration, as a full settings page: Sources (channel
       visibility switches, the channel the store opens on), Relays (the event
       and social sets, editable rows with add, remove, and a reset to the
