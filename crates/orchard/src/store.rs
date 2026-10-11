@@ -2598,7 +2598,7 @@ impl StoreRoot {
                         .child(notes.join(" · ")),
                 );
             }
-            for review in &reviews {
+            for (index, review) in reviews.iter().enumerate() {
                 let author = review
                     .name
                     .clone()
@@ -2633,9 +2633,12 @@ impl StoreRoot {
                             // listener only for elements with a hover
                             // style, and a visible tooltip hides during
                             // prepaint, so without it the tooltip never
-                            // sees the mouse leave.
+                            // sees the mouse leave. The id must be unique
+                            // per row: the tooltip state lives under the
+                            // element's global id, and duplicate ids
+                            // collapse every row's tooltip onto one slot.
                             div()
-                                .id("new-key")
+                                .id(SharedString::from(format!("new-key-{index}")))
                                 .flex_none()
                                 .hover(|style| style.bg(gpui::transparent_black()))
                                 .tooltip(|_window, cx| {
@@ -2649,9 +2652,10 @@ impl StoreRoot {
                         .children(in_circle.then(|| {
                             // the circle glyph: a reviewer the signed-in
                             // identity follows. Same hover rules as the
-                            // sprout (the style is the repaint trigger).
+                            // sprout (the style is the repaint trigger,
+                            // and the id must be unique per row).
                             div()
-                                .id("circle")
+                                .id(SharedString::from(format!("circle-{index}")))
                                 .flex_none()
                                 .hover(|style| style.bg(gpui::transparent_black()))
                                 .tooltip(|_window, cx| {

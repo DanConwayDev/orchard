@@ -317,8 +317,10 @@ Sign-in from the header does not open the review composer; from the reviews flow
 drops into the composer after the pairing completes. Tooltips hide during window
 prepaint, and gpui registers its repaint-on-hover-change listener only for elements
 with a hover style: a tooltip target without any hover style never learns the pointer
-left and the tooltip sticks. Every tooltip target carries a no-op hover style (the
-review rows' sprout and circle glyphs).
+left and the tooltip sticks. Every tooltip target carries a no-op hover style and a
+unique element id per row (the review rows' sprout and circle glyphs): the tooltip
+state lives under the element's global id, so duplicate ids across a list collapse
+every row's tooltip onto one slot and only one row's tooltip works.
 
 **M6, circle slice (built).** The personal web of trust, Zapstore's own answer
 (reviews constrained to the reader's graph), starts at distance 1: at sign-in and at
