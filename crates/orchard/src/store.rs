@@ -4970,7 +4970,7 @@ impl StoreRoot {
                             SharedString::from(format!("{group_id}-remove-{index}")),
                             Some("icons/trash.svg"),
                             "",
-                            Tone::Quiet,
+                            Tone::Danger,
                         )
                         .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
                             this.remove_relay(target, index, cx);
@@ -5291,7 +5291,7 @@ impl StoreRoot {
                                     "settings-clear-images",
                                     None,
                                     "Clear",
-                                    Tone::Quiet,
+                                    Tone::Danger,
                                 )
                                 .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
                                     this.clear_image_cache(cx);
@@ -5304,7 +5304,7 @@ impl StoreRoot {
                                     "settings-clear-events",
                                     None,
                                     "Clear",
-                                    Tone::Quiet,
+                                    Tone::Danger,
                                 )
                                 .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
                                     this.clear_event_cache(cx);
