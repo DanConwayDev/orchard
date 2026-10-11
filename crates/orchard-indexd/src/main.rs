@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use orchard_core::CatalogFile;
-use orchard_indexd::{RelayConfig, ServerState};
+use orchard_indexd::ServerState;
 
 fn load_catalog() -> anyhow::Result<CatalogFile> {
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
@@ -48,20 +48,11 @@ fn load_catalog() -> anyhow::Result<CatalogFile> {
     anyhow::bail!("no catalog found (tried {:?})", candidates)
 }
 
-/// Relays to subscribe to: ORCHARD_RELAYS (comma-separated) or the
-/// rendezvous set.
-fn relay_config() -> RelayConfig {
-    let urls = orchard_nostr::relay::relay_urls(std::env::var("ORCHARD_RELAYS").ok().as_deref());
-    let social = orchard_nostr::relay::social_relay_urls(
-        std::env::var("ORCHARD_SOCIAL_RELAYS").ok().as_deref(),
-    );
-    let cache = std::env::var_os("XDG_DATA_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| {
-            std::path::PathBuf::from(home).join(".local/share")
-        }))
-        .map(|data| data.join("orchard/nostr-events.json"));
-    RelayConfig { urls, social, cache }
+/// The settings: the same file the client uses, so the standalone
+/// runner and the embedded instance agree. Environment overrides
+/// still win, per resolve_set.
+fn settings_handle() -> orchard_core::SettingsHandle {
+    orchard_core::SettingsHandle::load_default()
 }
 
 #[tokio::main]
@@ -71,15 +62,23 @@ async fn main() -> anyhow::Result<()> {
         .parse()?;
 
     let catalog = load_catalog()?;
-    let relays = relay_config();
-    if !relays.urls.is_empty() {
-        println!("subscribing to relays: {}", relays.urls.join(", "));
+    let settings = settings_handle();
+    let sets = orchard_indexd::relay_sets(&settings);
+    if !sets.events.is_empty() {
+        println!("subscribing to relays: {}", sets.events.join(", "));
     }
 
     let state = ServerState {
         document: Arc::new(catalog),
+        relays_reset: None,
     };
+    let cache = std::env::var_os("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| {
+            std::path::PathBuf::from(home).join(".local/share")
+        }))
+        .map(|data| data.join("orchard/nostr-events.json"));
 
     println!("orchard-indexd serving on http://{addr}");
-    orchard_indexd::serve(addr, state, relays).await
+    orchard_indexd::serve(addr, state, settings, cache).await
 }

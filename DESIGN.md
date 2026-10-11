@@ -477,8 +477,26 @@ opening items because they need the push, the signing secret, and a tag.
 - [x] The arch story is quiet by default: no platforms badge in the install
       bar. The no-build note names the mismatch in full ("no x86_64 build
       yet, published for aarch64"), and nowhere else does the list appear.
-- [ ] Client relay configuration: a settings surface over the rendezvous set
-      instead of env vars.
+- [x] Client relay configuration, as a full settings page: Sources (channel
+      visibility switches, the channel the store opens on), Relays (the event
+      and social sets, editable rows with add, remove, and a reset to the
+      built-in rendezvous set), Updates (how often installed apps are
+      re-checked: off, on launch, hourly, daily), Privacy (remote publisher
+      images on/off, cached-data sizes and clears). Settings live in
+      `~/.config/orchard/settings.json` (defaults for absent fields; a
+      deleted file is a full reset) behind a shared `SettingsHandle` in
+      orchard-core: the client UI and the embedded indexd hold the same
+      handle, so every edit persists atomically and applies live. Relay
+      edits apply within a second: a supervisor thread diffs the effective
+      set against the running relay threads (stopping the removed ones
+      through a flag their read wakes on), and the crawlers re-resolve
+      their set every tick. Precedence is environment beats file beats
+      defaults, so the dev loop's `ORCHARD_RELAYS` pin keeps winning (the
+      page says so while it is set). The clear-cached-events action empties
+      the feed through a `POST /v1/cache` on indexd, which also cycles the
+      relay threads so everything re-delivers. Trust-relevant behavior is
+      deliberately absent from settings: digest verification, signature
+      checks, and the two-press install confirm are not configurable, ever.
 
 ## Risks / open questions
 

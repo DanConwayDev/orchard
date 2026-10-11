@@ -55,3 +55,46 @@ pub fn fetch(url: &str) -> Option<PathBuf> {
     std::fs::rename(&tmp, &path).ok()?;
     Some(path)
 }
+
+/// The absorbed-events cache the embedded indexd writes, or None when
+/// even HOME is missing. Shared by main.rs (which names the path when
+/// starting indexd) and the settings page (which reports its size and
+/// clears it through indexd).
+pub fn events_cache_path() -> Option<PathBuf> {
+    let data = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))?;
+    Some(data.join("orchard/nostr-events.json"))
+}
+
+/// Total bytes of cached images on disk.
+pub fn image_cache_bytes() -> u64 {
+    dir_bytes(&root())
+}
+
+/// Delete every cached image. The directory is rebuilt lazily on the
+/// next fetch; pairing QR files share the dir and are transient by
+/// design, so clearing them costs nothing.
+pub fn clear_images() {
+    let _ = std::fs::remove_dir_all(root());
+}
+
+/// Total bytes of absorbed Nostr events on disk, if any.
+pub fn event_cache_bytes() -> u64 {
+    events_cache_path()
+        .map(|path| path.metadata().map(|meta| meta.len()).unwrap_or(0))
+        .unwrap_or(0)
+}
+
+fn dir_bytes(dir: &PathBuf) -> u64 {
+    std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter_map(|entry| entry.metadata().ok())
+                .filter(|meta| meta.is_file())
+                .map(|meta| meta.len())
+                .sum()
+        })
+        .unwrap_or(0)
+}

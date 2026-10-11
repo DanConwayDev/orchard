@@ -25,6 +25,10 @@ client, not a gatekeeper.
   binaries live on publisher registries; the client embeds a local index
   shim so every Orchard app is a normal Flatpak-remote app, visible to
   GNOME Software and Discover.
+- **Settings apply live.** Channel visibility, relay sets, update
+  cadence, and privacy toggles live on a settings page (the account
+  menu); edits persist to `~/.config/orchard/settings.json` and take
+  effect immediately, no restart.
 
 ## Status
 

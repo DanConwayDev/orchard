@@ -26,16 +26,22 @@ use crate::Feed;
 /// publishers is a future edge, not part of this floor.
 pub const RENDEZVOUS_RELAYS: &[&str] = &["wss://relay.primal.net", "wss://nos.lol"];
 
+/// Parse an `ORCHARD_RELAYS`-style comma list into URLs, trimming and
+/// dropping empties. No fallback: the caller decides the default.
+pub fn parse_urls(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 /// Parse an `ORCHARD_RELAYS`-style comma list, falling back to the
 /// rendezvous set when unset or blank.
 pub fn relay_urls(env_value: Option<&str>) -> Vec<String> {
     match env_value {
-        Some(value) if !value.trim().is_empty() => value
-            .split(',')
-            .map(str::trim)
-            .filter(|url| !url.is_empty())
-            .map(str::to_string)
-            .collect(),
+        Some(value) if !value.trim().is_empty() => parse_urls(value),
         _ => RENDEZVOUS_RELAYS
             .iter()
             .map(|url| url.to_string())
@@ -64,12 +70,19 @@ const SUB_KINDS: [u16; 6] = [
 
 const BACKOFF: Duration = Duration::from_secs(5);
 
-/// Run one relay until the process exits, reconnecting on errors. Calls
-/// `on_change` whenever the feed may have grown. Never returns normally.
+/// How long one relay read may block before the loop wakes to check
+/// the stop flag. Long enough that it is invisible; short enough that
+/// a removed relay's thread is gone in under a minute.
+const READ_WAKE: Duration = Duration::from_secs(30);
+
+/// Run one relay until the process exits or `stop` flips, reconnecting
+/// on errors. Calls `on_change` whenever the feed may have grown.
+/// Returns when asked to stop; the caller may then drop the thread.
 pub fn run_forever(
     url: &str,
     feed: Arc<Mutex<Feed>>,
     on_change: Arc<dyn Fn() + Send + Sync>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
 ) {
     let sub = serde_json::json!([
         "REQ",
@@ -77,8 +90,8 @@ pub fn run_forever(
         { "kinds": SUB_KINDS },
     ])
     .to_string();
-    loop {
-        match session(url, &sub, &feed, &on_change) {
+    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+        match session(url, &sub, &feed, &on_change, &stop) {
             Ok(()) => {
                 // clean close: still a stop; retry in case the relay restarts
                 std::thread::sleep(BACKOFF);
@@ -96,11 +109,30 @@ fn session(
     sub: &str,
     feed: &Arc<Mutex<Feed>>,
     on_change: &Arc<dyn Fn() + Send + Sync>,
+    stop: &Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<()> {
     let (mut socket, _response) = tungstenite::connect(url)?;
+    crate::connect::set_read_timeout(&mut socket, READ_WAKE);
     socket.send(Message::text(sub))?;
     loop {
-        let message = socket.read()?;
+        let message = match socket.read() {
+            Ok(message) => message,
+            // the wake-up: the subscription stays open server-side, so
+            // this is only a checkpoint for the stop flag
+            Err(tungstenite::Error::Io(err))
+                if err.kind() == std::io::ErrorKind::WouldBlock
+                    || err.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    return Ok(());
+                }
+                continue;
+            }
+            Err(err) => return Err(err.into()),
+        };
+        if stop.load(std::sync::atomic::Ordering::Relaxed) {
+            return Ok(());
+        }
         match message {
             Message::Text(text) => {
                 if handle_frame(text.as_str(), feed)? {

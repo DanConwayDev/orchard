@@ -357,13 +357,37 @@ pub fn app_icon(icon_path: Option<&std::path::Path>, name: &str, size: f32) -> g
 }
 
 /// A compact quiet button for inline row actions.
+/// The visual of a toggle switch: a pill with a sliding knob, accent
+/// when on, quiet when off. Stateless; the caller wraps it in a
+/// clickable element that keeps the state. Instant on/off, no
+/// animation: the app keeps transitions off.
+pub fn toggle_pill(on: bool) -> Div {
+    let knob_left = if on { px(18.) } else { px(2.) };
+    div()
+        .relative()
+        .w(px(34.))
+        .h(px(18.))
+        .flex_none()
+        .rounded_full()
+        .bg(if on { get(&ACCENT) } else { divider() })
+        .child(
+            div()
+                .absolute()
+                .top(px(2.))
+                .left(knob_left)
+                .w(px(14.))
+                .h(px(14.))
+                .rounded_full()
+                .bg(if on { accent_fg() } else { text_dim() }),
+        )
+}
+
 pub fn small_button(
     id: impl Into<SharedString>,
     glyph: Option<&'static str>,
     label: &str,
     accent: bool,
-) -> gpui::Stateful<Div> {
-    let base = div()
+) -> gpui::Stateful<Div> {    let base = div()
         .id(id.into())
         .flex()
         .items_center()

@@ -27,7 +27,7 @@
 use std::sync::{Arc, Mutex};
 
 use axum::extract::{Path as AxumPath, State};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 
 use orchard_core::CatalogFile;
@@ -112,6 +112,10 @@ pub trait CatalogDocument: Send + Sync + 'static {
             graph: Default::default(),
         }
     }
+
+    /// Drop absorbed events: the client's "clear cached data" action.
+    /// Static documents have nothing to clear.
+    fn clear(&self) {}
 }
 
 impl CatalogDocument for CatalogFile {
@@ -165,6 +169,13 @@ impl CatalogDocument for NostrCatalog {
     fn graph(&self) -> orchard_core::GraphFile {
         self.graph.lock().expect("graph lock poisoned").file()
     }
+
+    fn clear(&self) {
+        self.feed
+            .lock()
+            .expect("feed lock poisoned")
+            .clear();
+    }
 }
 
 /// Shared server state: the catalog document (and the OCI index derived
@@ -172,6 +183,11 @@ impl CatalogDocument for NostrCatalog {
 #[derive(Clone)]
 pub struct ServerState {
     pub document: Arc<dyn CatalogDocument>,
+    /// Shared with the relay supervisor: the clear-cache endpoint sets
+    /// it, the supervisor answers by cycling every relay thread so
+    /// each re-subscribes and re-delivers its events into the emptied
+    /// feed. None for a static document (no relays to nudge).
+    pub relays_reset: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// Relay and cache configuration for [`serve`].
@@ -184,6 +200,48 @@ pub struct RelayConfig {
     pub social: Vec<String>,
     /// Where to persist verified events across restarts. Absent: no cache.
     pub cache: Option<std::path::PathBuf>,
+}
+
+/// The two live relay sets, resolved from settings: environment beats
+/// the file beats the rendezvous default.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RelaySets {
+    pub events: Vec<String>,
+    pub social: Vec<String>,
+}
+
+/// Resolve one relay set: a non-blank environment value wins (the dev
+/// loop's escape hatch), then the settings file's list (empty means
+/// default), then the built-in default.
+pub fn resolve_set(file: &[String], env: Option<&str>, default: &[String]) -> Vec<String> {
+    if let Some(value) = env {
+        if !value.trim().is_empty() {
+            return orchard_nostr::relay::parse_urls(value);
+        }
+    }
+    if !file.is_empty() {
+        file.to_vec()
+    } else {
+        default.to_vec()
+    }
+}
+
+/// The effective relay sets right now: env overrides, then settings,
+/// then the rendezvous defaults.
+pub fn relay_sets(settings: &orchard_core::SettingsHandle) -> RelaySets {
+    let settings = settings.get();
+    RelaySets {
+        events: resolve_set(
+            &settings.event_relays,
+            std::env::var("ORCHARD_RELAYS").ok().as_deref(),
+            &orchard_nostr::relay::relay_urls(None),
+        ),
+        social: resolve_set(
+            &settings.social_relays,
+            std::env::var("ORCHARD_SOCIAL_RELAYS").ok().as_deref(),
+            &orchard_nostr::relay::relay_urls(None),
+        ),
+    }
 }
 
 /// The crawled reviewer graph plus per-reviewer crawl times. The
@@ -249,9 +307,10 @@ impl GraphStore {
 
 /// Crawl the contact lists of known reviewers: the reviewers come
 /// from the feed's review authors, the kind 3s from one batched
-/// read-only REQ per relay. Blocking loop; one thread.
+/// read-only REQ per relay. Blocking loop; one thread. The relay set
+/// re-resolves every tick, so relay settings apply live.
 fn spawn_graph_crawler(
-    urls: Vec<String>,
+    settings: orchard_core::SettingsHandle,
     feed: Arc<Mutex<orchard_nostr::Feed>>,
     graph: Arc<Mutex<GraphStore>>,
 ) {
@@ -259,6 +318,7 @@ fn spawn_graph_crawler(
         .name("orchard-graph".into())
         .spawn(move || loop {
             std::thread::sleep(GRAPH_TICK);
+            let urls = relay_sets(&settings).events;
             let reviewers: Vec<String> = {
                 let feed = feed.lock().expect("feed lock poisoned");
                 let mut seen: Vec<String> = Vec::new();
@@ -295,9 +355,10 @@ fn spawn_graph_crawler(
 /// REQ per relay, for the keys the store cares about and absorbs the
 /// events through the feed's verify path; the feed keeps the newest
 /// per key. Keys are marked before the fetch, so a dead relay backs
-/// off to the refresh window instead of retrying every tick.
+/// off to the refresh window instead of retrying every tick. The
+/// relay set re-resolves every tick, so relay settings apply live.
 /// Anonymous and read-only, like every fetch here.
-fn spawn_profile_crawler(urls: Vec<String>, feed: Arc<Mutex<orchard_nostr::Feed>>) {
+fn spawn_profile_crawler(settings: orchard_core::SettingsHandle, feed: Arc<Mutex<orchard_nostr::Feed>>) {
     std::thread::Builder::new()
         .name("orchard-profiles".into())
         .spawn(move || {
@@ -305,6 +366,7 @@ fn spawn_profile_crawler(urls: Vec<String>, feed: Arc<Mutex<orchard_nostr::Feed>
                 std::collections::BTreeMap::new();
             loop {
                 let now = std::time::Instant::now();
+                let urls = relay_sets(&settings).social;
                 let pending: Vec<String> = {
                     let feed = feed.lock().expect("feed lock poisoned");
                     feed.crawl_keys()
@@ -338,6 +400,73 @@ fn spawn_profile_crawler(urls: Vec<String>, feed: Arc<Mutex<orchard_nostr::Feed>
         .expect("spawning the profile crawler");
 }
 
+/// Keep one relay thread running per URL in the settings' event set,
+/// spawning and stopping as the set changes. One thread, polling the
+/// settings once a second: a removed relay's thread is signalled to
+/// stop (its read wakes on a timeout) and a new relay's thread starts
+/// on the next pass. The feed deduplicates, so nothing is re-read
+/// that a kept relay already delivered.
+fn spawn_relay_supervisor(
+    settings: orchard_core::SettingsHandle,
+    feed: Arc<Mutex<orchard_nostr::Feed>>,
+    reset: Arc<std::sync::atomic::AtomicBool>,
+) {
+    std::thread::Builder::new()
+        .name("orchard-relays".into())
+        .spawn(move || {
+            let mut running: std::collections::BTreeMap<
+                String,
+                Arc<std::sync::atomic::AtomicBool>,
+            > = Default::default();
+            loop {
+                // a clear cycle: every thread goes, fresh ones
+                // re-subscribe and re-deliver into the emptied feed
+                if reset.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                    for stop in running.values() {
+                        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    running.clear();
+                }
+                let urls = relay_sets(&settings).events;
+                running.retain(|url, stop| {
+                    if urls.contains(url) {
+                        true
+                    } else {
+                        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                        false
+                    }
+                });
+                for url in urls {
+                    if running.contains_key(&url) {
+                        continue;
+                    }
+                    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let relay_url = url.clone();
+                    let feed = Arc::clone(&feed);
+                    let thread_stop = Arc::clone(&stop);
+                    let spawned = std::thread::Builder::new()
+                        .name(format!("relay-{relay_url}"))
+                        .spawn(move || {
+                            orchard_nostr::relay::run_forever(
+                                &relay_url,
+                                feed,
+                                Arc::new(|| {}),
+                                thread_stop,
+                            )
+                        });
+                    match spawned {
+                        Ok(_) => {
+                            running.insert(url, stop);
+                        }
+                        Err(_) => eprintln!("failed to spawn relay thread for {url}"),
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        })
+        .expect("spawning the relay supervisor");
+}
+
 /// Build the axum router for a state.
 pub fn router(state: ServerState) -> Router {
     Router::new()
@@ -347,6 +476,7 @@ pub fn router(state: ServerState) -> Router {
         .route("/v1/reviews", get(reviews))
         .route("/v1/profiles", get(profiles))
         .route("/v1/graph", get(graph))
+        .route("/v1/cache", post(clear_cache))
         .with_state(state)
 }
 
@@ -405,36 +535,49 @@ async fn graph(State(state): State<ServerState>) -> Json<orchard_core::GraphFile
     Json(state.document.graph())
 }
 
+/// Clear absorbed events: the feed refills from the relays on their
+/// next pass, and the disk cache empties on the writer's next tick.
+async fn clear_cache(State(state): State<ServerState>) -> &'static str {
+    state.document.clear();
+    // a fresh subscription re-delivers what the feed just dropped
+    if let Some(reset) = &state.relays_reset {
+        reset.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    "cleared"
+}
+
 /// Bind and serve. The port is reachable from the host even when Orchard runs
 /// sandboxed, because flatpak sandboxes share the network namespace by default
 /// (asserted in M2).
 ///
-/// With [`RelayConfig`] set, verified NIP-82 events from the given relays are
-/// merged over the state's base document and cached to disk.
+/// Verified NIP-82 events from the relays named in the settings are
+/// merged over the state's base document and cached to disk. The
+/// settings handle stays live: a changed relay set applies within a
+/// second, no restart.
 pub async fn serve(
     addr: std::net::SocketAddr,
     state: ServerState,
-    relays: RelayConfig,
+    settings: orchard_core::SettingsHandle,
+    cache: Option<std::path::PathBuf>,
 ) -> anyhow::Result<()> {
-    let state = if relays.urls.is_empty() {
-        state
-    } else {
-        let feed = Arc::new(Mutex::new(orchard_nostr::Feed::new()));
-        load_cache(&relays.cache, &feed);
-        spawn_relay_threads(&relays.urls, Arc::clone(&feed));
-        spawn_cache_writer(relays.cache, Arc::clone(&feed));
-        let graph = Arc::new(Mutex::new(GraphStore::default()));
-        spawn_graph_crawler(relays.urls.clone(), Arc::clone(&feed), Arc::clone(&graph));
-        if !relays.social.is_empty() {
-            spawn_profile_crawler(relays.social.clone(), Arc::clone(&feed));
-        }
-        ServerState {
-            document: Arc::new(NostrCatalog {
-                base: state.document.document(),
-                feed,
-                graph,
-            }),
-        }
+    let feed = Arc::new(Mutex::new(orchard_nostr::Feed::new()));
+    load_cache(&cache, &feed);
+    // the clear-cache action empties the feed AND asks for a refetch:
+    // the supervisor cycles the relay threads, whose fresh connections
+    // re-subscribe and re-deliver
+    let relays_reset = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    spawn_relay_supervisor(settings.clone(), Arc::clone(&feed), Arc::clone(&relays_reset));
+    spawn_cache_writer(cache, Arc::clone(&feed));
+    let graph = Arc::new(Mutex::new(GraphStore::default()));
+    spawn_graph_crawler(settings.clone(), Arc::clone(&feed), Arc::clone(&graph));
+    spawn_profile_crawler(settings, Arc::clone(&feed));
+    let state = ServerState {
+        document: Arc::new(NostrCatalog {
+            base: state.document.document(),
+            feed,
+            graph,
+        }),
+        relays_reset: Some(relays_reset),
     };
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, router(state)).await?;
@@ -465,22 +608,6 @@ fn load_cache(path: &Option<std::path::PathBuf>, feed: &Arc<Mutex<orchard_nostr:
         }
     }
     eprintln!("nostr cache: {accepted} events loaded");
-}
-
-/// One blocking thread per relay; the threads live as long as the process.
-fn spawn_relay_threads(urls: &[String], feed: Arc<Mutex<orchard_nostr::Feed>>) {
-    for url in urls {
-        let relay_url = url.clone();
-        let feed = Arc::clone(&feed);
-        let spawned = std::thread::Builder::new()
-            .name(format!("relay-{url}"))
-            .spawn(move || {
-                orchard_nostr::relay::run_forever(&relay_url, feed, Arc::new(|| {}))
-            });
-        if spawned.is_err() {
-            eprintln!("failed to spawn relay thread for {url}");
-        }
-    }
 }
 
 /// Periodically write the feed's events to the cache when they changed.
@@ -548,6 +675,21 @@ mod tests {
         assert_eq!(store.file().graph.len(), 1);
     }
 
+    #[test]
+    fn resolve_set_prefers_env_then_file_then_default() {
+        let default = vec!["wss://default".to_string()];
+        let file = vec!["wss://file".to_string()];
+        assert_eq!(
+            resolve_set(&file, Some("ws://env, ws://env2"), &default),
+            vec!["ws://env", "ws://env2"]
+        );
+        // a blank env value does not win: it is unset in spirit
+        assert_eq!(resolve_set(&file, Some("  "), &default), file);
+        assert_eq!(resolve_set(&file, None, &default), file);
+        // an empty file list means default
+        assert_eq!(resolve_set(&[], None, &default), default);
+    }
+
     fn sample_catalog() -> CatalogFile {
         CatalogFile {
             version: 1,
@@ -582,6 +724,7 @@ mod tests {
         let catalog = sample_catalog();
         let router = router(ServerState {
             document: Arc::new(catalog.clone()),
+            relays_reset: None,
         });
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -23,7 +23,7 @@ pub fn indexd_addr() -> std::net::SocketAddr {
 /// Start indexd on its own thread with its own tokio runtime. Errors are
 /// non-fatal for the MVP: the client falls back to reading the catalog file
 /// directly (and indexd has no other MVP duty).
-fn start_indexd(catalog: orchard_core::CatalogFile) {
+fn start_indexd(catalog: orchard_core::CatalogFile, settings: orchard_core::SettingsHandle) {
     let addr = indexd_addr();
     std::thread::Builder::new()
         .name("orchard-indexd".into())
@@ -40,29 +40,13 @@ fn start_indexd(catalog: orchard_core::CatalogFile) {
             };
             let state = orchard_indexd::ServerState {
                 document: std::sync::Arc::new(catalog),
+                relays_reset: None,
             };
-            // relay config for the embedded instance: ORCHARD_RELAYS
-            // if set, else the rendezvous set. The social set feeds
-            // the profile crawler: kind 0 lives on the social relays,
-            // so reviewer names resolve even when the app relays
-            // carry none.
-            let urls = orchard_nostr::relay::relay_urls(
-                std::env::var("ORCHARD_RELAYS").ok().as_deref(),
-            );
-            let social = orchard_nostr::relay::social_relay_urls(
-                std::env::var("ORCHARD_SOCIAL_RELAYS").ok().as_deref(),
-            );
-            // the event cache lives beside the other client state:
-            // XDG when set, the home fallback otherwise
-            let cache = std::env::var_os("XDG_DATA_HOME")
-                .map(std::path::PathBuf::from)
-                .or_else(|| {
-                    std::env::var_os("HOME")
-                        .map(|home| std::path::PathBuf::from(home).join(".local/share"))
-                })
-                .map(|data| data.join("orchard/nostr-events.json"));
-            let relays = orchard_indexd::RelayConfig { urls, social, cache };
-            if let Err(err) = runtime.block_on(orchard_indexd::serve(addr, state, relays)) {
+            let cache = crate::cache::events_cache_path();
+            // the settings handle stays live: relay edits in the
+            // client's settings page reach the relay session and the
+            // crawlers within a second, no restart
+            if let Err(err) = runtime.block_on(orchard_indexd::serve(addr, state, settings, cache)) {
                 eprintln!("indexd failed: {err:#}");
             }
         })
@@ -101,13 +85,15 @@ fn main() {
             let bytes = std::fs::read(path).ok()?;
             serde_json::from_slice::<orchard_core::CatalogFile>(&bytes).ok()
         });
+    let settings = orchard_core::SettingsHandle::load_default();
     if let Some(catalog) = seed_catalog {
-        start_indexd(catalog);
+        start_indexd(catalog, settings.clone());
     }
+    let settings_for_root = settings.clone();
 
     Application::new()
         .with_assets(assets::Assets)
-        .run(|cx: &mut App| {
+        .run(move |cx: &mut App| {
             // Establish the palette seam: defaults today, wallpaper-derived
             // palettes later swap this wholesale.
             crate::ui::apply_palette(&crate::ui::Palette::default());
@@ -118,7 +104,8 @@ fn main() {
                     ..Default::default()
                 },
                 |window, cx| {
-                    let root = cx.new(|cx| StoreRoot::new(cx));
+                    let settings = settings_for_root.clone();
+                    let root = cx.new(|cx| StoreRoot::new(cx, settings));
                     // Keyboard lives on the root from the start (type to search).
                     window.focus(&root.read(cx).focus_handle);
                     root

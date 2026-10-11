@@ -208,6 +208,13 @@ impl Feed {
         Self::default()
     }
 
+    /// Drop every absorbed event: the "clear cached data" action.
+    /// Relays refill the feed on their next wake; the disk cache
+    /// follows on the writer's next tick.
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
     /// Verify and absorb one event. `Ok(false)` means the event is valid
     /// but not useful (stale replaceable, wrong kind, no linux platform,
     /// duplicate asset); `Err` means malformed or rejected.

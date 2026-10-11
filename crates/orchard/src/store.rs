@@ -65,6 +65,24 @@ impl Filter {
             Filter::Installed => "Installed",
         }
     }
+
+    /// The filter a settings name selects, if it names one.
+    fn from_setting(name: &str) -> Option<Filter> {
+        match name {
+            "all" => Some(Filter::All),
+            "flathub" => Some(Filter::Reviewed),
+            "orchard" => Some(Filter::Publisher),
+            "installed" => Some(Filter::Installed),
+            _ => None,
+        }
+    }
+}
+
+/// Which relay group the settings page's draft input edits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelayTarget {
+    Events,
+    Social,
 }
 
 /// What `flatpak list` reported for an installed app.
@@ -159,6 +177,24 @@ pub struct StoreRoot {
     own_profile_fetching: bool,
     /// The reviews list is collapsed by default; the header toggles it.
     reviews_expanded: bool,
+    /// The user's settings, shared with the embedded indexd: relay
+    /// sets, channel visibility, update cadence, privacy toggles.
+    /// Edits persist and apply live.
+    settings: orchard_core::SettingsHandle,
+    /// The settings page is open (replaces the list; Escape backs out).
+    settings_open: bool,
+    /// The relay editor's draft text, shared by both relay groups.
+    relay_draft: String,
+    /// Which relay group the draft edits: the input the keyboard is
+    /// wired to. None when the page just opened (nothing focused).
+    relay_target: Option<RelayTarget>,
+    relay_cursor: usize,
+    relay_anchor: Option<usize>,
+    /// Last painted text layouts for the two relay inputs (events,
+    /// social): the caret queries last frame's measured layout.
+    relay_layouts: [Option<TextLayout>; 2],
+    /// The settings page's vertical scroll.
+    settings_scroll: gpui::ScrollHandle,
     /// The signed-in reviewer: a NIP-46 session (the remote signer's
     /// key is the identity). None until the user pairs a signer; the
     /// pairing file survives restarts and restores the session.
@@ -222,13 +258,25 @@ pub struct StoreRoot {
 }
 
 impl StoreRoot {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    /// The channel to open on: the settings' default channel, unless
+    /// that channel's source is hidden (then All).
+    fn initial_filter(settings: &orchard_core::SettingsHandle) -> Filter {
+        let settings = settings.get();
+        match Filter::from_setting(&settings.default_channel) {
+            Some(Filter::Reviewed) if settings.flathub_source => Filter::Reviewed,
+            Some(Filter::Publisher) if settings.orchard_source => Filter::Publisher,
+            Some(Filter::Installed) | Some(Filter::All) | None => Filter::All,
+            _ => Filter::All,
+        }
+    }
+
+    pub fn new(cx: &mut Context<Self>, settings: orchard_core::SettingsHandle) -> Self {
         let mut this = StoreRoot {
             focus_handle: cx.focus_handle(),
             apps: Vec::new(),
             installed: HashMap::new(),
             search: String::new(),
-            filter: Filter::All,
+            filter: Self::initial_filter(&settings),
             selected: None,
             selected_publisher: None,
             jobs: HashMap::new(),
@@ -257,6 +305,14 @@ impl StoreRoot {
             nip05_checking: Vec::new(),
             own_profile_fetching: false,
             reviews_expanded: false,
+            settings: settings.clone(),
+            settings_open: false,
+            relay_draft: String::new(),
+            relay_target: None,
+            relay_cursor: 0,
+            relay_anchor: None,
+            relay_layouts: [None, None],
+            settings_scroll: ScrollHandle::new(),
             reviewer: load_reviewer(),
             signin_modal: false,
             connect: None,
@@ -347,6 +403,40 @@ impl StoreRoot {
         })
         .detach();
 
+        // The update scan: how often to re-compare installed apps
+        // against their channels' newest versions. The launch check is
+        // the orchard loop above plus refresh_installed here; the
+        // cadence setting adds periodic repeats, read live from the
+        // settings (a cadence edit applies on the next 30s poll).
+        let update_settings = settings.clone();
+        cx.spawn(async move |this, cx| {
+            let mut since_check: u32 = 0;
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(30))
+                    .await;
+                since_check += 30;
+                let due = match update_settings.get().update_checks.as_str() {
+                    "hourly" => since_check >= 3600,
+                    "daily" => since_check >= 86400,
+                    _ => false,
+                };
+                if !due {
+                    continue;
+                }
+                since_check = 0;
+                let orchard_apps = cx
+                    .background_executor()
+                    .spawn(async move { load_orchard_catalog() })
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    this.apply_orchard_apps(orchard_apps, cx);
+                    this.refresh_installed(cx);
+                });
+            }
+        })
+        .detach();
+
         // Reviewed channel: parse flathub's AppStream in the background.
         cx.spawn(async move |this, cx| {
             let apps = cx
@@ -373,10 +463,17 @@ impl StoreRoot {
     /// renders stay cheap.
     fn filtered(&self) -> Vec<usize> {
         let needle = self.search.to_lowercase();
+        let settings = self.settings.get();
         let mut out = self
             .apps
             .iter()
             .enumerate()
+            // a hidden source vanishes from every channel, list and
+            // filter alike: visibility is the source's own switch
+            .filter(|(_, app)| match app.source {
+                Source::Reviewed => settings.flathub_source,
+                Source::Publisher => settings.orchard_source,
+            })
             .filter(|(_, app)| match self.filter {
                 Filter::All => true,
                 Filter::Reviewed => app.source == Source::Reviewed,
@@ -1274,9 +1371,267 @@ impl StoreRoot {
         cx.notify();
     }
 
+    // ----- settings -----
+
+    /// Open the settings page from the account menu. It replaces the
+    /// list and the detail page alike; Escape backs out.
+    fn open_settings(&mut self, cx: &mut Context<Self>) {
+        self.account_menu = None;
+        self.channel_menu = None;
+        self.close_signin();
+        if self.page_open {
+            self.close_page(cx);
+        }
+        self.lightbox = None;
+        self.settings_open = true;
+        self.settings_scroll.set_offset(Point::new(px(0.), px(0.)));
+        self.relay_draft.clear();
+        self.relay_cursor = 0;
+        self.relay_anchor = None;
+        // keyboard-first: the catalog relay input is the page's text
+        // surface from the first keystroke
+        self.relay_target = Some(RelayTarget::Events);
+        cx.notify();
+    }
+
+    fn close_settings(&mut self, cx: &mut Context<Self>) {
+        self.settings_open = false;
+        self.relay_target = None;
+        self.relay_draft.clear();
+        self.relay_anchor = None;
+        cx.notify();
+    }
+
+    /// Edit the settings and repaint. Persistence happens inside the
+    /// handle (atomic write); consumers, indexd included, read the
+    /// shared state on their next tick or frame.
+    fn edit_settings(
+        &mut self,
+        edit: impl FnOnce(&mut orchard_core::Settings),
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.update(edit);
+        cx.notify();
+    }
+
+    /// Show or hide a channel's source. Hiding the source of the
+    /// active channel filter resets the filter: the hidden channel no
+    /// longer appears in the dropdown, so an empty-looking list would
+    /// only confuse.
+    fn set_source_visible(&mut self, reviewed: bool, visible: bool, cx: &mut Context<Self>) {
+        self.edit_settings(
+            |settings| {
+                if reviewed {
+                    settings.flathub_source = visible;
+                } else {
+                    settings.orchard_source = visible;
+                }
+            },
+            cx,
+        );
+        let hidden = match self.filter {
+            Filter::Reviewed => reviewed,
+            Filter::Publisher => !reviewed,
+            _ => false,
+        };
+        if hidden && !visible {
+            self.filter = Filter::All;
+        }
+    }
+
+    /// The relay group the settings page edits, for the draft input.
+    fn relay_urls_for(&self, target: RelayTarget, settings: &orchard_core::Settings) -> Vec<String> {
+        match target {
+            RelayTarget::Events => settings.event_relays.clone(),
+            RelayTarget::Social => settings.social_relays.clone(),
+        }
+    }
+
+    /// Validate and add the draft: a ws:// or wss:// URL, not already
+    /// in the group. Empty or bad drafts are ignored silently: the
+    /// input keeps its text so the user can fix it.
+    fn add_relay_from_draft(&mut self, cx: &mut Context<Self>) {
+        let Some(target) = self.relay_target else {
+            return;
+        };
+        let url = self.relay_draft.trim().to_string();
+        if !url.starts_with("ws://") && !url.starts_with("wss://") {
+            return;
+        }
+        // a URL needs somewhere to connect to after the scheme
+        if url.len() <= "ws://".len() {
+            return;
+        }
+        let already = self.relay_urls_for(target, &self.settings.get());
+        if already.iter().any(|listed| listed == &url) {
+            self.relay_draft.clear();
+            self.relay_cursor = 0;
+            self.relay_anchor = None;
+            cx.notify();
+            return;
+        }
+        self.edit_settings(
+            |settings| match target {
+                RelayTarget::Events => settings.event_relays.push(url.clone()),
+                RelayTarget::Social => settings.social_relays.push(url.clone()),
+            },
+            cx,
+        );
+        self.relay_draft.clear();
+        self.relay_cursor = 0;
+        self.relay_anchor = None;
+        cx.notify();
+    }
+
+    fn remove_relay(&mut self, target: RelayTarget, index: usize, cx: &mut Context<Self>) {
+        self.edit_settings(
+            |settings| match target {
+                RelayTarget::Events => {
+                    if index < settings.event_relays.len() {
+                        settings.event_relays.remove(index);
+                    }
+                }
+                RelayTarget::Social => {
+                    if index < settings.social_relays.len() {
+                        settings.social_relays.remove(index);
+                    }
+                }
+            },
+            cx,
+        );
+    }
+
+    /// Back to the built-in set: an empty list means the rendezvous
+    /// default (or the environment override, which always wins).
+    fn reset_relays(&mut self, target: RelayTarget, cx: &mut Context<Self>) {
+        self.edit_settings(
+            |settings| match target {
+                RelayTarget::Events => settings.event_relays.clear(),
+                RelayTarget::Social => settings.social_relays.clear(),
+            },
+            cx,
+        );
+        if self.relay_target == Some(target) {
+            self.relay_draft.clear();
+            self.relay_cursor = 0;
+            self.relay_anchor = None;
+        }
+    }
+
+    /// Keyboard editing for the relay draft: one line, like the
+    /// search box but self-contained. Byte indices like the search's;
+    /// backspace and delete walk to a char boundary first so a
+    /// multi-byte paste cannot split.
+    fn move_relay_cursor(&mut self, key: &str, _extend: bool) {
+        let len = self.relay_draft.len();
+        match key {
+            "left" => {
+                self.relay_cursor = self.prev_boundary(self.relay_cursor);
+            }
+            "right" => {
+                let mut cursor = (self.relay_cursor + 1).min(len);
+                while cursor < len && !self.relay_draft.is_char_boundary(cursor) {
+                    cursor += 1;
+                }
+                self.relay_cursor = cursor;
+            }
+            "home" => self.relay_cursor = 0,
+            "end" => self.relay_cursor = len,
+            "backspace" => {
+                if self.relay_cursor > 0 {
+                    let cursor = self.prev_boundary(self.relay_cursor);
+                    self.relay_draft.remove(cursor);
+                    self.relay_cursor = cursor;
+                }
+            }
+            "delete" => {
+                if self.relay_cursor < len {
+                    let mut end = self.relay_cursor + 1;
+                    while end < len && !self.relay_draft.is_char_boundary(end) {
+                        end += 1;
+                    }
+                    self.relay_draft.replace_range(self.relay_cursor..end, "");
+                }
+            }
+            _ => {}
+        }
+        self.relay_anchor = None;
+    }
+
+    /// The previous char boundary at or before `from`.
+    fn prev_boundary(&self, from: usize) -> usize {
+        let mut cursor = from.saturating_sub(1);
+        while cursor > 0 && !self.relay_draft.is_char_boundary(cursor) {
+            cursor -= 1;
+        }
+        cursor
+    }
+
+    /// The draft's selection range, ordered.
+    fn relay_selection(&self) -> (usize, usize) {
+        match self.relay_anchor {
+            Some(anchor) if anchor <= self.relay_cursor => (anchor, self.relay_cursor),
+            Some(anchor) => (self.relay_cursor, anchor),
+            None => (self.relay_cursor, self.relay_cursor),
+        }
+    }
+
+    fn insert_relay_text(&mut self, text: &str) {
+        // a selection collapses into the insert
+        let (start, end) = match self.relay_anchor {
+            Some(anchor) => {
+                let (start, end) = if anchor <= self.relay_cursor {
+                    (anchor, self.relay_cursor)
+                } else {
+                    (self.relay_cursor, anchor)
+                };
+                self.relay_anchor = None;
+                (start.min(self.relay_draft.len()), end.min(self.relay_draft.len()))
+            }
+            None => (self.relay_cursor, self.relay_cursor),
+        };
+        self.relay_draft.replace_range(start..end, text);
+        self.relay_cursor = start + text.len();
+    }
+
+    /// Drop every cached image and forget the fetched map: pages fall
+    /// back to placeholders until (and unless) images are re-enabled.
+    fn clear_image_cache(&mut self, cx: &mut Context<Self>) {
+        self.fetched.clear();
+        self.fetching.clear();
+        cx.background_executor()
+            .spawn(async move { crate::cache::clear_images() })
+            .detach();
+        cx.notify();
+    }
+
+    /// Drop absorbed events through indexd: the feed empties, the
+    /// disk cache empties on the writer's next tick, and the relay
+    /// threads re-subscribe and re-deliver. The Orchard channel
+    /// refills from the relays within seconds.
+    fn clear_event_cache(&mut self, cx: &mut Context<Self>) {
+        cx.background_executor()
+            .spawn(async move {
+                let agent = ureq::AgentBuilder::new()
+                    .timeout(std::time::Duration::from_secs(5))
+                    .build();
+                let _ = agent
+                    .post(&format!("http://127.0.0.1:{INDEXD_PORT}/v1/cache"))
+                    .call();
+            })
+            .detach();
+        cx.notify();
+    }
+
+
     /// Start a background fetch for each not-yet-cached url. Results
     /// land in `fetched` and notify.
     fn ensure_fetched(&mut self, urls: Vec<String>, cx: &mut Context<Self>) {
+        // the remote-images setting is consulted per call, so turning
+        // it on applies to the next render pass with no restart
+        if !self.settings.get().remote_images {
+            return;
+        }
         let mut todo = Vec::new();
         for url in urls {
             if self.fetched.contains_key(&url) || self.fetching.contains(&url) {
@@ -1621,6 +1976,53 @@ impl StoreRoot {
         // rule eats the keystroke
         if self.page_open && key == "r" && !ctrl {
             self.start_review(cx);
+            cx.notify();
+            return;
+        }
+
+        // ----- settings page: the relay draft is the text surface;
+        // Escape backs out to the list -----
+        if self.settings_open {
+            match key {
+                "escape" => self.close_settings(cx),
+                "left" | "right" | "home" | "end" | "backspace" | "delete" => {
+                    self.move_relay_cursor(key, shift);
+                }
+                "a" if ctrl => {
+                    self.relay_anchor = Some(0);
+                    self.relay_cursor = self.relay_draft.len();
+                }
+                "c" if ctrl => {
+                    let (start, end) = self.relay_selection();
+                    if start != end {
+                        cx.write_to_clipboard(ClipboardItem::new_string(
+                            self.relay_draft[start..end].to_string(),
+                        ));
+                    }
+                }
+                "x" if ctrl => {
+                    let (start, end) = self.relay_selection();
+                    if start != end {
+                        cx.write_to_clipboard(ClipboardItem::new_string(
+                            self.relay_draft[start..end].to_string(),
+                        ));
+                        self.insert_relay_text("");
+                    }
+                }
+                "v" if ctrl => {
+                    if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                        // a pasted URL may carry whitespace or a newline
+                        let pasted: String = text.split_whitespace().collect();
+                        self.insert_relay_text(&pasted);
+                    }
+                }
+                "enter" => self.add_relay_from_draft(cx),
+                "space" => self.insert_relay_text(" "),
+                other if other.chars().count() == 1 && !ctrl => {
+                    self.insert_relay_text(&Self::produced_char(keystroke));
+                }
+                _ => {}
+            }
             cx.notify();
             return;
         }
@@ -3944,9 +4346,11 @@ impl Render for StoreRoot {
                     .child(self.render_channel_trigger(filter, cx))
                     .child(self.render_account_trigger(cx)),
             )
-            // body: browse (category chips + virtualized list) or the
-            // full app page
-            .child(if page_open {
+            // body: settings, the full app page, or browse (category
+            // chips + virtualized list)
+            .child(if self.settings_open {
+                self.render_settings(window.text_style().font(), cx)
+            } else if page_open {
                 match selected {
                     Some(app) => self.render_page(app, window.text_style().font(), cx).into_any_element(),
                     None => self.render_browse(cx),
@@ -4105,6 +4509,8 @@ impl StoreRoot {
                 |_e: &MouseDownEvent, _w, cx: &mut gpui::App| cx.stop_propagation(),
             )
             .children(
+                // a hidden source loses its menu entry: the visibility
+                // switch governs the dropdown too, not just the rows
                 [
                     Filter::All,
                     Filter::Reviewed,
@@ -4112,6 +4518,11 @@ impl StoreRoot {
                     Filter::Installed,
                 ]
                 .iter()
+                .filter(|f| match f {
+                    Filter::Reviewed => self.settings.get().flathub_source,
+                    Filter::Publisher => self.settings.get().orchard_source,
+                    _ => true,
+                })
                 .map(|f| {
                     let active = *f == self.filter;
                     div()
@@ -4203,6 +4614,20 @@ impl StoreRoot {
             )
             .child(
                 div()
+                    .id("account-settings")
+                    .px_3()
+                    .py_1()
+                    .cursor_pointer()
+                    .text_size(px(ui::TEXT_SIZE))
+                    .text_color(ui::text())
+                    .hover(|style| style.bg(ui::surface()))
+                    .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
+                        this.open_settings(cx);
+                    }))
+                    .child("Settings"),
+            )
+            .child(
+                div()
                     .id("account-sign-out")
                     .px_3()
                     .py_1()
@@ -4214,6 +4639,578 @@ impl StoreRoot {
                         this.sign_out(cx);
                     }))
                     .child("Sign out"),
+            )
+            .into_any_element()
+    }
+
+    // ----- settings page -----
+
+    /// A section header: the page's card label, the detail page's
+    /// pattern (icon, medium text).
+    fn settings_section(
+        &self,
+        glyph: &'static str,
+        title: &str,
+        body: gpui::AnyElement,
+    ) -> gpui::Div {
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .w_full()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .text_size(px(ui::TEXT_SIZE_EMPHASIS - 1.))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(ui::text())
+                    .child(ui::icon(glyph, 13., ui::text()))
+                    .child(title.to_string()),
+            )
+            .child(body)
+    }
+
+    /// A settings row: label and note left, control right.
+    fn settings_row(
+        &self,
+        label: &str,
+        note: &str,
+        control: impl IntoElement,
+    ) -> gpui::Div {
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_4()
+            .px_3()
+            .py_2()
+            .rounded_sm()
+            .bg(ui::panel())
+            .border_1()
+            .border_color(ui::divider())
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .text_size(px(ui::TEXT_SIZE))
+                            .text_color(ui::text())
+                            .child(label.to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(ui::TEXT_SIZE_SMALL))
+                            .text_color(ui::text_dim())
+                            .child(note.to_string()),
+                    ),
+            )
+            .child(control)
+    }
+
+    /// A segmented control: the options as chips, the active one in
+    /// accent, matching the filter chips.
+    fn settings_segmented(
+        &self,
+        prefix: &'static str,
+        options: &[(&'static str, &'static str)],
+        active: &str,
+        on_pick: impl Fn(&mut Self, &'static str, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let on_pick = std::sync::Arc::new(on_pick);
+        div()
+            .flex()
+            .flex_none()
+            .gap_1()
+            .children(options.iter().map(|(name, label)| {
+                let (name, label) = (*name, *label);
+                let active = name == active;
+                let id = SharedString::from(format!("settings-{prefix}-{name}"));
+                let on_pick = std::sync::Arc::clone(&on_pick);
+                div()
+                    .id(id)
+                    .px_2()
+                    .py_0p5()
+                    .rounded_sm()
+                    .text_size(px(ui::TEXT_SIZE_SMALL))
+                    .cursor_pointer()
+                    .when(active, |chip| {
+                        chip.bg(ui::accent())
+                            .text_color(ui::accent_fg())
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                    })
+                    .when(!active, |chip| {
+                        chip.bg(ui::surface())
+                            .border_1()
+                            .border_color(ui::divider())
+                            .text_color(ui::text_dim())
+                            .hover(|style| style.text_color(ui::text()).bg(ui::surface_hover()))
+                    })
+                    .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
+                        on_pick(this, name, cx);
+                    }))
+                    .child(label.to_string())
+            }))
+    }
+
+    /// One relay group editor: the URL rows, an add input, reset.
+    /// Edits persist immediately and reach the relay threads within a
+    /// second; no restart note needed, because there is no restart.
+    fn render_relay_group(
+        &mut self,
+        target: RelayTarget,
+        title: &str,
+        note: &str,
+        env: Option<String>,
+        font: gpui::Font,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let settings = self.settings.get();
+        let urls = self.relay_urls_for(target, &settings);
+        let defaults = orchard_nostr::relay::relay_urls(None);
+        let focused = self.relay_target == Some(target);
+        let slot = match target {
+            RelayTarget::Events => 0,
+            RelayTarget::Social => 1,
+        };
+        let group_id = format!("relay-group-{}", slot);
+
+        // the input: draft when this group has the keyboard, the
+        // placeholder otherwise. The caret queries last frame's layout
+        // (measured by now); the fresh layout is stored for next frame.
+        let show_draft = focused;
+        let draft_text = if show_draft {
+            self.relay_draft.clone()
+        } else {
+            String::new()
+        };
+        let placeholder = draft_text.is_empty();
+        let mut styled = StyledText::new(if placeholder {
+            "wss://relay.example".to_string()
+        } else {
+            draft_text.clone()
+        });
+        if placeholder {
+            styled = styled.with_runs(vec![TextRun {
+                len: "wss://relay.example".len(),
+                font: font.clone(),
+                color: ui::text_dim().into(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            }]);
+        } else {
+            let (start, end) = self.relay_selection();
+            let plain: Hsla = ui::text().into();
+            let mut highlighted: Hsla = ui::accent().into();
+            highlighted.a = 0.35;
+            let make_run = |len: usize, bg: Option<Hsla>| TextRun {
+                len,
+                font: font.clone(),
+                color: plain,
+                background_color: bg,
+                underline: None,
+                strikethrough: None,
+            };
+            let mut runs: Vec<TextRun> = Vec::new();
+            if start > 0 {
+                runs.push(make_run(start, None));
+            }
+            if end > start {
+                runs.push(make_run(end - start, Some(highlighted)));
+            }
+            if end < draft_text.len() {
+                runs.push(make_run(draft_text.len() - end, None));
+            }
+            if !runs.is_empty() {
+                styled = styled.with_runs(runs);
+            }
+        }
+        let live_layout = styled.layout().clone();
+        let prev_layout = self.relay_layouts[slot].clone();
+        if show_draft && !placeholder {
+            self.relay_layouts[slot] = Some(live_layout.clone());
+        }
+        let caret_x = if !show_draft || placeholder {
+            None
+        } else {
+            prev_layout.and_then(|layout| {
+                layout
+                    .position_for_index(self.relay_cursor.min(draft_text.len()))
+                    .map(|pos| pos.x - layout.bounds().origin.x)
+            })
+        };
+
+        let rows = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .children(urls.iter().enumerate().map(|(index, url)| {
+                let is_default = defaults.contains(url);
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .bg(ui::surface())
+                    .border_1()
+                    .border_color(ui::divider())
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_size(px(ui::TEXT_SIZE))
+                                    .text_color(ui::text())
+                                    .child(url.clone()),
+                            )
+                            .children(is_default.then(|| {
+                                ui::badge("default", ui::text_dim()).into_any_element()
+                            })),
+                    )
+                    .child(
+                        ui::small_button(
+                            SharedString::from(format!("{group_id}-remove-{index}")),
+                            Some("icons/trash.svg"),
+                            "",
+                            false,
+                        )
+                        .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
+                            this.remove_relay(target, index, cx);
+                        })),
+                    )
+            }));
+
+        let input = div()
+            .id(SharedString::from(format!("{group_id}-input")))
+            .flex_1()
+            .min_w_0()
+            .relative()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .bg(ui::surface())
+            .border_1()
+            .border_color(if focused {
+                ui::accent()
+            } else {
+                ui::divider()
+            })
+            .text_size(px(ui::TEXT_SIZE))
+            .cursor_pointer()
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _e: &MouseDownEvent, _w, cx| {
+                if this.relay_target != Some(target) {
+                    this.relay_target = Some(target);
+                    this.relay_draft.clear();
+                    this.relay_cursor = 0;
+                    this.relay_anchor = None;
+                    cx.notify();
+                }
+            }))
+            .child(styled)
+            .children(caret_x.map(|x| {
+                div()
+                    .absolute()
+                    .top(px(2.))
+                    .left(x)
+                    .w(px(1.5))
+                    .h(px(14.))
+                    .bg(ui::accent())
+            }));
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_1p5()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(px(ui::TEXT_SIZE))
+                            .text_color(ui::text())
+                            .child(title.to_string()),
+                    )
+                    .child(
+                        ui::small_button(
+                            SharedString::from(format!("{group_id}-reset")),
+                            None,
+                            "Use built-in set",
+                            false,
+                        )
+                        .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
+                            this.reset_relays(target, cx);
+                        })),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(px(ui::TEXT_SIZE_SMALL))
+                    .text_color(ui::text_dim())
+                    .child(note.to_string()),
+            )
+            .child(rows)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(input)
+                    .child(
+                        ui::small_button(
+                            SharedString::from(format!("{group_id}-add")),
+                            Some("icons/plus.svg"),
+                            "Add",
+                            false,
+                        )
+                        .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
+                            this.relay_target = Some(target);
+                            this.add_relay_from_draft(cx);
+                        })),
+                    ),
+            )
+            .children(env.map(|variable| {
+                div()
+                    .text_size(px(ui::TEXT_SIZE_SMALL))
+                    .text_color(ui::text_dim())
+                    .child(format!(
+                        "The ORCHARD_{variable} environment variable overrides this list while it is set."
+                    ))
+            }))
+    }
+
+    /// The settings page: sources, relays, update cadence, privacy.
+    /// Every control writes through the shared handle: persistence is
+    /// immediate, and the embedded indexd and the client pick changes
+    /// up live, no restart.
+    fn render_settings(&mut self, font: gpui::Font, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let settings = self.settings.get();
+        let env_events = std::env::var("ORCHARD_RELAYS")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let env_social = std::env::var("ORCHARD_SOCIAL_RELAYS")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let image_bytes = crate::cache::image_cache_bytes();
+        let event_bytes = crate::cache::event_cache_bytes();
+
+        let sources_body = div()
+            .flex()
+            .flex_col()
+            .gap_1p5()
+            .child(self.settings_row(
+                "Flathub channel",
+                "Reviewed, curated apps from flathub.org.",
+                div()
+                    .id("settings-source-flathub")
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
+                        let visible = !this.settings.get().flathub_source;
+                        this.set_source_visible(true, visible, cx);
+                    }))
+                    .child(ui::toggle_pill(settings.flathub_source)),
+            ))
+            .child(self.settings_row(
+                "Orchard channel",
+                "Publisher-signed apps from the Nostr catalog.",
+                div()
+                    .id("settings-source-orchard")
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
+                        let visible = !this.settings.get().orchard_source;
+                        this.set_source_visible(false, visible, cx);
+                    }))
+                    .child(ui::toggle_pill(settings.orchard_source)),
+            ))
+            .child(self.settings_row(
+                "Opens on",
+                "The channel the store starts on.",
+                self.settings_segmented(
+                    "default-channel",
+                    &[
+                        ("all", "All"),
+                        ("flathub", "Flathub"),
+                        ("orchard", "Orchard"),
+                        ("installed", "Installed"),
+                    ],
+                    &settings.default_channel,
+                    |this, name, cx| {
+                        this.edit_settings(|s| s.default_channel = name.to_string(), cx);
+                    },
+                    cx,
+                ),
+            ));
+
+        let relays_body = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(self.render_relay_group(
+                RelayTarget::Events,
+                "Catalog relays",
+                "Where publisher listings, releases, and reviews are read from. Empty: the built-in rendezvous set.",
+                env_events,
+                font.clone(),
+                cx,
+            ))
+            .child(self.render_relay_group(
+                RelayTarget::Social,
+                "Profile relays",
+                "Where reviewer names, avatars, and contact lists come from. Empty: the built-in rendezvous set.",
+                env_social,
+                font.clone(),
+                cx,
+            ));
+
+        let updates_body = div().flex().flex_col().gap_1p5().child(self.settings_row(
+            "Check for updates",
+            "How often installed apps are compared with their channel's newest version.",
+            self.settings_segmented(
+                "update-checks",
+                &[
+                    ("off", "Off"),
+                    ("launch", "On launch"),
+                    ("hourly", "Hourly"),
+                    ("daily", "Daily"),
+                ],
+                &settings.update_checks,
+                |this, name, cx| {
+                    this.edit_settings(|s| s.update_checks = name.to_string(), cx);
+                },
+                cx,
+            ),
+        ));
+
+        let privacy_body = div().flex().flex_col().gap_1p5().child(self.settings_row(
+            "Load remote images",
+            "Fetch publisher-hosted icons and screenshots. Off: placeholders only.",
+            div()
+                .id("settings-remote-images")
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
+                    let visible = !this.settings.get().remote_images;
+                    this.edit_settings(|s| s.remote_images = visible, cx);
+                    if !visible {
+                        // already-rendered images drop to placeholders
+                        this.fetched.clear();
+                        this.fetching.clear();
+                    }
+                    cx.notify();
+                }))
+                .child(ui::toggle_pill(settings.remote_images)),
+        ));
+
+        let image_note = format!("{} on disk.", human_size(image_bytes));
+        let event_note = format!(
+            "{} on disk; the relays refill them.",
+            human_size(event_bytes)
+        );
+
+        div()
+            .id("settings-scroll")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&self.settings_scroll)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .max_w(px(640.))
+                    .mx_auto()
+                    .py_4()
+                    .px_4()
+                    // the page header: title plus the way out, since
+                    // the keyboard is the primary navigation here
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_size(px(ui::TEXT_SIZE_EMPHASIS + 2.))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(ui::text())
+                                    .child("Settings"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(ui::TEXT_SIZE_SMALL))
+                                    .text_color(ui::text_dim())
+                                    .child("Escape backs out; every change applies now"),
+                            ),
+                    )
+                    .child(self.settings_section(
+                        "icons/sprout.svg",
+                        "Sources",
+                        sources_body.into_any_element(),
+                    ))
+                    .child(self.settings_section(
+                        "icons/globe.svg",
+                        "Relays",
+                        relays_body.into_any_element(),
+                    ))
+                    .child(self.settings_section(
+                        "icons/update.svg",
+                        "Updates",
+                        updates_body.into_any_element(),
+                    ))
+                    .child(self.settings_section(
+                        "icons/shield.svg",
+                        "Privacy",
+                        privacy_body.into_any_element(),
+                    ))
+                    .child(self.settings_section(
+                        "icons/trash.svg",
+                        "Cached data",
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1p5()
+                            .child(self.settings_row(
+                                "Clear cached images",
+                                image_note.as_str(),
+                                ui::small_button(
+                                    "settings-clear-images",
+                                    None,
+                                    "Clear",
+                                    false,
+                                )
+                                .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
+                                    this.clear_image_cache(cx);
+                                })),
+                            ))
+                            .child(self.settings_row(
+                                "Clear cached events",
+                                event_note.as_str(),
+                                ui::small_button(
+                                    "settings-clear-events",
+                                    None,
+                                    "Clear",
+                                    false,
+                                )
+                                .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
+                                    this.clear_event_cache(cx);
+                                })),
+                            ))
+                            .into_any_element(),
+                    )),
             )
             .into_any_element()
     }

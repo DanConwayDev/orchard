@@ -9,11 +9,13 @@ pub mod appstream;
 pub mod model;
 pub mod oci;
 pub mod permissions;
+pub mod settings;
 
 pub use appstream::*;
 pub use model::*;
 pub use oci::*;
 pub use permissions::*;
+pub use settings::{Settings, SettingsHandle};
 
 /// The platform tag of the machine we run on, e.g. `linux-x86_64`.
 /// This is the resolution key for releases and assets: a listing may
