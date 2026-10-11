@@ -136,6 +136,9 @@ pub struct StoreRoot {
     profiles: std::collections::BTreeMap<String, ProfileBits>,
     /// A profiles fetch in flight.
     profiles_fetching: bool,
+    /// The signed-in identity's own social-relay profile fetch in
+    /// flight (one per session; stops once the profile lands).
+    own_profile_fetching: bool,
     /// The reviews list is collapsed by default; the header toggles it.
     reviews_expanded: bool,
     /// The signed-in reviewer: a NIP-46 session (the remote signer's
@@ -229,6 +232,7 @@ impl StoreRoot {
             graph_fetching: false,
             profiles: Default::default(),
             profiles_fetching: false,
+            own_profile_fetching: false,
             reviews_expanded: false,
             reviewer: load_reviewer(),
             signin_modal: false,
@@ -280,6 +284,7 @@ impl StoreRoot {
                 // circle right away, not on the first tick
                 if this.reviewer.is_some() {
                     this.ensure_follows(cx);
+                    this.ensure_own_profile(cx);
                 }
             });
         })
@@ -310,6 +315,9 @@ impl StoreRoot {
                     // a restored session picks its circle up here
                     if this.reviewer.is_some() && this.follows.is_empty() {
                         this.ensure_follows(cx);
+                    }
+                    if this.reviewer.is_some() {
+                        this.ensure_own_profile(cx);
                     }
                 });
             }
@@ -654,13 +662,56 @@ impl StoreRoot {
                 this.profiles_fetching = false;
                 match fetched {
                     Ok(profiles) => {
-                        this.profiles = profiles;
+                        // merge, not replace: the signed-in identity's
+                        // own profile (fetched from the social relays,
+                        // which indexd need not share) must survive
+                        for (pubkey, bits) in profiles {
+                            this.profiles.insert(pubkey, bits);
+                        }
                         cx.notify();
                     }
                     Err(err) => {
                         // keep the old profiles; the next tick retries
                         eprintln!("profiles fetch failed: {err:#}");
                     }
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// The signed-in identity's own profile, fetched read-only and
+    /// anonymously from the social relays: indexd only holds profiles
+    /// its catalog relays carried, and the dev relay never sees the
+    /// user's kind 0. Lands in the same profiles map the account
+    /// trigger and "Signed in as" read.
+    fn ensure_own_profile(&mut self, cx: &mut Context<Self>) {
+        let Some(reviewer) = self.reviewer.as_ref() else {
+            return;
+        };
+        let pubkey = reviewer.signer_pubkey.clone();
+        if self.own_profile_fetching || self.profiles.contains_key(&pubkey) {
+            return;
+        }
+        self.own_profile_fetching = true;
+        let key = pubkey.clone();
+        cx.spawn(async move |this, cx| {
+            let bits = cx
+                .background_executor()
+                .spawn(async move { load_own_profile(&key) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.own_profile_fetching = false;
+                if let Some(bits) = bits {
+                    // the name shows up in "Signed in as" even when
+                    // indexd's feed never carried the profile
+                    if let Some(reviewer) = this.reviewer.as_mut() {
+                        if reviewer.signer_pubkey == pubkey && reviewer.name.is_none() {
+                            reviewer.name = bits.name.clone();
+                        }
+                    }
+                    this.profiles.insert(pubkey, bits);
+                    cx.notify();
                 }
             });
         })
@@ -1021,6 +1072,7 @@ impl StoreRoot {
                         // name once the profile propagates
                         this.ensure_reviews(cx);
                         this.ensure_follows(cx);
+                        this.ensure_own_profile(cx);
                     }
                     // keep the pairing: the name question stays up with
                     // the error under it, so the user can retry
@@ -4057,6 +4109,21 @@ fn load_profiles() -> anyhow::Result<std::collections::BTreeMap<String, ProfileB
         .into_iter()
         .map(|(pubkey, raw)| (pubkey, ProfileBits::parse(&raw)))
         .collect())
+}
+
+/// The signed-in identity's own kind 0 from the social relays: the
+/// first relay that answers. None when no relay has one. Blocking:
+/// runs on the background pool.
+fn load_own_profile(pubkey: &str) -> Option<ProfileBits> {
+    let timeout = std::time::Duration::from_secs(5);
+    for relay in social_relays() {
+        match orchard_nostr::relay::fetch_profile_raw(&relay, pubkey, timeout) {
+            Ok(Some(raw)) => return Some(ProfileBits::parse(&raw)),
+            Ok(None) => {}
+            Err(err) => eprintln!("own profile: {relay}: {err:#}"),
+        }
+    }
+    None
 }
 
 /// Sign and send one review event through the signer, then publish it

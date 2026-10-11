@@ -163,28 +163,27 @@ pub fn send(relay_url: &str, events: &[Event]) -> Result<()> {    let (mut socke
     Ok(())
 }
 
-/// One read-only, anonymous query for many keys' kind 3 contact
-/// lists in a single REQ: connect, REQ (kinds [3], authors [...]),
-/// read until EOSE or the deadline, keep the newest event per author,
-/// return one `(pubkey, followed pubkeys)` pair per author with an
-/// event on the relay. Blocking with a hard deadline; run on a worker
-/// thread. The fetch carries only the keys: no read receipt, no
-/// profile exposure.
-pub fn fetch_contact_lists(
+/// One read-only, anonymous query for many keys' events of one kind
+/// in a single REQ: connect, REQ (kinds [kind], authors [...]), read
+/// until EOSE or the deadline, keep the newest event per author.
+/// Blocking with a hard deadline; run on a worker thread. The fetch
+/// carries only the keys: no read receipt, no profile exposure.
+fn fetch_newest(
     relay_url: &str,
+    kind: Kind,
     pubkeys: &[String],
     timeout: Duration,
-) -> Result<Vec<(String, Vec<String>)>> {
+) -> Result<Vec<Event>> {
     let req = serde_json::json!([
         "REQ",
         "orchard-contacts",
-        { "kinds": [Kind::ContactList], "authors": pubkeys },
+        { "kinds": [kind], "authors": pubkeys },
     ])
     .to_string();
     let (mut socket, _response) = tungstenite::connect(relay_url)?;
     crate::connect::set_read_timeout(&mut socket, timeout);
     socket.send(Message::text(req))?;
-    let mut newest: std::collections::HashMap<String, (u64, Vec<String>)> = Default::default();
+    let mut newest: std::collections::HashMap<String, Event> = Default::default();
     loop {
         let message = match socket.read() {
             Ok(message) => message,
@@ -210,7 +209,7 @@ pub fn fetch_contact_lists(
                             .get(2)
                             .ok_or_else(|| anyhow::anyhow!("EVENT frame without event"))?;
                         let event: Event = serde_json::from_value(raw.clone())?;
-                        absorb_contact_event(&mut newest, &event, pubkeys);
+                        absorb_newest(&mut newest, &event, kind, pubkeys);
                     }
                     Some("EOSE") => break,
                     _ => {}
@@ -221,28 +220,57 @@ pub fn fetch_contact_lists(
             _ => {}
         }
     }
-    Ok(newest
-        .into_iter()
-        .map(|(pubkey, (_, follows))| (pubkey, follows))
-        .collect())
+    Ok(newest.into_values().collect())
 }
 
-/// Newest kind 3 per requested author wins; anything else (other
+/// Newest event per requested author wins; anything else (other
 /// kinds, authors the relay threw in against the filter) is ignored.
-fn absorb_contact_event(
-    newest: &mut std::collections::HashMap<String, (u64, Vec<String>)>,
+fn absorb_newest(
+    newest: &mut std::collections::HashMap<String, Event>,
     event: &Event,
+    kind: Kind,
     pubkeys: &[String],
 ) {
     let pubkey = event.pubkey.to_string();
-    if event.kind != Kind::ContactList || !pubkeys.contains(&pubkey) {
+    if event.kind != kind || !pubkeys.contains(&pubkey) {
         return;
     }
     let created = event.created_at.as_secs();
-    let known = newest.get(&pubkey).map(|(created, _)| *created).unwrap_or(0);
+    let known = newest
+        .get(&pubkey)
+        .map(|event| event.created_at.as_secs())
+        .unwrap_or(0);
     if known <= created {
-        newest.insert(pubkey, (created, contacts_from_event(event)));
+        newest.insert(pubkey, event.clone());
     }
+}
+
+/// One read-only, anonymous query for many keys' kind 3 contact
+/// lists: the newest contact event per author, as `(pubkey, followed
+/// pubkeys)` pairs. Authors with no event come back absent.
+pub fn fetch_contact_lists(
+    relay_url: &str,
+    pubkeys: &[String],
+    timeout: Duration,
+) -> Result<Vec<(String, Vec<String>)>> {
+    Ok(fetch_newest(relay_url, Kind::ContactList, pubkeys, timeout)?
+        .into_iter()
+        .map(|event| (event.pubkey.to_string(), contacts_from_event(&event)))
+        .collect())
+}
+
+/// One read-only, anonymous query for a key's kind 0 profile: the
+/// newest event's metadata JSON, or None when the relay has none.
+/// Blocking with a hard deadline; run on a worker thread.
+pub fn fetch_profile_raw(relay_url: &str, pubkey: &str, timeout: Duration) -> Result<Option<String>> {
+    Ok(fetch_newest(
+        relay_url,
+        Kind::Metadata,
+        &[pubkey.to_string()],
+        timeout,
+    )?
+    .pop()
+    .map(|event| event.content))
 }
 
 /// One read-only, anonymous query for a key's kind 3 contact list:
@@ -306,10 +334,10 @@ mod tests {
     /// The graph crawl's absorb rule: newest kind 3 per requested
     /// author wins; other kinds and unrequested authors never land.
     #[test]
-    fn absorb_contact_event_keeps_newest_per_author() {
+    fn absorb_newest_keeps_newest_per_author() {
         let keys = Keys::generate();
         let other = Keys::generate();
-        let mut requested = [keys.get_public_key().unwrap().to_string()];
+        let requested = [keys.get_public_key().unwrap().to_string()];
         let pk = requested[0].clone();
 
         let old = EventBuilder::new(Kind::ContactList, "")
@@ -335,24 +363,23 @@ mod tests {
             .unwrap();
 
         let mut newest = Default::default();
-        absorb_contact_event(&mut newest, &old, &requested);
-        absorb_contact_event(&mut newest, &new, &requested);
-        absorb_contact_event(&mut newest, &stranger, &requested);
-        absorb_contact_event(&mut newest, &profile, &requested);
+        absorb_newest(&mut newest, &old, Kind::ContactList, &requested);
+        absorb_newest(&mut newest, &new, Kind::ContactList, &requested);
+        absorb_newest(&mut newest, &stranger, Kind::ContactList, &requested);
+        absorb_newest(&mut newest, &profile, Kind::ContactList, &requested);
 
         assert_eq!(newest.len(), 1);
-        let (created, follows) = &newest[&pk];
-        assert_eq!(*created, 200);
-        assert_eq!(follows.len(), 2);
-        assert!(follows[0].starts_with("bbbbbbbb"));
+        let stored = &newest[&pk];
+        assert_eq!(stored.created_at.as_secs(), 200);
+        assert_eq!(contacts_from_event(stored).len(), 2);
 
         // an older event than the stored one cannot win
         let stale = EventBuilder::new(Kind::ContactList, "")
             .custom_created_at(Timestamp::from_secs(150))
             .finalize(&keys)
             .unwrap();
-        absorb_contact_event(&mut newest, &stale, &requested);
-        assert_eq!(newest[&pk].0, 200);
+        absorb_newest(&mut newest, &stale, Kind::ContactList, &requested);
+        assert_eq!(newest[&pk].created_at.as_secs(), 200);
         assert_eq!(requested.len(), 1);
     }
 }
