@@ -2035,6 +2035,13 @@ impl StoreRoot {
                 .items_center()
                 .gap_2()
                 .child(badge("Publisher-verified", ui::accent()))
+                .children(app.publisher.as_ref().map(|pubkey| {
+                    div()
+                        .text_size(px(ui::TEXT_SIZE))
+                        .text_color(ui::text())
+                        .child(format!("Published by {}.", short_npub(pubkey)))
+                }))
+                .children(digest_badge)
                 .children(digest_failed.clone().map(|err| {
                     div()
                         .flex()
@@ -2048,13 +2055,6 @@ impl StoreRoot {
                                 .text_color(ui::risk_color(Risk::High))
                                 .child(err),
                         )
-                }))
-                .children(digest_badge)
-                .children(app.publisher.as_ref().map(|pubkey| {
-                    div()
-                        .text_size(px(ui::TEXT_SIZE))
-                        .text_color(ui::text())
-                        .child(format!("Published by {}.", short_npub(pubkey)))
                 }))
                 .into_any_element(),
         };
@@ -3899,16 +3899,19 @@ impl Reviewer {
     }
 }
 
-/// The identity's fallback display: a truncated npub. The full npub
-/// is the identifier of record; a label is not the place for 63
-/// characters. Unparseable keys keep the hex fragment.
+/// The identity's fallback display: a truncated npub, head and tail
+/// around an ellipsis, the format Nostr users expect, not raw hex.
+/// The full npub is the identifier of record; a label is not the
+/// place for 63 characters. Unparseable keys keep the hex fragment.
 fn short_npub(pubkey: &str) -> String {
     use nostr::nips::nip19::ToBech32 as _;
     let npub = nostr::prelude::PublicKey::from_hex(pubkey)
         .ok()
         .and_then(|key| key.to_bech32().ok());
     match npub {
-        Some(npub) if npub.len() > 14 => format!("{}…", &npub[..14]),
+        Some(npub) if npub.len() > 19 => {
+            format!("{}…{}", &npub[..14], &npub[npub.len() - 4..])
+        }
         Some(npub) => npub,
         None => format!("{}…", &pubkey[..pubkey.len().min(12)]),
     }
@@ -4229,11 +4232,15 @@ mod tests {
 
     #[test]
     fn short_npub_truncates_and_falls_back() {
-        // the demo publisher key, bech32-encoded and cut at 14 chars
+        // the demo publisher key, bech32-encoded, head…tail
         let npub = short_npub("ec2c39e7a8a4c38b9c8b9e3c8f3ab4b09bd0e3b98b6c1b3b0f2e3d4c5b6a7988");
         assert!(npub.starts_with("npub1"));
-        assert!(npub.ends_with('…'));
-        assert_eq!(npub.chars().count(), 15);
+        // the ellipsis sits in the middle, not at the end
+        let mid = npub.find('…').expect("ellipsis");
+        assert_eq!(mid, 14);
+        // head 14 + ellipsis + tail 4, in characters (bytes would
+        // count the ellipsis as three)
+        assert_eq!(npub.chars().count(), 19);
         // garbage keys keep the hex fragment
         assert_eq!(short_npub("not-hex"), "not-hex…");
     }
