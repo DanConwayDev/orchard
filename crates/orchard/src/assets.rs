@@ -18,6 +18,7 @@ impl AssetSource for Assets {
             "icons/plus.svg" => Some(include_bytes!("../icons/plus.svg")),
             "icons/person.svg" => Some(include_bytes!("../icons/person.svg")),
             "icons/search.svg" => Some(include_bytes!("../icons/search.svg")),
+            "icons/check.svg" => Some(include_bytes!("../icons/check.svg")),
             "icons/shield.svg" => Some(include_bytes!("../icons/shield.svg")),
             "icons/sprout.svg" => Some(include_bytes!("../icons/sprout.svg")),
             "icons/trash.svg" => Some(include_bytes!("../icons/trash.svg")),

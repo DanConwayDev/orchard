@@ -2034,7 +2034,23 @@ impl StoreRoot {
                 .flex_wrap()
                 .items_center()
                 .gap_2()
-                .child(badge("Publisher-verified", ui::accent()))
+                // a verified check, not a text badge: the words live
+                // on hover, same rules as the review glyphs
+                .child(
+                    div()
+                        .id("publisher-verified")
+                        .flex_none()
+                        .hover(|style| style.bg(gpui::transparent_black()))
+                        .tooltip(|_window, cx| {
+                            cx.new(|_| {
+                                TextTooltip(
+                                    "Publisher-verified: the release events carry this publisher's signature",
+                                )
+                            })
+                            .into()
+                        })
+                        .child(ui::icon("icons/check.svg", 12., ui::accent())),
+                )
                 .children(app.publisher.as_ref().map(|pubkey| {
                     div()
                         .text_size(px(ui::TEXT_SIZE))
@@ -2131,10 +2147,10 @@ impl StoreRoot {
                                         .and_then(|(download, installed)| {
                                             download
                                                 .clone()
-                                                .map(|size| div().child(format!("· {size} download")))
+                                                .map(|size| div().child(format!("· {size}")))
                                                 .or_else(|| {
                                                     installed.clone().map(|size| {
-                                                        div().child(format!("· {size} installed"))
+                                                        div().child(format!("· {size}"))
                                                     })
                                                 })
                                         }),
