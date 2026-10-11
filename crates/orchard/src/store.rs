@@ -186,6 +186,8 @@ pub struct StoreRoot {
     repo_proofs: std::collections::BTreeMap<String, Option<Vec<String>>>,
     /// Repositories with a proof fetch in flight.
     repo_proof_fetching: Vec<String>,
+    /// The sort dropdown's open state: the click point to anchor at.
+    sort_menu: Option<gpui::Point<gpui::Pixels>>,
     /// The signed-in identity's own social-relay profile fetch in
     /// flight (one per session; stops once the profile lands).
     own_profile_fetching: bool,
@@ -321,6 +323,7 @@ impl StoreRoot {
             nip05_checking: Vec::new(),
             repo_proofs: Default::default(),
             repo_proof_fetching: Vec::new(),
+            sort_menu: None,
             own_profile_fetching: false,
             reviews_expanded: false,
             settings: settings.clone(),
@@ -510,11 +513,29 @@ impl StoreRoot {
             })
             .map(|(ix, _)| ix)
             .collect::<Vec<_>>();
-        // most recently updated first; the file order is alphabetical
-        // by app id, which reads as noise. Undated apps sink, name
-        // breaks ties.
+        // most recently updated first by default; the file order is
+        // alphabetical by app id, which reads as noise. Undated apps
+        // sink, name breaks ties. The user's chosen sort replaces
+        // recency explicitly: a hidden reordering is never ours to
+        // make.
+        let sort = ListSort::from_settings(&settings.sort);
         let today = orchard_core::appstream::today_iso();
-        out.sort_by(|&a, &b| date_order(&self.apps[a], &self.apps[b], &today));
+        let tier = |app: &StoreApp| {
+            if self
+                .repo_verified(app.repository.as_deref().unwrap_or(""), app.publisher.as_deref())
+            {
+                0u8
+            } else if app
+                .publisher
+                .as_deref()
+                .is_some_and(|key| self.follows.contains(key))
+            {
+                1u8
+            } else {
+                2u8
+            }
+        };
+        out.sort_by(|&a, &b| list_sort(&self.apps[a], &self.apps[b], sort, &today, &tier));
         out
     }
 
@@ -1436,6 +1457,7 @@ impl StoreRoot {
     fn open_settings(&mut self, cx: &mut Context<Self>) {
         self.account_menu = None;
         self.channel_menu = None;
+        self.sort_menu = None;
         self.close_signin();
         if self.page_open {
             self.close_page(cx);
@@ -2033,10 +2055,14 @@ impl StoreRoot {
 
         // ----- dropdown menus: an open menu swallows everything but
         // Escape; a click away closes it through the overlay -----
-        if self.channel_menu.is_some() || self.account_menu.is_some() {
+        if self.channel_menu.is_some()
+            || self.account_menu.is_some()
+            || self.sort_menu.is_some()
+        {
             if key == "escape" {
                 self.channel_menu = None;
                 self.account_menu = None;
+                self.sort_menu = None;
                 cx.notify();
             }
             return;
@@ -2560,6 +2586,39 @@ impl StoreRoot {
             .children(self.category_counts().into_iter().map(|(name, _)| {
                 self.category_chip(name, Some(name.to_string()), cx)
             }))
+            // the sort picker: the list order is a chosen option,
+            // persisted like the other view preferences
+            .child(div().flex_1().min_w(px(8.)))
+            .child(
+                div()
+                    .id("sort-trigger")
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .text_size(px(ui::TEXT_SIZE))
+                    .text_color(ui::text())
+                    .hover(|style| style.bg(ui::surface()))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &MouseDownEvent, _w, cx| {
+                            let open = this.sort_menu.is_some();
+                            this.channel_menu = None;
+                            this.account_menu = None;
+                            this.sort_menu = if open { None } else { Some(event.position) };
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    )
+                    .child(format!(
+                        "Sort: {}",
+                        ListSort::from_settings(&self.settings.get().sort).label()
+                    ))
+                    .child(ui::icon("icons/chevron_down.svg", 11., ui::text_dim())),
+            )
             .into_any_element()
     }
 
@@ -4778,6 +4837,9 @@ impl StoreRoot {
         if self.channel_menu.is_some() {
             layers = layers.child(self.render_channel_menu(cx));
         }
+        if self.sort_menu.is_some() {
+            layers = layers.child(self.render_sort_menu(cx));
+        }
         if self.account_menu.is_some() {
             layers = layers.child(self.render_account_menu(cx));
         }
@@ -4792,7 +4854,10 @@ impl StoreRoot {
     /// chain. Any click the content does not stop lands here and
     /// closes the dropdowns.
     fn render_menu_overlays(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        if self.channel_menu.is_none() && self.account_menu.is_none() {
+        if self.channel_menu.is_none()
+            && self.account_menu.is_none()
+            && self.sort_menu.is_none()
+        {
             return None;
         }
         Some(
@@ -4805,11 +4870,59 @@ impl StoreRoot {
                     cx.listener(|this, _e: &MouseDownEvent, _w, cx| {
                         this.channel_menu = None;
                         this.account_menu = None;
+                        this.sort_menu = None;
                         cx.notify();
                     }),
                 )
                 .into_any_element(),
         )
+    }
+
+    /// The sort dropdown: the list order options with the active one
+    /// marked. Same machinery as the channel menu: the panel stops
+    /// mouse down so its clicks survive the behind-everything overlay.
+    fn render_sort_menu(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let anchor = self.sort_menu.unwrap_or_default();
+        let left = (anchor.x - px(60.)).max(px(8.));
+        div()
+            .absolute()
+            .left(left)
+            .top(anchor.y + px(6.))
+            .w(px(180.))
+            .flex()
+            .flex_col()
+            .rounded_sm()
+            .border_1()
+            .border_color(ui::divider())
+            .bg(ui::panel())
+            .py_1()
+            .on_mouse_down(
+                MouseButton::Left,
+                |_e: &MouseDownEvent, _w, cx: &mut gpui::App| cx.stop_propagation(),
+            )
+            .children(ListSort::all().iter().copied().map(|sort| {
+                let active = sort == ListSort::from_settings(&self.settings.get().sort);
+                div()
+                    .id(SharedString::from(format!("sort-item-{}", sort.key())))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px_3()
+                    .py_1()
+                    .cursor_pointer()
+                    .text_size(px(ui::TEXT_SIZE))
+                    .text_color(if active { ui::accent() } else { ui::text() })
+                    .hover(|style| style.bg(ui::surface()))
+                    .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
+                        let key = sort.key();
+                        this.edit_settings(|settings| settings.sort = key.to_string(), cx);
+                        this.sort_menu = None;
+                        cx.notify();
+                    }))
+                    .child(sort.label().to_string())
+                    .children(active.then(|| "✓".to_string()))
+            }))
+            .into_any_element()
     }
 
     /// The channel dropdown: filter options with the active one marked.
@@ -5778,6 +5891,71 @@ fn date_order(a: &StoreApp, b: &StoreApp, today: &str) -> std::cmp::Ordering {
     }
 }
 
+/// The catalog list order, persisted in settings: recency by
+/// default, alphabetical, or the trust lens first. Always a chosen
+/// option, never a hidden reordering: the client curates nothing the
+/// user did not pick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ListSort {
+    Updated,
+    Name,
+    VerifiedFirst,
+}
+
+impl ListSort {
+    fn from_settings(sort: &str) -> Self {
+        match sort {
+            "name" => ListSort::Name,
+            "verified" => ListSort::VerifiedFirst,
+            _ => ListSort::Updated,
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            ListSort::Updated => "Updated",
+            ListSort::Name => "Name",
+            ListSort::VerifiedFirst => "Verified first",
+        }
+    }
+
+    /// The settings-file spelling of this sort.
+    fn key(&self) -> &'static str {
+        match self {
+            ListSort::Updated => "updated",
+            ListSort::Name => "name",
+            ListSort::VerifiedFirst => "verified",
+        }
+    }
+
+    fn all() -> [ListSort; 3] {
+        [ListSort::Updated, ListSort::Name, ListSort::VerifiedFirst]
+    }
+}
+
+/// One catalog list ordering. Recency is the arrived-only date rank;
+/// name is alphabetical; verified puts trust tiers first, recency
+/// inside each tier. `tier` names a row's trust tier, lower first:
+/// repo-verified rows, then rows from followed publishers, then
+/// everything else.
+fn list_sort(
+    a: &StoreApp,
+    b: &StoreApp,
+    sort: ListSort,
+    today: &str,
+    tier: &impl Fn(&StoreApp) -> u8,
+) -> std::cmp::Ordering {
+    match sort {
+        ListSort::Updated => date_order(a, b, today),
+        ListSort::Name => a
+            .name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then_with(|| a.app_id.cmp(&b.app_id)),
+        ListSort::VerifiedFirst => tier(a).cmp(&tier(b)).then_with(|| date_order(a, b, today)),
+    }
+}
+
 fn human_size(bytes: u64) -> String {
     const UNITS: [(&str, u64); 4] = [
         ("GB", 1_000_000_000),
@@ -6436,6 +6614,39 @@ fn update_available(app: &StoreApp, installed: &InstalledInfo) -> bool {
 mod tests {
     use super::*;
     use orchard_core::{CatalogApp, Publisher};
+
+    #[test]
+    fn list_sort_orders_by_each_chosen_key() {
+        use std::cmp::Ordering;
+        let older = dated_app("Beta", Some("2026-01-01"));
+        let newer = dated_app("Alpha", Some("2026-02-01"));
+        // name: alphabetical wins, recency ignored
+        assert_eq!(
+            list_sort(&older, &newer, ListSort::Name, "2026-10-11", &|_| 0),
+            Ordering::Greater
+        );
+        // updated: recency wins, name ignored; the newer app ranks first
+        assert_eq!(
+            list_sort(&older, &newer, ListSort::Updated, "2026-10-11", &|_| 0),
+            Ordering::Greater
+        );
+        // verified first: the trusted tier wins even when older...
+        assert_eq!(
+            list_sort(&older, &newer, ListSort::VerifiedFirst, "2026-10-11", &|app| {
+                if app.name == "Beta" {
+                    0
+                } else {
+                    2
+                }
+            }),
+            Ordering::Less
+        );
+        // ...and recency orders inside one tier: the newer app first
+        assert_eq!(
+            list_sort(&older, &newer, ListSort::VerifiedFirst, "2026-10-11", &|_| 2),
+            Ordering::Greater
+        );
+    }
 
     #[test]
     fn risk_echo_speaks_only_when_it_matters() {

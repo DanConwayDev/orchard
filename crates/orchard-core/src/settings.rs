@@ -20,6 +20,7 @@ impl Default for Settings {
             social_relays: Vec::new(),
             update_checks: "launch".into(),
             remote_images: true,
+            sort: "updated".into(),
         }
     }
 }
@@ -45,6 +46,10 @@ pub struct Settings {
     /// Fetch publisher-hosted images (icons, screenshots) from their
     /// URLs. Off: placeholders only, no contact with publisher hosts.
     pub remote_images: bool,
+    /// The catalog list order: `updated` (recency, arrived-only),
+    /// `name` (alphabetical), or `verified` (trusted rows first,
+    /// recency inside each tier).
+    pub sort: String,
 }
 
 /// The settings plus where they persist. Cloneable; every holder sees
