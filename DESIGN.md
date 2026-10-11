@@ -339,18 +339,21 @@ advertising the real sandbox, `sockets=x11;wayland; shared=network; filesystems=
 a desktop file, the mark as the icon) plus the built binary via `self/assemble.sh`
 becomes the OCI artifact through the ordinary `orchard-publish` path; the manifest in
 `self/orchard.publish.toml` carries version `0.1.0` locally and takes
-`ORCHARD_PUBLISH_VERSION` from the pushed tag in CI. The dry run pushed to the demo
+`ORCHARD_PUBLISH_VERSION` from the pushed tag in CI. The publish relays are
+versioned policy in the manifest (the public relays, so other clients see the
+listing; `--relays` exists for local tests to keep test events off them), and the
+workflow's only secret is the signing key. The dry run pushed to the demo
 registry and signed the events locally: the running client's catalog then listed
 `com.orchard.Orchard 0.1.0` beside Hello, so installing and updating Orchard through
 Orchard is the ordinary install path, exercised on our own artifact. The workflow
 (`.github/workflows/self-publish.yml`) runs on a `v*` tag: podman + the dev image
-build, assemble, `--registry ghcr.io/<owner>/<repo>`, `--relays` from a secret.
-Pushing to a public registry needed the Docker v2 Bearer-token dance in the push
-path: probe `/v2/`, on a 401 challenge parse `realm`/`service`, fetch a token (Basic
-auth from `ORCHARD_REGISTRY_USER`/`ORCHARD_REGISTRY_PASSWORD` when set, anonymous
-otherwise), ride it on every request; registries that never challenge (the demo
-registry) keep the plain path. The GITHUB_TOKEN needs `packages: write`; the ghcr
-package flips public in its settings after the first push.
+build, assemble, `--registry ghcr.io/<owner>/<repo>`. Pushing to a public registry
+needed the Docker v2 Bearer-token dance in the push path: probe `/v2/`, on a 401
+challenge parse `realm`/`service`, fetch a token (Basic auth from
+`ORCHARD_REGISTRY_USER`/`ORCHARD_REGISTRY_PASSWORD` when set, anonymous otherwise),
+ride it on every request; registries that never challenge (the demo registry) keep
+the plain path. The GITHUB_TOKEN needs `packages: write`; the ghcr package flips
+public in its settings after the first push.
 
 **M6: reviews + web of trust; self-distribution.** CI builds Orchard's own `.flatpak`
 bundle; dogfood the update path by updating Orchard through Orchard.

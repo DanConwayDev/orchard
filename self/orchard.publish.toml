@@ -1,10 +1,11 @@
 # Orchard publishing itself: the same path every publisher uses,
 # run on our own artifact. CI runs this on a version tag with
-# ORCHARD_NSEC, the registry, and the relays supplied by flags and
-# env; a local run against the demo registry is the dry run.
+# ORCHARD_NSEC as the only secret; a local run against the demo
+# registry is the dry run, with --relays overriding the public
+# relays below (you never want a test publish landing on them).
 #
 #   ORCHARD_NSEC=<key> orchard-publish self/orchard.publish.toml \
-#     --registry ghcr.io/letdown2491/orchard --relays <wss urls>
+#     --registry ghcr.io/letdown2491/orchard
 
 [app]
 id = "com.orchard.Orchard"
@@ -23,5 +24,5 @@ notes = "First self-hosted release: Orchard installing and updating Orchard thro
 tree = "tree"
 
 [publish]
-relays = ["ws://127.0.0.1:8008"]
+relays = ["wss://relay.primal.net", "wss://nos.lol"]
 tag = "latest"
