@@ -1990,7 +1990,27 @@ impl StoreRoot {
         let digest_badge = if digest_failed.is_none() {
             verified.clone().map(|digest| {
                 let short = &digest[..digest.len().min(12)];
-                badge(&format!("digest {short}"), ui::risk_color(Risk::Low))
+                // the pin itself is the fact; the mechanism lives on
+                // hover. The wrapper carries the hover style (the
+                // repaint trigger) and a unique id (tooltip state
+                // lives under the element's global id), same rules as
+                // the review glyphs.
+                div()
+                    .id("digest-pin")
+                    .flex_none()
+                    .hover(|style| style.bg(gpui::transparent_black()))
+                    .tooltip(|_window, cx| {
+                        cx.new(|_| {
+                            TextTooltip(
+                                "Install requires an exact match to this publisher-signed digest",
+                            )
+                        })
+                        .into()
+                    })
+                    .child(badge(
+                        &format!("digest {short}"),
+                        ui::risk_color(Risk::Low),
+                    ))
             })
         } else {
             None
@@ -2031,13 +2051,10 @@ impl StoreRoot {
                 }))
                 .children(digest_badge)
                 .children(app.publisher.as_ref().map(|pubkey| {
-                    let short = &pubkey[..pubkey.len().min(16)];
                     div()
                         .text_size(px(ui::TEXT_SIZE))
                         .text_color(ui::text())
-                        .child(format!(
-                            "Published by {short}…; the artifact digest is checked before install."
-                        ))
+                        .child(format!("Published by {}.", short_npub(pubkey)))
                 }))
                 .into_any_element(),
         };
