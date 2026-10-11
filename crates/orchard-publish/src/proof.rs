@@ -31,20 +31,21 @@ pub fn github_repo(repository: &str) -> Option<String> {
     Some(format!("{owner}/{repo}"))
 }
 
-/// The proof file: a human header plus the hex keys, one per line.
-/// The client's parser ignores comments and blanks.
-pub fn proof_content(pubkey_hex: &str) -> String {
+/// The proof file: a human header plus the keys, one per line. The
+/// npub form is written (what the UI shows, and bech32 carries a
+/// checksum); the client's parser accepts hex and npub alike.
+pub fn proof_content(pubkey_npub: &str) -> String {
     format!(
         "# Orchard repository proof: this file is read by Orchard clients to\n\
          # verify that the publisher key of a listing naming this repository\n\
-         # controls this repo. Hex pubkeys, one per line.\n\
-         {pubkey_hex}\n"
+         # controls this repo. One key per line (npub or hex).\n\
+         {pubkey_npub}\n"
     )
 }
 
 /// Write the proof file to `owner/repo` with a token that has
 /// `contents:write`. Existing-file updates need the current sha.
-pub fn write_proof(repo: &str, pubkey_hex: &str, token: &str) -> Result<()> {
+pub fn write_proof(repo: &str, pubkey_npub: &str, token: &str) -> Result<()> {
     let api = format!("https://api.github.com/repos/{repo}/contents/orchard.txt");
     let agent = ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(15))
@@ -64,7 +65,7 @@ pub fn write_proof(repo: &str, pubkey_hex: &str, token: &str) -> Result<()> {
 
     let mut body = serde_json::json!({
         "message": "orchard: refresh the publisher proof file",
-        "content": base64(proof_content(pubkey_hex).as_bytes()),
+        "content": base64(proof_content(pubkey_npub).as_bytes()),
     });
     if let Some(sha) = sha {
         body["sha"] = serde_json::json!(sha);
@@ -124,12 +125,16 @@ mod tests {
 
     #[test]
     fn proof_content_carries_the_key_on_its_own_line() {
-        let key = "ab12".repeat(16);
-        let content = proof_content(&key);
+        // the npub the CLI writes: the client's parser takes it
+        // structurally and the client converts through the codec
+        let npub = "npub1wqmqjss4wszcywfjhmgxvjq4jsm3cjsm5u9qk7zqzeuflqhv4cvsdpzmx2";
+        let content = proof_content(npub);
         let key_line = content.lines().last().expect("key line");
-        assert_eq!(key_line, key);
-        // the parser the client runs must accept this file
+        assert_eq!(key_line, npub);
         let parsed = orchard_core::proof::parse_proof_keys(&content);
-        assert_eq!(parsed, Some(vec![key]));
+        assert_eq!(
+            parsed,
+            Some(vec![orchard_core::proof::ProofKey::Npub(npub.to_string())])
+        );
     }
 }

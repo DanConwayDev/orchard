@@ -144,7 +144,12 @@ fn run() -> Result<()> {
         },
     };
     let publisher = keys.get_public_key()?.to_string();
-    println!("publisher {publisher}");
+    use nostr::nips::nip19::ToBech32 as _;
+    let publisher_npub = keys
+        .get_public_key()?
+        .to_bech32()
+        .map_err(|err| anyhow::anyhow!("npub encoding: {err}"))?;
+    println!("publisher {publisher} ({publisher_npub})");
 
     // build
     let out = args
@@ -278,7 +283,7 @@ fn run() -> Result<()> {
                 if token.trim().is_empty() {
                     eprintln!("proof: --prove set but GITHUB_TOKEN is not; the repository {repo} keeps whatever proof it has");
                 } else {
-                    proof::write_proof(&repo, &publisher, token.trim())?;
+                    proof::write_proof(&repo, &publisher_npub, token.trim())?;
                     println!("proof: orchard.txt refreshed at {repo}");
                 }
             }

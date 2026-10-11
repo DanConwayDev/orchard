@@ -6106,14 +6106,29 @@ fn proof_url(repository: &str) -> Option<String> {
     ))
 }
 
-/// Fetch the proof file and parse it through the shared format.
-/// None on any failure. Blocking: runs on the background pool.
+/// Fetch the proof file and parse it through the shared format,
+/// converting every token to the hex form events carry (npub lines
+/// decode through the nostr codec; a broken bech32 string fails its
+/// own checksum and drops out). None on any failure. Blocking: runs
+/// on the background pool.
 fn fetch_proof_keys(url: &str) -> Option<Vec<String>> {
+    use nostr::nips::nip19::FromBech32 as _;
     let agent = ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(5))
         .build();
     let body = agent.get(url).call().ok()?.into_string().ok()?;
-    orchard_core::proof::parse_proof_keys(&body)
+    let keys: Vec<String> = orchard_core::proof::parse_proof_keys(&body)?
+        .into_iter()
+        .filter_map(|token| match token {
+            orchard_core::proof::ProofKey::Hex(hex) => Some(hex),
+            orchard_core::proof::ProofKey::Npub(npub) => nostr::prelude::PublicKey::from_bech32(
+                &npub,
+            )
+            .ok()
+            .map(|key| key.to_string()),
+        })
+        .collect();
+    (!keys.is_empty()).then_some(keys)
 }
 
 /// Sign and send one review event through the signer, then publish it
