@@ -90,6 +90,10 @@ pub struct StoreRoot {
     jobs: HashMap<String, JobState>,
     /// app_id -> verified manifest digest (publisher channel, post-verify).
     verified: HashMap<String, String>,
+    /// The app awaiting an install confirmation: its button reads
+    /// "Sure?" until the second press starts the job, or Escape, page
+    /// close, or another install dismisses it.
+    confirm_install: Option<String>,
     error: Option<String>,
     flathub_loading: bool,
     /// Remote images resolved through the disk cache: url -> path, or
@@ -213,6 +217,7 @@ impl StoreRoot {
             filter: Filter::All,
             selected: None,
             jobs: HashMap::new(),
+            confirm_install: None,
             verified: HashMap::new(),
             error: None,
             flathub_loading: true,
@@ -1143,6 +1148,7 @@ impl StoreRoot {
         self.lightbox = None;
         self.composing = false;
         self.reviews_expanded = false;
+        self.confirm_install = None;
         self.close_signin();
         cx.notify();
     }
@@ -1181,6 +1187,7 @@ impl StoreRoot {
     // ----- actions -----
 
     fn install(&mut self, app_id: &str, cx: &mut Context<Self>) {
+        self.confirm_install = None;
         let Some(app) = self.apps.iter().find(|a| a.app_id == app_id) else {
             return;
         };
@@ -1534,6 +1541,7 @@ impl StoreRoot {
             "escape" => {
                 // back out one level: lightbox, page, then selection,
                 // then text, then row selection
+                self.confirm_install = None;
                 if self.lightbox.is_some() {
                     self.lightbox = None;
                 } else if self.page_open {
@@ -2059,24 +2067,35 @@ impl StoreRoot {
                                 )
                             })
                             .into_any_element(),
-                        None => div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .children(app.version.as_deref().map(|v| badge(v, ui::text_dim())))
-                            .child(
-                                ui::small_button(
-                                    format!("row-install-{action_id}"),
-                                    Some("icons/plus.svg"),
-                                    "Install",
-                                    false,
+                        None => {
+                            // two-press install: the first press arms
+                            // the button, the second starts the job
+                            let confirming = self.confirm_install.as_deref()
+                                == Some(action_id.as_str());
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .children(app.version.as_deref().map(|v| badge(v, ui::text_dim())))
+                                .child(
+                                    ui::small_button(
+                                        format!("row-install-{action_id}"),
+                                        Some("icons/plus.svg"),
+                                        if confirming { "Sure?" } else { "Install" },
+                                        false,
+                                    )
+                                    .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
+                                        cx.stop_propagation();
+                                        if confirming {
+                                            this.install(action_id.as_str(), cx);
+                                        } else {
+                                            this.confirm_install = Some(action_id.clone());
+                                            cx.notify();
+                                        }
+                                    })),
                                 )
-                                .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
-                                    cx.stop_propagation();
-                                    this.install(action_id.as_str(), cx);
-                                })),
-                            )
-                            .into_any_element(),
+                                .into_any_element()
+                        }
                     })
                     .into_any_element()
             })
@@ -2508,18 +2527,31 @@ impl StoreRoot {
                                 );
                             } else {
                                 let install_id = app_id.clone();
-                                let label = if app.source == Source::Publisher {
+                                // two-press install: same idiom as the
+                                // list rows; the label carries the
+                                // publisher flavor until armed
+                                let confirming = self.confirm_install.as_deref()
+                                    == Some(app_id.as_str());
+                                let label = if confirming {
+                                    "Sure?"
+                                } else if app.source == Source::Publisher {
                                     "Verify & install"
                                 } else {
                                     "Install"
                                 };
                                 buttons.push(
                                     button("btn-install", Some("icons/plus.svg"), label, true)
-                                        .on_click(
-                                            cx.listener(move |this, _e: &ClickEvent, _w, cx| {
-                                                this.install(install_id.as_str(), cx);
-                                            }),
-                                        )
+                                        .on_click(cx.listener(
+                                            move |this, _e: &ClickEvent, _w, cx| {
+                                                if confirming {
+                                                    this.install(install_id.as_str(), cx);
+                                                } else {
+                                                    this.confirm_install =
+                                                        Some(install_id.clone());
+                                                    cx.notify();
+                                                }
+                                            },
+                                        ))
                                         .into_any_element(),
                                 );
                             }
@@ -3804,6 +3836,9 @@ impl StoreRoot {
                         .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
                             this.filter = *f;
                             this.channel_menu = None;
+                            // a pending install confirm does not
+                            // survive a channel switch
+                            this.confirm_install = None;
                             cx.notify();
                         }))
                         .child(f.label().to_string())
