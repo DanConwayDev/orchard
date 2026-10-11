@@ -7,7 +7,6 @@
 
 mod assets;
 mod cache;
-mod qr;
 mod store;
 mod ui;
 

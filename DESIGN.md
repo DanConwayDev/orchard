@@ -260,22 +260,24 @@ malformed rating is a hard error like any other protocol violation. indexd serve
 merged document at `/v1/reviews` and the raw kind 0 metadata per pubkey at
 `/v1/profiles`; the client fetches on page open and while a page is open on the
 refresh tick. Posting requires sign-in through NIP-46 Nostr Connect: the client shows
-a modal with a `nostrconnect://` QR (an ephemeral client key, the connect relay, and
-an anti-spoofing secret inside); the user scans it with a signer app, the signer's
-connect response must echo the secret, and from then on every review and profile
-publish is a NIP-44-encrypted `sign_event` request the user approves on their device.
-Pasting a secret key into the client was an earlier draft and is gone: the client
-never sees the identity's key, the remote signer's pubkey is the review identity.
-Publishing a name is proper profile management: the client merges against the
-author's latest kind 0 (`/v1/profiles`) and republishes the whole object through the
-signer, so fields the author already published survive; when indexd cannot answer,
-it publishes nothing rather than guess and says so in the status bar. The pairing
-persists at `$XDG_DATA_HOME/orchard/identity.json` (mode 0600: client key, signer
-pubkey, relay, optional name) and restores the session on launch; sign out ends the
-session but keeps the pairing on the device. The connect channel rides kind 24133
-over the same blocking tungstenite client the relay mirror uses; the connect relay
-must be reachable by both this machine and the signer device. The reviews section is
-collapsed by default; its header (count and one-decimal average, aligned with the
+a modal with the `nostrconnect://` URI in a clickable box (an ephemeral client key,
+the connect relay, and an anti-spoofing secret inside); clicking copies the URI and
+opens it with the desktop's scheme handler, where a signer app takes the pairing.
+The connect channel rides kind 24133 over a public NIP-46 relay
+(`wss://relay.nip46.com`, override with `ORCHARD_CONNECT_RELAY`) so both ends can
+reach it regardless of where the catalog mirrors live. The signer's connect response
+must echo the secret, and from then on every review and profile publish is a
+NIP-44-encrypted `sign_event` request the user approves on their device. Pasting a
+secret key into the client was an earlier draft and is gone: the client never sees
+the identity's key, the remote signer's pubkey is the review identity. Publishing a
+name is proper profile management: the client merges against the author's latest
+kind 0 (`/v1/profiles`) and republishes the whole object through the signer, so
+fields the author already published survive; when indexd cannot answer, it publishes
+nothing rather than guess and says so in the status bar. The pairing persists at
+`$XDG_DATA_HOME/orchard/identity.json` (mode 0600: client key, signer pubkey, relay,
+optional name; `$HOME/.local/share` fallback) and restores the session on launch;
+sign out ends the session but keeps the pairing on the device. The reviews section
+is collapsed by default; its header (count and one-decimal average, aligned with the
 other section headers) toggles it, and rows sit flush with the other page fields.
 Compose is a mode (r, or click "Write a review"): keystrokes go to the draft instead
 of the search box, digits 1 to 5 rate, Enter posts, Escape leaves compose before it
@@ -288,11 +290,11 @@ dropdown (All / Flathub / Orchard / Installed replace the chip row; it stays
 visible on app pages) and the account control ("Sign in" or the reviewer's display
 name). Dropdowns are window-level layers painted after everything: a click-away
 overlay with the panel as a later sibling, anchored at the click point. Sign-in is a
-window-level modal (dimmed backdrop, centered panel, the panel a later sibling of
-the backdrop so its clicks stay put); the QR renders as a hand-encoded PNG
-(qrcodegen plus flate2, no image crate) shown through the same `img()` path the
-screenshots use. Sign-in from the header does not open the review composer; from
-the reviews flow it drops into the composer after the pairing completes.
+window-level modal (dimmed backdrop, centered panel): the panel swallows the mouse
+down (`stop_propagation`) so clicks on it never reach the backdrop's close, a lesson
+the dropdowns never exposed because closing was their click behavior anyway.
+Sign-in from the header does not open the review composer; from the reviews flow it
+drops into the composer after the pairing completes.
 
 **M6: reviews + web of trust; self-distribution.** CI builds Orchard's own `.flatpak`
 bundle; dogfood the update path by updating Orchard through Orchard.

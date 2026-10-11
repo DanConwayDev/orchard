@@ -704,10 +704,7 @@ impl StoreRoot {
         use nostr::nips::nip19::ToBech32 as _;
         use nostr::prelude::*;
         self.review_error = None;
-        let Some(relay) = review_relays().first().cloned() else {
-            self.review_error = Some("No relay configured for the connect channel.".into());
-            return;
-        };
+        let relay = connect_relay();
         let keys = Keys::generate();
         // the anti-spoofing secret: the signer echoes it back in the
         // connect response, a pairing answer without it is noise
@@ -716,18 +713,16 @@ impl StoreRoot {
             .to_bech32()
             .expect("nsec bech32 encoding is infallible");
         let client_pubkey = keys.get_public_key().expect("generated key has a pubkey");
-        let qr_path =
-            match orchard_nostr::connect::connect_uri(&client_pubkey, &relay, "Orchard", &secret)
-                .and_then(|uri| crate::qr::write_qr_png(&uri, &qr_cache_dir()))
-            {
-                Ok(path) => path,
-                Err(err) => {
-                    self.review_error = Some(format!("pairing QR failed: {err:#}"));
-                    return;
-                }
-            };
+        let uri = match orchard_nostr::connect::connect_uri(&client_pubkey, &relay, "Orchard", &secret)
+        {
+            Ok(uri) => uri,
+            Err(err) => {
+                self.review_error = Some(format!("pairing URI failed: {err:#}"));
+                return;
+            }
+        };
         self.connect = Some(ConnectSession {
-            qr_path,
+            uri,
             relay: relay.clone(),
             keys: keys.clone(),
         });
@@ -2500,7 +2495,7 @@ impl StoreRoot {
         section.into_any_element()
     }
 
-    /// The sign-in modal body: the QR pairing while it waits, the
+    /// The sign-in modal body: the pairing code while it waits, the
     /// optional name question once a signer answered. The chrome
     /// (backdrop, centering) is around it in render_signin_modal.
     fn render_signin_modal(&mut self, font: gpui::Font, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -2522,7 +2517,8 @@ impl StoreRoot {
             .items_center()
             .justify_center()
             // the dimmed click-away is a FIRST sibling; the panel after
-            // it wins every click that lands on it
+            // it wins every click that lands on it, and swallows the
+            // mouse down so the backdrop's close never sees it
             .child(
                 div()
                     .id("signin-modal-backdrop")
@@ -2537,20 +2533,26 @@ impl StoreRoot {
                         }),
                     ),
             )
-            .child(body)
+            .child(
+                div().on_mouse_down(
+                    MouseButton::Left,
+                    |_e: &MouseDownEvent, _w, cx: &mut gpui::App| cx.stop_propagation(),
+                ).child(body),
+            )
             .into_any_element()
     }
 
-    /// The pairing panel: QR image, what to do with it, the relay
-    /// both ends must reach, live status, retry and cancel.
+    /// The pairing panel: the nostrconnect URI in a clickable box (the
+    /// signer app opens on click; the URI lands on the clipboard
+    /// either way), a status line, retry.
     fn render_pairing_phase(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(session) = self.connect.as_ref() else {
             return div().into_any_element();
         };
-        let qr = session.qr_path.clone();
-        let relay = session.relay.clone();
+        let uri = session.uri.clone();
+        let uri_for_click = uri.clone();
         let mut panel = div()
-            .w(px(420.))
+            .w(px(440.))
             .flex()
             .flex_col()
             .gap_3()
@@ -2563,29 +2565,39 @@ impl StoreRoot {
                 div()
                     .text_size(px(ui::TEXT_SIZE_EMPHASIS))
                     .text_color(ui::text())
-                    .child("Sign in with your Nostr signer"),
-            )
-            .child(
-                div().flex().justify_center().child(
-                    gpui::img(qr).w(px(260.)).h(px(260.)).rounded_sm(),
-                ),
+                    .child("Sign in"),
             )
             .child(
                 div()
                     .text_size(px(ui::TEXT_SIZE))
                     .text_color(ui::text())
-                    .child(
-                        "Scan with a NIP-46 signer app (Amber, nsec-app, …) and approve \
-                         the sign-in there. Your secret key never enters this app.",
-                    ),
+                    .child("Click the code to pair; your signer app opens."),
             )
             .child(
                 div()
-                    .text_size(px(ui::TEXT_SIZE_LABEL))
+                    .id("connect-uri")
+                    .cursor_pointer()
+                    .w_full()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(ui::divider())
+                    .bg(ui::surface())
+                    .px_3()
+                    .py_2()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_size(px(ui::TEXT_SIZE_SMALL))
                     .text_color(ui::text_dim())
-                    .child(format!(
-                        "Pairing via {relay}; that relay must be reachable from your signer device."
-                    )),
+                    .hover(|style| {
+                        style.text_color(ui::text()).border_color(ui::accent())
+                    })
+                    .on_click(cx.listener(move |_this, _e: &ClickEvent, _w, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                            uri_for_click.clone(),
+                        ));
+                        cx.open_url(&uri_for_click);
+                    }))
+                    .child(uri.clone()),
             )
             .child(
                 div()
@@ -2620,11 +2632,11 @@ impl StoreRoot {
         let input = self.render_text_input(
             "signin-input",
             &text,
-            "Display name (optional, publishes a public profile)",
+            "Display name (optional)",
             font,
         );
         div()
-            .w(px(420.))
+            .w(px(440.))
             .flex()
             .flex_col()
             .gap_3()
@@ -2637,13 +2649,7 @@ impl StoreRoot {
                 div()
                     .text_size(px(ui::TEXT_SIZE_EMPHASIS))
                     .text_color(ui::text())
-                    .child("Signer connected"),
-            )
-            .child(
-                div()
-                    .text_size(px(ui::TEXT_SIZE))
-                    .text_color(ui::text())
-                    .child("Approvals for signing now happen on your device."),
+                    .child("Paired"),
             )
             .child(input)
             .child(
@@ -2659,7 +2665,7 @@ impl StoreRoot {
                 div()
                     .text_size(px(ui::TEXT_SIZE_LABEL))
                     .text_color(ui::text_dim())
-                    .child("Enter confirms; leave the field empty to skip the name."),
+                    .child("Enter confirms. A name publishes a public profile."),
             )
             .children(self.review_error.clone().map(|error| {
                 div()
@@ -3568,12 +3574,12 @@ fn review_relays() -> Vec<String> {
     }
 }
 
-/// A live pairing session: the ephemeral client key, the QR image on
-/// screen, and the relay both ends must reach. The anti-spoofing
+/// A live pairing session: the ephemeral client key, the pairing URI
+/// on screen, and the relay both ends must reach. The anti-spoofing
 /// secret rides in the poll loop that waits for the connect response.
 struct ConnectSession {
     keys: nostr::prelude::Keys,
-    qr_path: std::path::PathBuf,
+    uri: String,
     relay: String,
 }
 
@@ -3678,21 +3684,22 @@ fn send_signed(
 }
 
 fn identity_path() -> Option<std::path::PathBuf> {
-    std::env::var_os("XDG_DATA_HOME").map(|data| {
-        std::path::PathBuf::from(data).join("orchard/identity.json")
+    if let Some(data) = std::env::var_os("XDG_DATA_HOME") {
+        return Some(std::path::PathBuf::from(data).join("orchard/identity.json"));
+    }
+    std::env::var_os("HOME").map(|home| {
+        std::path::PathBuf::from(home).join(".local/share/orchard/identity.json")
     })
 }
 
-/// Where the pairing QR lands: the XDG cache when set, the data
-/// directory otherwise, /tmp last.
-fn qr_cache_dir() -> std::path::PathBuf {
-    if let Some(cache) = std::env::var_os("XDG_CACHE_HOME") {
-        return std::path::PathBuf::from(cache).join("orchard");
+/// The relay the connect channel rides: a public NIP-46 relay, so a
+/// signer app on a phone or another desktop can reach it too.
+/// Override with ORCHARD_CONNECT_RELAY.
+fn connect_relay() -> String {
+    match std::env::var("ORCHARD_CONNECT_RELAY") {
+        Ok(value) if !value.trim().is_empty() => value.trim().to_string(),
+        _ => "wss://relay.nip46.com".to_string(),
     }
-    if let Some(data) = std::env::var_os("XDG_DATA_HOME") {
-        return std::path::PathBuf::from(data).join("orchard/qr");
-    }
-    std::env::temp_dir().join("orchard/qr")
 }
 
 /// Parse `flatpak list --app --columns=application,version,origin,installation`.
