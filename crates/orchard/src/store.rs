@@ -4660,15 +4660,9 @@ fn review_relays() -> Vec<String> {
 /// from (ORCHARD_SOCIAL_RELAYS or a default public set). Read-only,
 /// anonymous: the fetch carries only the key, nothing else.
 fn social_relays() -> Vec<String> {
-    match std::env::var("ORCHARD_SOCIAL_RELAYS") {
-        Ok(value) if !value.trim().is_empty() => value
-            .split(',')
-            .map(str::trim)
-            .filter(|url| !url.is_empty())
-            .map(str::to_string)
-            .collect(),
-        _ => vec!["wss://relay.primal.net".to_string(), "wss://nos.lol".to_string()],
-    }
+    orchard_nostr::relay::social_relay_urls(
+        std::env::var("ORCHARD_SOCIAL_RELAYS").ok().as_deref(),
+    )
 }
 
 /// Read the identity's contact list from every social relay; the

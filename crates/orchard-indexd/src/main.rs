@@ -52,13 +52,16 @@ fn load_catalog() -> anyhow::Result<CatalogFile> {
 /// rendezvous set.
 fn relay_config() -> RelayConfig {
     let urls = orchard_nostr::relay::relay_urls(std::env::var("ORCHARD_RELAYS").ok().as_deref());
+    let social = orchard_nostr::relay::social_relay_urls(
+        std::env::var("ORCHARD_SOCIAL_RELAYS").ok().as_deref(),
+    );
     let cache = std::env::var_os("XDG_DATA_HOME")
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| {
             std::path::PathBuf::from(home).join(".local/share")
         }))
         .map(|data| data.join("orchard/nostr-events.json"));
-    RelayConfig { urls, cache }
+    RelayConfig { urls, social, cache }
 }
 
 #[tokio::main]

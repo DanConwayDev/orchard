@@ -587,6 +587,22 @@ impl Feed {
             .map(|(pubkey, profile)| (pubkey.clone(), profile.event.content.clone()))
             .collect()
     }
+
+    /// The keys whose profiles matter to this store: every listing
+    /// author and every review author. Profiles ride the social
+    /// relays rather than the app relays, so the profile crawler
+    /// asks the social set for these keys' kind 0 events.
+    pub fn crawl_keys(&self) -> Vec<String> {
+        let mut keys: std::collections::BTreeSet<String> = self
+            .listings
+            .keys()
+            .map(|(_, author)| author.clone())
+            .collect();
+        for (pubkey, _) in self.reviews.keys() {
+            keys.insert(pubkey.clone());
+        }
+        keys.into_iter().collect()
+    }
 }
 
 /// When the location embeds its own digest (`docker://…@sha256:…`), it must

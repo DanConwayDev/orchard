@@ -42,9 +42,15 @@ fn start_indexd(catalog: orchard_core::CatalogFile) {
                 document: std::sync::Arc::new(catalog),
             };
             // relay config for the embedded instance: ORCHARD_RELAYS
-            // if set, else the rendezvous set
+            // if set, else the rendezvous set. The social set feeds
+            // the profile crawler: kind 0 lives on the social relays,
+            // so reviewer names resolve even when the app relays
+            // carry none.
             let urls = orchard_nostr::relay::relay_urls(
                 std::env::var("ORCHARD_RELAYS").ok().as_deref(),
+            );
+            let social = orchard_nostr::relay::social_relay_urls(
+                std::env::var("ORCHARD_SOCIAL_RELAYS").ok().as_deref(),
             );
             // the event cache lives beside the other client state:
             // XDG when set, the home fallback otherwise
@@ -55,7 +61,7 @@ fn start_indexd(catalog: orchard_core::CatalogFile) {
                         .map(|home| std::path::PathBuf::from(home).join(".local/share"))
                 })
                 .map(|data| data.join("orchard/nostr-events.json"));
-            let relays = orchard_indexd::RelayConfig { urls, cache };
+            let relays = orchard_indexd::RelayConfig { urls, social, cache };
             if let Err(err) = runtime.block_on(orchard_indexd::serve(addr, state, relays)) {
                 eprintln!("indexd failed: {err:#}");
             }

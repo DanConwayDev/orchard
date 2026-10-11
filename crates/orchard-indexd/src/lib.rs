@@ -179,6 +179,9 @@ pub struct ServerState {
 pub struct RelayConfig {
     /// NIP-01 relay URLs to subscribe to, e.g. `ws://127.0.0.1:8008`.
     pub urls: Vec<String>,
+    /// Social relay URLs for the profile crawler: kind 0 lives on the
+    /// social relays, not here. Empty: no profile crawling.
+    pub social: Vec<String>,
     /// Where to persist verified events across restarts. Absent: no cache.
     pub cache: Option<std::path::PathBuf>,
 }
@@ -198,6 +201,13 @@ const GRAPH_TICK: std::time::Duration = std::time::Duration::from_secs(60);
 const GRAPH_REFRESH: std::time::Duration = std::time::Duration::from_secs(600);
 /// The one-shot REQ deadline per relay.
 const GRAPH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How often the profile crawler wakes to look for new keys.
+const PROFILE_TICK: std::time::Duration = std::time::Duration::from_secs(60);
+/// How stale a crawled profile may get before it is refetched.
+const PROFILE_REFRESH: std::time::Duration = std::time::Duration::from_secs(600);
+/// The one-shot REQ deadline per relay.
+const PROFILE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl GraphStore {
     /// Reviewers to crawl now: in the reviewer set and either never
@@ -276,6 +286,56 @@ fn spawn_graph_crawler(
             }
         })
         .expect("spawning the graph crawler");
+}
+
+/// The profile crawler: kind 0 profiles ride the social relays, not
+/// the app relays, so a store fed only from its app relay (the dev
+/// loop, or a private relay set) never sees reviewers' names without
+/// this. Every tick the crawler asks each social relay, one batched
+/// REQ per relay, for the keys the store cares about and absorbs the
+/// events through the feed's verify path; the feed keeps the newest
+/// per key. Keys are marked before the fetch, so a dead relay backs
+/// off to the refresh window instead of retrying every tick.
+/// Anonymous and read-only, like every fetch here.
+fn spawn_profile_crawler(urls: Vec<String>, feed: Arc<Mutex<orchard_nostr::Feed>>) {
+    std::thread::Builder::new()
+        .name("orchard-profiles".into())
+        .spawn(move || {
+            let mut crawled: std::collections::BTreeMap<String, std::time::Instant> =
+                std::collections::BTreeMap::new();
+            loop {
+                let now = std::time::Instant::now();
+                let pending: Vec<String> = {
+                    let feed = feed.lock().expect("feed lock poisoned");
+                    feed.crawl_keys()
+                }
+                .into_iter()
+                .filter(|key| {
+                    crawled
+                        .get(key)
+                        .is_none_or(|at| now.duration_since(*at) >= PROFILE_REFRESH)
+                })
+                .collect();
+                if !pending.is_empty() {
+                    for key in &pending {
+                        crawled.insert(key.clone(), now);
+                    }
+                    for url in &urls {
+                        match orchard_nostr::relay::fetch_profiles(url, &pending, PROFILE_TIMEOUT) {
+                            Ok(events) => {
+                                let mut feed = feed.lock().expect("feed lock poisoned");
+                                for event in events {
+                                    let _ = feed.absorb(event);
+                                }
+                            }
+                            Err(err) => eprintln!("profiles: {url}: {err:#}"),
+                        }
+                    }
+                }
+                std::thread::sleep(PROFILE_TICK);
+            }
+        })
+        .expect("spawning the profile crawler");
 }
 
 /// Build the axum router for a state.
@@ -365,6 +425,9 @@ pub async fn serve(
         spawn_cache_writer(relays.cache, Arc::clone(&feed));
         let graph = Arc::new(Mutex::new(GraphStore::default()));
         spawn_graph_crawler(relays.urls.clone(), Arc::clone(&feed), Arc::clone(&graph));
+        if !relays.social.is_empty() {
+            spawn_profile_crawler(relays.social.clone(), Arc::clone(&feed));
+        }
         ServerState {
             document: Arc::new(NostrCatalog {
                 base: state.document.document(),

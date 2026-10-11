@@ -43,6 +43,14 @@ pub fn relay_urls(env_value: Option<&str>) -> Vec<String> {
     }
 }
 
+/// The social relay set: where kind 0 profiles and kind 3 contact
+/// lists live. The rendezvous set by default; ORCHARD_SOCIAL_RELAYS
+/// overrides, so a dev loop can point the social graph at a local
+/// relay. Same parsing rules as [`relay_urls`].
+pub fn social_relay_urls(env_value: Option<&str>) -> Vec<String> {
+    relay_urls(env_value)
+}
+
 /// NIP-82 kinds Orchard reads: profiles, listings, releases, assets,
 /// reviews, migrations.
 const SUB_KINDS: [u16; 6] = [
@@ -272,6 +280,19 @@ pub fn fetch_profile_raw(relay_url: &str, pubkey: &str, timeout: Duration) -> Re
     )?
     .pop()
     .map(|event| event.content))
+}
+
+/// One read-only, anonymous query for many keys' kind 0 profile
+/// events in a single REQ, newest per author, full events (the
+/// profile crawler absorbs these through the feed's verify path).
+/// Blocking with a hard deadline; run on a worker thread. The fetch
+/// carries only the keys: no read receipt, no profile exposure.
+pub fn fetch_profiles(
+    relay_url: &str,
+    pubkeys: &[String],
+    timeout: Duration,
+) -> Result<Vec<Event>> {
+    fetch_newest(relay_url, Kind::Metadata, pubkeys, timeout)
 }
 
 /// One read-only, anonymous query for a key's kind 3 contact list:
