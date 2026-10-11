@@ -477,6 +477,17 @@ opening items because they need the push, the signing secret, and a tag.
 - [x] The arch story is quiet by default: no platforms badge in the install
       bar. The no-build note names the mismatch in full ("no x86_64 build
       yet, published for aarch64"), and nowhere else does the list appear.
+- [x] Future-dated releases do not rank: the list sorts on the newest
+      release date that has arrived, so an upstream pre-listing a future
+      release (or re-listing one forward forever) cannot hold the top of
+      the list; an app whose dates are all in the future ranks as
+      undated and rises by itself the day the date arrives. The page
+      still discloses the claim, worded "dated 2026-11-11" until the
+      date is real ("updated" only once it is true). The mixed case
+      (a past release beneath a pre-listed one) was already demoted at
+      parse time; this closes the future-only hole, and fixes the
+      undated arms of the sort, which were inverted (undated apps rose
+      to the top instead of sinking).
 - [x] Client relay configuration, as a full settings page: Sources (channel
       visibility switches, the channel the store opens on), Relays (the event
       and social sets, editable rows with add, remove, and a reset to the

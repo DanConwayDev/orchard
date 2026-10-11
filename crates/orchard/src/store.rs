@@ -495,18 +495,8 @@ impl StoreRoot {
         // most recently updated first; the file order is alphabetical
         // by app id, which reads as noise. Undated apps sink, name
         // breaks ties.
-        out.sort_by(|&a, &b| {
-            let (a, b) = (&self.apps[a], &self.apps[b]);
-            let name = |app: &StoreApp| app.name.to_lowercase();
-            match (&b.release_date, &a.release_date) {
-                (Some(x), Some(y)) => x
-                    .cmp(y)
-                    .then_with(|| name(a).cmp(&name(b))),
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (None, None) => name(a).cmp(&name(b)),
-            }
-        });
+        let today = orchard_core::appstream::today_iso();
+        out.sort_by(|&a, &b| date_order(&self.apps[a], &self.apps[b], &today));
         out
     }
 
@@ -2978,11 +2968,17 @@ impl StoreRoot {
                                 .text_color(ui::text())
                                 .child(div().child(app.app_id.clone()))
                                 .children(app.version.clone().map(|v| div().child(format!("· {v}"))))
-                                .children(
-                                    app.release_date
-                                        .clone()
-                                        .map(|date| div().child(format!("· updated {date}"))),
-                                )
+                                .children(app.release_date.clone().map(|date| {
+                                    // the claim reads as "updated" only
+                                    // once it is true: a pre-listed
+                                    // future release says "dated" until
+                                    // the day arrives
+                                    if &*date > orchard_core::appstream::today_iso().as_str() {
+                                        div().child(format!("· dated {date}"))
+                                    } else {
+                                        div().child(format!("· updated {date}"))
+                                    }
+                                }))
                                 .children(match self.installed.get(&app_id) {
                                     // installed: the size on disk; not
                                     // installed: what the remote would
@@ -5446,6 +5442,33 @@ fn save_continuity(file: &orchard_core::ContinuityFile) {
 }
 
 /// Human byte count, flatpak-style SI units: `9.8 MB`, `1.2 GB`.
+/// The list's date order: rank on the newest release date that has
+/// actually arrived. A future-dated release never lifts an app toward
+/// the top (an upstream can pre-list one, so a raw sort rewards the
+/// boldest claim), and an app whose dates are all in the future ranks
+/// as undated: it sinks with the undated, name breaking ties, and
+/// rises by itself the day its date arrives. `today` is an ISO date.
+fn date_order(a: &StoreApp, b: &StoreApp, today: &str) -> std::cmp::Ordering {
+    // the claim stays on the app (the page shows it as "dated"), it
+    // just does not rank until it is true. A fn, not a closure: the
+    // return lifetime is the app's, not the captured `today`'s.
+    fn rank<'a>(app: &'a StoreApp, today: &str) -> Option<&'a str> {
+        let date = app.release_date.as_deref()?;
+        (date <= today).then_some(date)
+    }
+    let name = |app: &StoreApp| app.name.to_lowercase();
+    match (rank(b, today), rank(a, today)) {
+        (Some(x), Some(y)) => x
+            .cmp(y)
+            .then_with(|| name(a).cmp(&name(b))),
+        // b dated, a undated: a sinks (undated apps sort last)
+        (Some(_), None) => std::cmp::Ordering::Greater,
+        // a dated, b undated: a first
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        (None, None) => name(a).cmp(&name(b)),
+    }
+}
+
 fn human_size(bytes: u64) -> String {
     const UNITS: [(&str, u64); 4] = [
         ("GB", 1_000_000_000),
@@ -6042,6 +6065,69 @@ fn update_available(app: &StoreApp, installed: &InstalledInfo) -> bool {
 mod tests {
     use super::*;
     use orchard_core::{CatalogApp, Publisher};
+
+    /// A minimal publisher-channel row for order tests.
+    fn dated_app(name: &str, date: Option<&str>) -> StoreApp {
+        let mut app = StoreApp::from_catalog(&CatalogApp {
+            app_id: format!("com.example.{name}").into(),
+            name: name.into(),
+            summary: "A demo app".into(),
+            description: None,
+            icon_url: None,
+            categories: Vec::new(),
+            publisher: Publisher {
+                pubkey: "k".into(),
+                nip05: None,
+            },
+            version: "1.0.0".into(),
+            platforms: vec!["linux-x86_64".into()],
+            flatpak_ref: "app/com.example.Hello/x86_64/stable".into(),
+            location: "oci:/srv/hello".into(),
+            digest: Some("sha256:aa".into()),
+            metadata: None,
+            repository: None,
+            homepage: None,
+            notes: None,
+            published_at: 0,
+            successor_to: None,
+        });
+        app.release_date = date.map(Into::into);
+        app
+    }
+
+    #[test]
+    fn date_order_ranks_only_arrived_dates() {
+        let today = "2026-10-11";
+        let past = dated_app("App", Some("2026-08-01"));
+        let future = dated_app("App", Some("2026-11-11"));
+        let undated = dated_app("App", None);
+        // an arrived date outranks a future one, even though the
+        // future date is numerically larger
+        assert_eq!(
+            date_order(&past, &future, today),
+            std::cmp::Ordering::Less
+        );
+        // a future-only app ranks as undated: same name, so a tie
+        assert_eq!(
+            date_order(&future, &undated, today),
+            std::cmp::Ordering::Equal
+        );
+        // the day the date arrives, the app ranks again
+        let arrived = dated_app("App", Some("2026-10-11"));
+        assert_eq!(
+            date_order(&arrived, &future, today),
+            std::cmp::Ordering::Less
+        );
+        // undated sinks below dated, name breaks ties among undated
+        assert_eq!(
+            date_order(&undated, &past, today),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            date_order(&dated_app("Aab", None), &undated, today),
+            std::cmp::Ordering::Less
+        );
+    }
 
     #[test]
     fn version_outdated_numeric_compare() {        assert!(version_outdated("0.5.21", "0.5.22"));

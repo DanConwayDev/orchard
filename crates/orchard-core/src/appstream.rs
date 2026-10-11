@@ -433,8 +433,10 @@ fn release_date(start: &BytesStart<'_>) -> Result<Option<Box<str>>> {
 }
 
 /// Today as an ISO date, from the system clock: the cutoff that
-/// demotes future-dated release entries.
-fn today_iso() -> String {
+/// demotes future-dated release entries. Public because the client
+/// re-checks arrival at sort and display time: a pre-listed date
+/// starts ranking the day it arrives, no restart.
+pub fn today_iso() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -915,6 +917,28 @@ mod tests {
         // comes from the newest one that is not in the future
         assert_eq!(apps[0].version.as_deref(), Some("2.0"));
         assert_eq!(apps[0].release_date.as_deref(), Some("2026-08-01"));
+    }
+
+    #[test]
+    fn future_only_release_keeps_the_claim() {
+        // an app whose only dated release is in the future keeps the
+        // claim (the client shows it as "dated", not "updated") but
+        // the client ranks such an app as undated; there is no past
+        // release for the parser to demote to
+        let apps = parse_doc("future-only", r#"<?xml version="1.0" encoding="UTF-8"?>
+<components version="0.8" origin="test">
+  <component type="desktop-application">
+    <id>com.example.Prelist</id>
+    <name>Prelist</name>
+    <summary>Does things</summary>
+    <releases>
+      <release version="2.0" date="2099-01-01"/>
+    </releases>
+  </component>
+</components>"#);
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0].version.as_deref(), Some("2.0"));
+        assert_eq!(apps[0].release_date.as_deref(), Some("2099-01-01"));
     }
 
     /// Parse one appstream document through the same path `load` uses
