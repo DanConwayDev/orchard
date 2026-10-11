@@ -79,6 +79,8 @@ pub fn load(path: &Path, icons_root: &Path) -> Result<Vec<AppstreamApp>> {
     let mut apps = Vec::new();
     let mut current: Option<Component> = None;
     let mut buf = Vec::with_capacity(8192);
+    // Today's date, the cutoff for future-dated release entries.
+    let today = today_iso();
     // Nesting depth of the stream, the depth <component> sits at, and the
     // depth of the <screenshots> group (zero when outside one).
     let mut depth = 0usize;
@@ -94,7 +96,19 @@ pub fn load(path: &Path, icons_root: &Path) -> Result<Vec<AppstreamApp>> {
                     b"component" => {
                         comp_depth = depth;
                         depth += 1;
-                        current = Some(Component::default());
+                        // only user-installable apps become rows:
+                        // runtimes, addons, and the BaseApp plumbing
+                        // (generic components) are not things a person
+                        // installs from a store
+                        let kind = attr_value(e, b"type")?.unwrap_or_default();
+                        current = if matches!(
+                            kind.as_str(),
+                            "desktop-application" | "desktop" | "console-application"
+                        ) {
+                            Some(Component::default())
+                        } else {
+                            None
+                        };
                     }
                     b"description" => {
                         // description_text consumes the whole balanced
@@ -153,12 +167,12 @@ pub fn load(path: &Path, icons_root: &Path) -> Result<Vec<AppstreamApp>> {
                                     consumed = true;
                                 }
                                 b"release" => {
-                                    if c.version.is_none() {
-                                        c.version = attr_value(e, b"version")?.map(Box::from);
+                                    let version = attr_value(e, b"version")?.map(Box::from);
+                                    let date = release_date(e)?;
+                                    if let Some(c) = current.as_mut() {
+                                        c.add_release(version, date, &today);
                                     }
-                                    if c.release_date.is_none() {
-                                        c.release_date = release_date(e)?;
-                                    }
+                                    consumed = true;
                                 }
                                 b"category" => {
                                     if let Some(cat) =
@@ -219,13 +233,10 @@ pub fn load(path: &Path, icons_root: &Path) -> Result<Vec<AppstreamApp>> {
             }
             Event::Empty(ref e) => match e.name().as_ref() {
                 b"release" => {
+                    let version = attr_value(e, b"version")?.map(Box::from);
+                    let date = release_date(e)?;
                     if let Some(c) = current.as_mut() {
-                        if c.version.is_none() {
-                            c.version = attr_value(e, b"version")?.map(Box::from);
-                        }
-                        if c.release_date.is_none() {
-                            c.release_date = release_date(e)?;
-                        }
+                        c.add_release(version, date, &today);
                     }
                 }
                 b"icon" => {
@@ -421,6 +432,17 @@ fn release_date(start: &BytesStart<'_>) -> Result<Option<Box<str>>> {
     Ok(Some(format!("{y:04}-{m:02}-{d:02}").into_boxed_str()))
 }
 
+/// Today as an ISO date, from the system clock: the cutoff that
+/// demotes future-dated release entries.
+fn today_iso() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let (y, m, d) = days_to_ymd((secs / 86_400) as i64);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
 /// Days since the unix epoch to a `(year, month, day)` civil date:
 /// Howard Hinnant's algorithm, the inverse of `days_from_civil`.
 fn days_to_ymd(days: i64) -> (i64, u32, u32) {
@@ -521,11 +543,45 @@ struct Component {
     license: Option<Box<str>>,
     version: Option<Box<str>>,
     release_date: Option<Box<str>>,
+    /// The stored release date is in the future (an upstream
+    /// pre-listed release); a past-dated one may still replace it.
+    release_date_future: bool,
     homepage: Option<Box<str>>,
     categories: Vec<String>,
     cached_icon_name: Option<String>,
     icon_url: Option<String>,
     screenshots: Vec<ScreenshotImage>,
+}
+
+impl Component {
+    /// Fold one `<release>` element's version and date. The first
+    /// version seen wins; the stored date prefers the newest release
+    /// that has actually happened, since upstreams pre-list
+    /// future-dated entries that would otherwise read as "updated
+    /// <future date>".
+    fn add_release(
+        &mut self,
+        version: Option<Box<str>>,
+        date: Option<Box<str>>,
+        today: &str,
+    ) {
+        if self.version.is_none() {
+            self.version = version;
+        }
+        if let Some(date) = date {
+            let future = date.as_ref() > today;
+            let store = match &self.release_date {
+                None => true,
+                // a past date upgrades a future-stamped one; a later
+                // future date never beats an earlier one
+                Some(_) => self.release_date_future && !future,
+            };
+            if store {
+                self.release_date = Some(date);
+                self.release_date_future = future;
+            }
+        }
+    }
 }
 
 impl Component {
@@ -810,6 +866,55 @@ mod tests {
 </components>"#);
         assert_eq!(apps.len(), 1);
         assert_eq!(apps[0].description.as_deref(), Some("وصف بالعربية"));
+    }
+
+    #[test]
+    fn junk_components_are_skipped() {
+        // Addons, runtimes, and generic plumbing (BaseApps) are not
+        // things a person installs from a store.
+        let apps = parse_doc("junk", r#"<?xml version="1.0" encoding="UTF-8"?>
+<components version="0.8" origin="test">
+  <component type="generic">
+    <id>io.qt.qtwebkit.BaseApp</id>
+    <name>Qt WebKit BaseApp</name>
+    <summary>Plumbing</summary>
+  </component>
+  <component type="addon">
+    <id>com.example.Some.Addon</id>
+    <name>Addon</name>
+    <summary>An addon</summary>
+  </component>
+  <component type="desktop-application">
+    <id>com.example.Real</id>
+    <name>Real App</name>
+    <summary>Does things</summary>
+  </component>
+</components>"#);
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0].id, "com.example.Real");
+    }
+
+    #[test]
+    fn future_dated_releases_are_demoted() {
+        // Upstreams pre-list future-dated releases; the newest release
+        // that has actually happened is the honest "updated" date.
+        let apps = parse_doc("future-release", r#"<?xml version="1.0" encoding="UTF-8"?>
+<components version="0.8" origin="test">
+  <component type="desktop-application">
+    <id>com.example.Future</id>
+    <name>Future</name>
+    <summary>Does things</summary>
+    <releases>
+      <release version="2.0" date="2099-01-01"/>
+      <release version="1.9" date="2026-08-01"/>
+    </releases>
+  </component>
+</components>"#);
+        assert_eq!(apps.len(), 1);
+        // the version stays from the first-listed release; the date
+        // comes from the newest one that is not in the future
+        assert_eq!(apps[0].version.as_deref(), Some("2.0"));
+        assert_eq!(apps[0].release_date.as_deref(), Some("2026-08-01"));
     }
 
     /// Parse one appstream document through the same path `load` uses
