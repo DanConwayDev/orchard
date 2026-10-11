@@ -779,8 +779,7 @@ mod tests {
         // Lutris-style appstream: one <description> element per
         // language, the untranslated one not first. The app's own
         // wording wins over whatever translation comes first.
-        let apps = parse_doc(
-            r#"<?xml version="1.0" encoding="UTF-8"?>
+        let apps = parse_doc("multi-lang", r#"<?xml version="1.0" encoding="UTF-8"?>
 <components version="0.8" origin="test">
   <component type="desktop-application">
     <id>com.example.Multi</id>
@@ -790,8 +789,7 @@ mod tests {
     <description xml:lang="de">Beschreibung auf Deutsch</description>
     <description><p>The real description.</p></description>
   </component>
-</components>"#,
-        );
+</components>"#);
         assert_eq!(apps.len(), 1);
         assert_eq!(apps[0].description.as_deref(), Some("The real description."));
     }
@@ -800,8 +798,7 @@ mod tests {
     fn description_falls_back_to_first_language() {
         // No default description element at all: better to show a
         // translation than nothing.
-        let apps = parse_doc(
-            r#"<?xml version="1.0" encoding="UTF-8"?>
+        let apps = parse_doc("translated-only", r#"<?xml version="1.0" encoding="UTF-8"?>
 <components version="0.8" origin="test">
   <component type="desktop-application">
     <id>com.example.Translated</id>
@@ -810,18 +807,18 @@ mod tests {
     <description xml:lang="ar">وصف بالعربية</description>
     <description xml:lang="de">Beschreibung auf Deutsch</description>
   </component>
-</components>"#,
-        );
+</components>"#);
         assert_eq!(apps.len(), 1);
         assert_eq!(apps[0].description.as_deref(), Some("وصف بالعربية"));
     }
 
     /// Parse one appstream document through the same path `load` uses
-    /// (gzip file), returning its components.
-    fn parse_doc(doc: &str) -> Vec<AppstreamApp> {
-        let dir = std::env::temp_dir().join("orchard-appstream-test");
+    /// (gzip file), returning its components. Each test gets its own
+    /// file: tests run in parallel threads.
+    fn parse_doc(name: &str, doc: &str) -> Vec<AppstreamApp> {
+        let dir = std::env::temp_dir().join(format!("orchard-appstream-test-{name}"));
         std::fs::create_dir_all(&dir).unwrap();
-        let xml_path = dir.join("appstream-test.xml.gz");
+        let xml_path = dir.join("appstream.xml.gz");
         let file = std::fs::File::create(&xml_path).unwrap();
         let mut gz = flate2::write::GzEncoder::new(file, flate2::Compression::default());
         std::io::Write::write_all(&mut gz, doc.as_bytes()).unwrap();

@@ -127,6 +127,15 @@ pub fn remote_metadata(remote: &str, app_id: &str) -> Command {
     cmd
 }
 
+/// Update an installed app to its remote's current commit:
+/// `flatpak update --system -y <app>`. The app's own origin remote
+/// supplies the new commit.
+pub fn update_ref(app_id: &str) -> Command {
+    let mut cmd = flatpak_command();
+    cmd.args(["update", "--system", "-y", app_id]);
+    cmd
+}
+
 /// Summary of the remote's current commit for an app, before install:
 /// `flatpak remote-info <remote> <app>` — version and the download /
 /// installed sizes of what would be installed.
@@ -215,8 +224,15 @@ mod tests {
     }
 
     #[test]
-    fn parse_remote_info_reads_size_lines() {
-        let (download, installed) = parse_remote_info(
+    fn update_ref_builds_expected_invocation() {
+        let cmd = update_ref("org.gnome.Polari");
+        let args = arg_strings(&cmd);
+        let tail: Vec<String> = args.iter().skip(args.len() - 4).cloned().collect();
+        assert_eq!(tail, ["update", "--system", "-y", "org.gnome.Polari"]);
+    }
+
+    #[test]
+    fn parse_remote_info_reads_size_lines() {        let (download, installed) = parse_remote_info(
             "\n        ID: com.spotify.Client\n        Ref: \
              app/com.spotify.Client/x86_64/stable\n    Download Size: 9.8 MB\n   \
              Installed Size: 14.1 MB\n     Runtime: \
