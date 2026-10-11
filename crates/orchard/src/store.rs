@@ -1516,6 +1516,20 @@ impl StoreRoot {
 
     // ----- keyboard -----
 
+    /// The character a keystroke produces: gpui reports the key
+    /// label printed on the key (unshifted, so shift-a's label is
+    /// "a"), while key_char carries the character the layout and
+    /// modifiers actually produce. Text insertion wants the latter;
+    /// the label is only the fallback for keys that make none.
+    fn produced_char(keystroke: &gpui::Keystroke) -> String {
+        keystroke
+            .key_char
+            .as_ref()
+            .filter(|char| char.chars().count() == 1)
+            .cloned()
+            .unwrap_or_else(|| keystroke.key.clone())
+    }
+
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
         let key = keystroke.key.as_str();
@@ -1563,7 +1577,7 @@ impl StoreRoot {
                 }
                 "space" => self.insert_draft_text(" "),
                 other if other.chars().count() == 1 && !ctrl => {
-                    self.insert_draft_text(other)
+                    self.insert_draft_text(&Self::produced_char(keystroke));
                 }
                 _ => {}
             }
@@ -1586,8 +1600,8 @@ impl StoreRoot {
                     }
                 }
                 // digits 1 to 5 set the star rating, discoverable and
-                // one keypress each
-                "1" | "2" | "3" | "4" | "5" => {
+                // one keypress each; shifted they are text (!, @)
+                "1" | "2" | "3" | "4" | "5" if !shift => {
                     self.review_draft.0 = Some(key.parse::<u8>().unwrap() as f32);
                     self.review_error = None;
                 }
@@ -1596,7 +1610,7 @@ impl StoreRoot {
                 }
                 "space" => self.insert_draft_text(" "),
                 other if other.chars().count() == 1 && !ctrl => {
-                    self.insert_draft_text(other);
+                    self.insert_draft_text(&Self::produced_char(keystroke));
                 }
                 _ => {}
             }
@@ -1752,7 +1766,7 @@ impl StoreRoot {
                 if self.page_open {
                     self.close_page(cx);
                 }
-                self.insert_text(other);
+                self.insert_text(&Self::produced_char(keystroke));
             }
             _ => return,
         }
@@ -4171,7 +4185,7 @@ impl StoreRoot {
                     .flex()
                     .gap_1()
                     .items_center()
-                    .text_size(px(ui::TEXT_SIZE_LABEL))
+                    .text_size(px(ui::TEXT_SIZE))
                     .text_color(ui::text())
                     .child(format!("Signed in as {display}"))
                     .children(note.map(|note| {
