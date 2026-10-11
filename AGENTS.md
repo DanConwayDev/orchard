@@ -10,8 +10,8 @@ shared target/ tree besides. Build only through the container:
     ./scripts/build.sh test --workspace
     ./scripts/build.sh build --release
 
-The script creates `localhost/orchard-dev-rust` on first use (derived
-from kuma's `kuma-dev-gcc`, per `containers/`), with rustup and the
+The script creates `localhost/orchard-dev-rust` on first use (Fedora base
+plus the gpui native stack, per `containers/`), with rustup and the
 cargo registry in named volumes so builds are incremental. The pinned
 toolchain lives in `rust-toolchain.toml`.
 
