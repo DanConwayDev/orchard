@@ -535,6 +535,15 @@ opening items because they need the push, the signing secret, and a tag.
       dropped from the plan; its real content is publisher pages
       (everything from one key in one place), parked as a navigation
       feature for later.
+- [x] Circle-first reviews: when signed in, the review list opens on
+      the circle lens, direct follows first, then their follows
+      (second-hand trust: visually dimmer and never above the first
+      hop, however new), then everyone else, recency inside each
+      tier. Everyone is one click (the lens chips above the list) or
+      one key (`v`) away: a single recency list, relationships
+      ignored. Signed out, the lenses are the same list and the
+      toggle hides. New-key sprouts, the circle glyphs, the publisher
+      flag, and the trust notes line stay on in every lens.
 - [x] Client relay configuration, as a full settings page: Sources (channel
       visibility switches, the channel the store opens on), Relays (the event
       and social sets, editable rows with add, remove, and a reset to the
