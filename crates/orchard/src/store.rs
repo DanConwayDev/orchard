@@ -2452,50 +2452,23 @@ impl StoreRoot {
             if self.composing {
                 section = section.child(self.render_review_compose(app_id, font.clone(), cx));
             } else {
-                let mut invitation = div().flex().items_center().gap_2();
-                if let Some(reviewer) = self.reviewer.as_ref() {
-                    invitation = invitation
-                        .child(
-                            div()
-                                .id("write-review")
-                                .cursor_pointer()
-                                .text_size(px(ui::TEXT_SIZE))
-                                .text_color(ui::accent())
-                                .hover(|style| style.text_color(ui::text()))
-                                .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
-                                    this.start_review(cx);
-                                }))
-                                .child(format!(
-                                    "Write a review (r) as {}",
-                                    reviewer.display()
-                                )),
-                        )
-                        .child(
-                            div()
-                                .id("sign-out")
-                                .cursor_pointer()
-                                .text_size(px(ui::TEXT_SIZE_LABEL))
-                                .text_color(ui::text_dim())
-                                .hover(|style| style.text_color(ui::text()))
-                                .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
-                                    this.sign_out(cx);
-                                }))
-                                .child("Sign out"),
-                        );
-                } else {
-                    invitation = invitation.child(
-                        div()
-                            .id("write-review")
-                            .cursor_pointer()
-                            .text_size(px(ui::TEXT_SIZE))
-                            .text_color(ui::accent())
-                            .hover(|style| style.text_color(ui::text()))
-                            .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
-                                this.start_review(cx);
-                            }))
-                            .child("Write a review (r)"),
-                    );
-                }
+                let signed_in = self.reviewer.is_some();
+                let invitation = div().flex().items_center().gap_2().child(
+                    div()
+                        .id("write-review")
+                        .cursor_pointer()
+                        .text_size(px(ui::TEXT_SIZE))
+                        .text_color(ui::accent())
+                        .hover(|style| style.text_color(ui::text()))
+                        .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
+                            this.start_review(cx);
+                        }))
+                        .child(if signed_in {
+                            "Write a review (r)".to_string()
+                        } else {
+                            "Sign in to review".to_string()
+                        }),
+                );
                 section = section.child(invitation);
             }
         }
