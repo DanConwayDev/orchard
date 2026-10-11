@@ -137,7 +137,12 @@ pub struct NostrCatalog {
 
 impl CatalogDocument for NostrCatalog {
     fn document(&self) -> CatalogFile {
-        let mut apps = self.feed.lock().expect("feed lock poisoned").catalog().apps;
+        let mut apps = self
+            .feed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .catalog()
+            .apps;
         for base_app in &self.base.apps {
             if !apps.iter().any(|app| app.app_id == base_app.app_id) {
                 apps.push(base_app.clone());
@@ -152,7 +157,10 @@ impl CatalogDocument for NostrCatalog {
     }
 
     fn reviews(&self) -> orchard_core::ReviewsFile {
-        self.feed.lock().expect("feed lock poisoned").reviews()
+        self.feed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .reviews()
     }
 
     fn profiles(&self) -> orchard_core::ProfilesFile {
@@ -161,19 +169,22 @@ impl CatalogDocument for NostrCatalog {
             profiles: self
                 .feed
                 .lock()
-                .expect("feed lock poisoned")
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .profile_raws(),
         }
     }
 
     fn graph(&self) -> orchard_core::GraphFile {
-        self.graph.lock().expect("graph lock poisoned").file()
+        self.graph
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .file()
     }
 
     fn clear(&self) {
         self.feed
             .lock()
-            .expect("feed lock poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear();
     }
 }
@@ -318,32 +329,39 @@ fn spawn_graph_crawler(
         .name("orchard-graph".into())
         .spawn(move || loop {
             std::thread::sleep(GRAPH_TICK);
-            let urls = relay_sets(&settings).events;
-            let reviewers: Vec<String> = {
-                let feed = feed.lock().expect("feed lock poisoned");
-                let mut seen: Vec<String> = Vec::new();
-                for review in feed.reviews().reviews {
-                    if !seen.contains(&review.pubkey) {
-                        seen.push(review.pubkey);
+            guarded("graph", || {
+                let urls = relay_sets(&settings).events;
+                let reviewers: Vec<String> = {
+                    let feed =
+                        feed.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let mut seen: Vec<String> = Vec::new();
+                    for review in feed.reviews().reviews {
+                        if !seen.contains(&review.pubkey) {
+                            seen.push(review.pubkey);
+                        }
+                    }
+                    seen
+                };
+                if reviewers.is_empty() {
+                    return;
+                }
+                let pending = graph
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .pending(&reviewers, GRAPH_REFRESH);
+                if pending.is_empty() {
+                    return;
+                }
+                for url in &urls {
+                    match orchard_nostr::relay::fetch_contact_lists(url, &pending, GRAPH_TIMEOUT) {
+                        Ok(found) => graph
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .absorb(found, &pending),
+                        Err(err) => eprintln!("graph: {url}: {err:#}"),
                     }
                 }
-                seen
-            };
-            if reviewers.is_empty() {
-                continue;
-            }
-            let pending = graph.lock().expect("graph lock poisoned").pending(&reviewers, GRAPH_REFRESH);
-            if pending.is_empty() {
-                continue;
-            }
-            for url in &urls {
-                match orchard_nostr::relay::fetch_contact_lists(url, &pending, GRAPH_TIMEOUT) {
-                    Ok(found) => {
-                        graph.lock().expect("graph lock poisoned").absorb(found, &pending)
-                    }
-                    Err(err) => eprintln!("graph: {url}: {err:#}"),
-                }
-            }
+            })
         })
         .expect("spawning the graph crawler");
 }
@@ -366,38 +384,62 @@ fn spawn_profile_crawler(settings: orchard_core::SettingsHandle, feed: Arc<Mutex
                 std::collections::BTreeMap::new();
             loop {
                 let now = std::time::Instant::now();
-                let urls = relay_sets(&settings).social;
-                let pending: Vec<String> = {
-                    let feed = feed.lock().expect("feed lock poisoned");
-                    feed.crawl_keys()
-                }
-                .into_iter()
-                .filter(|key| {
-                    crawled
-                        .get(key)
-                        .is_none_or(|at| now.duration_since(*at) >= PROFILE_REFRESH)
-                })
-                .collect();
-                if !pending.is_empty() {
-                    for key in &pending {
-                        crawled.insert(key.clone(), now);
+                guarded("profiles", || {
+                    let urls = relay_sets(&settings).social;
+                    let pending: Vec<String> = {
+                        let feed = feed
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        feed.crawl_keys()
                     }
-                    for url in &urls {
-                        match orchard_nostr::relay::fetch_profiles(url, &pending, PROFILE_TIMEOUT) {
-                            Ok(events) => {
-                                let mut feed = feed.lock().expect("feed lock poisoned");
-                                for event in events {
-                                    let _ = feed.absorb(event);
+                    .into_iter()
+                    .filter(|key| {
+                        crawled
+                            .get(key)
+                            .is_none_or(|at| now.duration_since(*at) >= PROFILE_REFRESH)
+                    })
+                    .collect();
+                    if !pending.is_empty() {
+                        for key in &pending {
+                            crawled.insert(key.clone(), now);
+                        }
+                        for url in &urls {
+                            match orchard_nostr::relay::fetch_profiles(url, &pending, PROFILE_TIMEOUT)
+                            {
+                                Ok(events) => {
+                                    let mut feed = feed
+                                        .lock()
+                                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                    for event in events {
+                                        let _ = feed.absorb(event);
+                                    }
                                 }
+                                Err(err) => eprintln!("profiles: {url}: {err:#}"),
                             }
-                            Err(err) => eprintln!("profiles: {url}: {err:#}"),
                         }
                     }
-                }
+                });
                 std::thread::sleep(PROFILE_TICK);
             }
         })
         .expect("spawning the profile crawler");
+}
+
+/// One tick of a background loop, guarded: a panic in any of the
+/// crawler, writer, or supervisor bodies costs a log line, not the
+/// thread. Background threads have no UI to surface a death, and a
+/// thread gone missing is silent breakage; the panic hook still
+/// prints, and the loop's next tick carries on.
+fn guarded<F: FnOnce()>(name: &str, body: F) {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
+    if let Err(panic) = result {
+        let message = panic
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown panic".to_string());
+        eprintln!("{name}: tick panicked: {message}; the loop continues");
+    }
 }
 
 /// Keep one relay thread running per URL in the settings' event set,
@@ -419,15 +461,23 @@ fn spawn_relay_supervisor(
                 Arc<std::sync::atomic::AtomicBool>,
             > = Default::default();
             loop {
-                // a clear cycle: every thread goes, fresh ones
-                // re-subscribe and re-deliver into the emptied feed
-                if reset.swap(false, std::sync::atomic::Ordering::Relaxed) {
-                    for stop in running.values() {
-                        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                guarded("relays", || {
+                    // a clear cycle: every thread goes, fresh ones
+                    // re-subscribe and re-deliver into the emptied
+                    // feed. Logged: the cycle while a relay is down
+                    // was the suspected actor in one unexplained
+                    // client death, and a recurrence must be visible.
+                    if reset.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                        eprintln!(
+                            "relays: cache clear, cycling {} threads",
+                            running.len()
+                        );
+                        for stop in running.values() {
+                            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        running.clear();
                     }
-                    running.clear();
-                }
-                let urls = relay_sets(&settings).events;
+                    let urls = relay_sets(&settings).events;
                 running.retain(|url, stop| {
                     if urls.contains(url) {
                         true
@@ -461,6 +511,7 @@ fn spawn_relay_supervisor(
                         Err(_) => eprintln!("failed to spawn relay thread for {url}"),
                     }
                 }
+                });
                 std::thread::sleep(std::time::Duration::from_secs(1));
             }
         })
@@ -595,7 +646,7 @@ fn load_cache(path: &Option<std::path::PathBuf>, feed: &Arc<Mutex<orchard_nostr:
         eprintln!("nostr cache {}: unparseable, starting empty", path.display());
         return;
     };
-    let mut feed = feed.lock().expect("feed lock poisoned");
+    let mut feed = feed.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut accepted = 0usize;
     for json in jsons {
         match nostr::event::Event::from_json(json)
@@ -620,20 +671,25 @@ fn spawn_cache_writer(path: Option<std::path::PathBuf>, feed: Arc<Mutex<orchard_
             let mut signatures = Vec::new();
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(3));
-                let jsons = feed.lock().expect("feed lock poisoned").event_jsons();
-                if jsons != signatures {
-                    if let Some(parent) = path.parent() {
-                        let _ = std::fs::create_dir_all(parent);
-                    }
-                    match serde_json::to_vec(&jsons) {
-                        Ok(bytes) => {
-                            if std::fs::write(&path, bytes).is_ok() {
-                                signatures = jsons;
-                            }
+                guarded("nostr-cache", || {
+                    let jsons = feed
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .event_jsons();
+                    if jsons != signatures {
+                        if let Some(parent) = path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
                         }
-                        Err(_) => {}
+                        match serde_json::to_vec(&jsons) {
+                            Ok(bytes) => {
+                                if std::fs::write(&path, bytes).is_ok() {
+                                    signatures = jsons;
+                                }
+                            }
+                            Err(_) => {}
+                        }
                     }
-                }
+                });
             }
         })
         .is_err()
@@ -646,6 +702,29 @@ fn spawn_cache_writer(path: Option<std::path::PathBuf>, feed: Arc<Mutex<orchard_
 mod tests {
     use super::*;
     use orchard_core::CatalogApp;
+
+    /// The shared locks recover from poison: a panic in one holder
+    /// must cost that one thread, not cascade into every relay
+    /// thread, crawler, and endpoint that shares the feed after it.
+    #[test]
+    fn the_feed_lock_recovers_from_a_poisoned_holder() {
+        let feed = Arc::new(std::sync::Mutex::new(orchard_nostr::Feed::default()));
+        let holder = Arc::clone(&feed);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _guard = holder
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            panic!("panicking while holding the feed lock");
+        }));
+        // a later holder takes the guard, not the panic
+        assert!(
+            feed.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .catalog()
+                .apps
+                .is_empty()
+        );
+    }
 
     /// The crawl selection: never-crawled reviewers go first, freshly
     /// crawled ones wait for the cadence, and absence stamps too (a

@@ -565,6 +565,23 @@ opening items because they need the push, the signing secret, and a tag.
       on the visited subset implies the rest are something less. In
       All and Installed its presence is real information, so it
       shows. The page's digest pin chip is unaffected.
+- [x] Background-thread hardening, from the one unexplained client
+      death (a relay SIGKILL-restart race with a cache clear in
+      flight; no log trace, relaunch fixed it). Three defenses: the
+      feed and graph locks recover on poison (`unwrap_or_else` into
+      the inner guard), because the feed is a dedup cache with no
+      cross-event invariants and a poisoned lock would cascade a
+      single panic into every relay thread, crawler, and endpoint
+      that shares it; every background loop (relay supervisor, relay
+      sessions, graph crawler, profile crawler, cache writer) wraps
+      its tick in a catch that logs and continues, since a
+      background thread's panic is otherwise invisible and a thread
+      gone missing is silent breakage; and the supervisor logs the
+      cache-clear cycle ("cache clear, cycling N threads") so the
+      suspected race is visible if it ever recurs. The death itself
+      stays unexplained (no panic profile, no OOM, no trace); the
+      hardening converts every plausible mechanism from a silent
+      death into a logged, self-healing event.
 - [x] Client relay configuration, as a full settings page: Sources (channel
       visibility switches, the channel the store opens on), Relays (the event
       and social sets, editable rows with add, remove, and a reset to the

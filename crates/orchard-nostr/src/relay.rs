@@ -91,17 +91,37 @@ pub fn run_forever(
     ])
     .to_string();
     while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-        match session(url, &sub, &feed, &on_change, &stop) {
-            Ok(()) => {
+        // one panicked session must not take the thread down: a
+        // background thread's panic is invisible in the UI, so it
+        // costs a log line and the loop continues instead
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            session(url, &sub, &feed, &on_change, &stop)
+        }));
+        match outcome {
+            Ok(Ok(())) => {
                 // clean close: still a stop; retry in case the relay restarts
                 std::thread::sleep(BACKOFF);
             }
-            Err(err) => {
+            Ok(Err(err)) => {
                 eprintln!("relay {url}: {err:#}; retrying in {}s", BACKOFF.as_secs());
+                std::thread::sleep(BACKOFF);
+            }
+            Err(panic) => {
+                let message = panic_message(&panic);
+                eprintln!("relay {url}: session panicked: {message}; retrying in {}s", BACKOFF.as_secs());
                 std::thread::sleep(BACKOFF);
             }
         }
     }
+}
+
+/// The human part of a caught panic payload, for the log line.
+fn panic_message(panic: &Box<dyn std::any::Any + Send>) -> String {
+    panic
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".to_string())
 }
 
 fn session(
@@ -154,7 +174,13 @@ fn handle_frame(text: &str, feed: &Arc<Mutex<Feed>>) -> Result<bool> {
         Some("EVENT") => {
             let raw = frame.get(2).ok_or_else(|| anyhow::anyhow!("EVENT frame without event"))?;
             let event: Event = serde_json::from_value(raw.clone())?;
-            let mut feed = feed.lock().expect("feed lock poisoned");
+            // locks recover on poison: the feed is a dedup cache, so
+            // the worst case of continuing is a duplicate the feed
+            // absorbs anyway, while a poisoned lock would cascade a
+            // single panic into every thread that shares it
+            let mut feed = feed
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             feed.absorb(event)
         }
         // ["EOSE", <sub-id>]: stored subscription stays open, keep reading
