@@ -13,6 +13,7 @@ orchard-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
+ureq = { workspace = true }
 
 [[bin]]
 name = "orchard-indexd"

@@ -1,5 +1,3 @@
-//! # orchard-flatpak
-//!
 //! The *only* place Orchard invokes the flatpak CLI. Keeping one seam means:
 //!
 //! - when Orchard itself runs inside a flatpak sandbox, every call is
@@ -7,11 +5,26 @@
 //!   uses), because a sandboxed app cannot touch the host flatpak directly;
 //! - commands are returned as [`Command`] builders so they are unit-testable
 //!   without executing anything and the UI layer can add progress handling.
+//!
+//! Scope: everything installs to the **system** installation. That is where
+//! this host's remotes and runtimes already live (flathub is a system
+//! remote), so a per-user install would re-download hundreds of MB of
+//! runtimes the system already has. System installs may show a polkit
+//! dialog; that is normal desktop behavior, the same as GNOME Software.
+//!
+//! Install transport for Orchard-channel apps: `flatpak install` accepts
+//! image locations directly (`oci:<dir>`, `oci-archive:<file>`,
+//! `docker://<registry>/<repo>:<tag>`), auto-detected by prefix (verified
+//! against flatpak 1.18.4, `app/flatpak-builtins-install.c`). The image's
+//! config labels must carry `org.flatpak.ref` and `org.flatpak.metadata`;
+//! flatpak reconstructs the ostree commit from the layers plus labels at
+//! install time, so no ostree machinery is needed on the publish side.
 
 use std::path::Path;
 use std::process::Command;
 
-/// Name of the flatpak remote the local index shim backs.
+/// Name of the flatpak remote the local index shim backs (future native
+/// remote flow; the MVP installs images directly instead).
 pub const REMOTE_NAME: &str = "orchard";
 
 /// True when Orchard itself runs inside a flatpak sandbox.
@@ -32,36 +45,68 @@ pub fn flatpak_command() -> Command {
 
 /// Register the local index shim (`orchard-indexd`) as an OCI remote.
 ///
-/// `index_url` looks like `oci+http://127.0.0.1:7780`. See
-/// `flatpak-remote(5)`: `oci+http(s)://` URLs point at an index of OCI images
-/// in a container registry rather than an ostree repo.
+/// `index_url` looks like `oci+http://127.0.0.1:7780`. Note (validated in the
+/// M0 spike, flatpak sources `common/flatpak-dir.c`): an `oci+http(s)` remote
+/// fetches an **ostree summary** from the URL base, whose ref entries map to
+/// image manifest digests, with `xa.oci-registry-uri` in the summary
+/// metadata naming the registry that serves blobs. Serving that summary is
+/// the future native-remote flow; until then the shim's HTTP catalog API is
+/// what the client uses.
 pub fn ensure_oci_remote(index_url: &str) -> Command {
     let mut cmd = flatpak_command();
     cmd.args(["remote-add", "--oci", "--user", REMOTE_NAME, index_url]);
     cmd
 }
 
-/// Install an app ref (e.g. `app/com.example.Hello/x86_64/stable`) from a remote.
-pub fn install(app_ref: &str, remote: &str) -> Command {
+/// Install an app id from a normal remote (the Flathub channel), e.g.
+/// `flatpak install --system -y flathub org.gnome.Polari`.
+pub fn install_ref(app_id: &str, remote: &str) -> Command {
     let mut cmd = flatpak_command();
-    cmd.args(["install", "--user", "-y", remote, app_ref]);
+    cmd.args(["install", "--system", "-y", remote, app_id]);
     cmd
 }
 
-/// Direct-install an OCI image without a remote (flatpak >= 1.17).
+/// Install an OCI image directly, no remote involved (flatpak >= 1.17).
 ///
-/// Fallback path only: updates lack remote integration, so prefer [`install`]
-/// via the shim in the normal flow. Syntax is a TODO to confirm in M0.
-pub fn install_from_oci(uri: &str) -> Command {
+/// `location` is an image location as understood by `flatpak install`:
+/// `oci:<dir>`, `oci-archive:<file>`, or `docker://<registry>/<repo>:<tag>`.
+pub fn install_image(location: &str) -> Command {
     let mut cmd = flatpak_command();
-    cmd.args(["install", "--user", "-y", uri]);
+    cmd.args(["install", "--system", "-y", location]);
     cmd
 }
 
 /// Update everything the `orchard` remote serves (plus whatever else is stale).
 pub fn update() -> Command {
     let mut cmd = flatpak_command();
-    cmd.args(["update", "--user", "-y"]);
+    cmd.args(["update", "--system", "-y"]);
+    cmd
+}
+
+/// Uninstall an app id. User data is kept.
+pub fn uninstall(app_id: &str) -> Command {
+    let mut cmd = flatpak_command();
+    cmd.args(["uninstall", "--system", "-y", app_id]);
+    cmd
+}
+
+/// Launch an installed app.
+pub fn run(app_id: &str) -> Command {
+    let mut cmd = flatpak_command();
+    cmd.arg("run").arg(app_id);
+    cmd
+}
+
+/// List installed apps across installations:
+/// `flatpak list --app --columns=application,version,origin,installation`.
+/// Rows are tab-separated; `installation` is `user` or `system`.
+pub fn list_installed() -> Command {
+    let mut cmd = flatpak_command();
+    cmd.args([
+        "list",
+        "--app",
+        "--columns=application,version,origin,installation",
+    ]);
     cmd
 }
 
@@ -76,19 +121,28 @@ mod tests {
     }
 
     #[test]
-    fn install_builds_expected_invocation() {
-        let cmd = install("app/com.example.Hello/x86_64/stable", REMOTE_NAME);
+    fn install_ref_builds_expected_invocation() {
+        let cmd = install_ref("org.gnome.Polari", "flathub");
         let args = arg_strings(&cmd);
-        // Ends with the install arguments regardless of sandbox wrapping.
-        let tail: Vec<String> = args
-            .iter()
-            .skip(args.len() - 5)
-            .cloned()
-            .collect();
+        let tail: Vec<String> = args.iter().skip(args.len() - 5).cloned().collect();
         assert_eq!(
             tail,
-            ["install", "--user", "-y", "orchard", "app/com.example.Hello/x86_64/stable"]
+            ["install", "--system", "-y", "flathub", "org.gnome.Polari"]
         );
+    }
+
+    #[test]
+    fn install_image_passes_location_through() {
+        for location in [
+            "oci:/abs/path/to/layout",
+            "oci-archive:/tmp/x.oci.tgz",
+            "docker://localhost:5000/hello:stable",
+        ] {
+            let cmd = install_image(location);
+            let args = arg_strings(&cmd);
+            assert!(args.contains(&"--system".to_string()));
+            assert!(args.last().is_some_and(|last| last == location));
+        }
     }
 
     #[test]

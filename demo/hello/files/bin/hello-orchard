@@ -1,0 +1,13 @@
+#!/bin/sh
+# Orchard demo app. Deliberately trivial: the point is the distribution
+# path (OCI artifact, digest pin, flatpak direct install), not the app.
+echo "Hello from Orchard! $(date)"
+{
+  echo "Orchard Hello ran at: $(date)"
+  echo "  app id:  com.orchard.Hello"
+  echo "  home is: $HOME"
+} >> "$HOME/orchard-hello.txt"
+
+if command -v notify-send >/dev/null 2>&1; then
+  notify-send "Orchard Hello" "Ran successfully. Appended a line to ~/orchard-hello.txt" || true
+fi

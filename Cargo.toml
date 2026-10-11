@@ -25,3 +25,10 @@ serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 axum = "0.8"
 gpui = "0.2.2"
+
+# catalog ingest (pure Rust backends: no zlib/openssl headers needed)
+quick-xml = "0.38"
+flate2 = "1"
+sha2 = "0.10"
+# blocking HTTP client for registry verification calls; rustls so no OpenSSL
+ureq = { version = "2", default-features = false, features = ["tls", "gzip", "json"] }

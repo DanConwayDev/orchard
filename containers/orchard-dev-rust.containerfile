@@ -11,4 +11,5 @@ FROM localhost/kuma-dev-gcc
 
 RUN dnf -y install pkgconf-pkg-config fontconfig-devel freetype-devel \
       libxkbcommon-devel libxkbcommon-x11-devel clang-devel \
+      flatpak python3 \
   && dnf clean all

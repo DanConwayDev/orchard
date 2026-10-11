@@ -1,0 +1,8 @@
+[Application]
+name=com.orchard.Hello
+runtime=org.freedesktop.Platform/x86_64/25.08
+command=hello-orchard
+
+[Context]
+sockets=x11;wayland;
+filesystems=home;

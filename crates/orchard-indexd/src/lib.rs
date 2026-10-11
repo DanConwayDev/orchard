@@ -1,24 +1,36 @@
 //! # orchard-indexd
 //!
 //! The heart of Orchard's distribution model: a small HTTP service on
-//! `127.0.0.1` that exposes Flatpak's OCI "registry index" protocol, backed by
-//! Orchard's catalog instead of by a central server. The user's flatpak talks
-//! to it as an ordinary remote (`oci+http://127.0.0.1:7780`), so every Orchard
-//! app is a native Flatpak remote app: GNOME Software, Discover, and
+//! `127.0.0.1` that the client runs in-process. It is the future home of
+//! every protocol surface Orchard needs between "the catalog" and "flatpak",
+//! so that the user's flatpak can one day talk to it as an ordinary remote
+//! (`oci+http://127.0.0.1:7780`) and GNOME Software, Discover, and
 //! `flatpak update` all keep working.
 //!
-//! ## Protocol status
+//! ## Endpoints
 //!
-//! The index endpoints and annotation keys below are the current best
-//! understanding and **MUST be validated in M0** against flatpak's
-//! `common/flatpak-oci-registry.c`. Ground truth beats this doc comment.
+//! - `GET /v1/catalog` - the full catalog document ([`CatalogFile`]). The
+//!   client reads this over HTTP rather than opening catalog files directly,
+//!   because indexd is the seam a remote catalog (Nostr, M3) plugs into
+//!   without touching client code.
+//! - `GET /index/<arch>` - an OCI image index enumerating the catalog's
+//!   artifacts. Kept from the first spike: this is *not* what flatpak's
+//!   `oci+` remotes read (validated in the M0 spike: those fetch an **ostree
+//!   summary** from the URL base, ref entries mapping to manifest digests,
+//!   with `xa.oci-registry-uri` pointing at the blob registry; see
+//!   `crates/orchard-flatpak/src/lib.rs`). The native-remote summary
+//!   endpoint lands in a later milestone; until then MVP installs go direct
+//!   via `flatpak install oci:/…` / `docker://…` with client-side digest
+//!   verification.
+//! - `GET /` - service description.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::extract::{Path as AxumPath, State};
 use axum::routing::get;
 use axum::{Json, Router};
+
+use orchard_core::CatalogFile;
 
 /// Annotation key Flatpak uses to map an OCI manifest to a flatpak ref.
 pub const ANNOTATION_FLATPAK_REF: &str = "org.flatpak.ref";
@@ -44,15 +56,15 @@ pub struct IndexEntry {
     pub media_type: String,
     pub digest: String,
     pub size: u64,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub annotations: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub annotations: std::collections::BTreeMap<String, String>,
 }
 
 impl IndexEntry {
     /// Build an index entry for a flatpak ref, e.g.
     /// `app/com.example.Hello/x86_64/stable`.
     pub fn for_ref(flatpak_ref: &str, digest: String, size: u64) -> Self {
-        let mut annotations = BTreeMap::new();
+        let mut annotations = std::collections::BTreeMap::new();
         annotations.insert(
             ANNOTATION_FLATPAK_REF.to_string(),
             flatpak_ref.to_string(),
@@ -70,14 +82,14 @@ impl IndexEntry {
     }
 }
 
-/// Where the shim gets its catalog. In M0 this is a static list; from M2 it is
-/// backed by the client's merged Flathub + Nostr state.
+/// Where the shim gets its index entries. In the MVP this is the static
+/// catalog file; later it is backed by the client's live Nostr state.
 pub trait CatalogSource: Send + Sync + 'static {
     /// Index entries for the given architecture (e.g. `x86_64`, `aarch64`).
     fn entries(&self, arch: &str) -> Vec<IndexEntry>;
 }
 
-/// A fixed catalog, useful for the M0 spike and tests.
+/// A fixed catalog, useful for tests.
 #[derive(Debug, Clone)]
 pub struct StaticCatalog {
     entries: Vec<IndexEntry>,
@@ -103,84 +115,132 @@ impl CatalogSource for StaticCatalog {
     }
 }
 
-/// Build the axum router for a catalog.
-pub fn router(catalog: Arc<dyn CatalogSource>) -> Router {
+/// Shared server state: the index source and the catalog document.
+#[derive(Clone)]
+pub struct ServerState {
+    pub index: Arc<dyn CatalogSource>,
+    pub catalog: Arc<CatalogFile>,
+}
+
+/// Build the axum router for a state.
+pub fn router(state: ServerState) -> Router {
     Router::new()
         .route("/", get(root))
         .route("/index/{arch}", get(index))
-        .with_state(catalog)
+        .route("/v1/catalog", get(catalog))
+        .with_state(state)
 }
 
 async fn root() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "service": "orchard-indexd",
-        "description": "Flatpak OCI registry-index shim backed by Orchard",
-        "endpoints": ["/index/{arch}"],
-        "note": "protocol under validation in M0 (see DESIGN.md)"
+        "description": "Orchard's local catalog service",
+        "endpoints": ["/v1/catalog", "/index/{arch}"]
     }))
 }
 
 async fn index(
-    State(catalog): State<Arc<dyn CatalogSource>>,
+    State(state): State<ServerState>,
     AxumPath(arch): AxumPath<String>,
 ) -> Json<OciIndex> {
     Json(OciIndex {
         schema_version: 2,
         media_type: INDEX_MEDIA_TYPE.to_string(),
-        manifests: catalog.entries(&arch),
+        manifests: state.index.entries(&arch),
     })
+}
+
+async fn catalog(State(state): State<ServerState>) -> Json<CatalogFile> {
+    Json((*state.catalog).clone())
 }
 
 /// Bind and serve. The port is reachable from the host even when Orchard runs
 /// sandboxed, because flatpak sandboxes share the network namespace by default
 /// (asserted in M2).
-pub async fn serve(addr: std::net::SocketAddr, catalog: Arc<dyn CatalogSource>) -> anyhow::Result<()> {
+pub async fn serve(addr: std::net::SocketAddr, state: ServerState) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, router(catalog)).await?;
+    axum::serve(listener, router(state)).await?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orchard_core::CatalogApp;
 
-    fn hello_entry() -> IndexEntry {
-        IndexEntry::for_ref(
-            "app/com.example.Hello/x86_64/stable",
-            "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
-            1234,
-        )
+    fn sample_catalog() -> CatalogFile {
+        CatalogFile {
+            version: 1,
+            apps: vec![CatalogApp {
+                app_id: "com.orchard.Hello".into(),
+                name: "Orchard Hello".into(),
+                summary: "Demo app".into(),
+                description: None,
+                icon_url: None,
+                publisher: orchard_core::Publisher {
+                    pubkey: "demo-pubkey".into(),
+                    nip05: None,
+                },
+                version: "1.0.0".into(),
+                flatpak_ref: "app/com.orchard.Hello/x86_64/stable".into(),
+                location: "oci:/tmp/demo".into(),
+                digest: Some("sha256:00".into()),
+                metadata: None,
+                notes: None,
+                published_at: 0,
+            }],
+        }
     }
 
-    #[test]
-    fn index_json_shape() {
-        let catalog = StaticCatalog::new(vec![hello_entry()]);
-        let index = OciIndex {
-            schema_version: 2,
-            media_type: INDEX_MEDIA_TYPE.to_string(),
-            manifests: catalog.entries("x86_64"),
-        };
-        let json = serde_json::to_value(&index).unwrap();
-        assert_eq!(json["schemaVersion"], 2);
+    #[tokio::test(flavor = "multi_thread")]
+    async fn catalog_endpoint_serves_document() {
+        let catalog = sample_catalog();
+        let entries = catalog
+            .apps
+            .iter()
+            .map(|a| {
+                IndexEntry::for_ref(
+                    &a.flatpak_ref,
+                    a.digest.clone().unwrap_or_default(),
+                    0,
+                )
+            })
+            .collect();
+        let router = router(ServerState {
+            index: Arc::new(StaticCatalog::new(entries)),
+            catalog: Arc::new(catalog),
+        });
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+
+        // Blocking client on this thread; the multi-thread runtime keeps the
+        // server responsive on its own threads.
+        let agent = ureq::AgentBuilder::new().build();
+
+        let body: CatalogFile = agent
+            .get(&format!("http://{addr}/v1/catalog"))
+            .call()
+            .unwrap()
+            .into_json()
+            .unwrap();
+        assert_eq!(body.apps[0].app_id, "com.orchard.Hello");
+
+        let index: OciIndex = agent
+            .get(&format!("http://{addr}/index/x86_64"))
+            .call()
+            .unwrap()
+            .into_json()
+            .unwrap();
+        assert_eq!(index.manifests.len(), 1);
         assert_eq!(
-            json["manifests"][0]["annotations"]["org.flatpak.ref"],
-            "app/com.example.Hello/x86_64/stable"
+            index.manifests[0].flatpak_ref(),
+            Some("app/com.orchard.Hello/x86_64/stable")
         );
-    }
 
-    #[test]
-    fn static_catalog_filters_by_arch() {
-        let mut other = IndexEntry::for_ref(
-            "app/com.example.Other/aarch64/stable",
-            "sha256:1111".into(),
-            1,
-        );
-        other
-            .annotations
-            .insert("unrelated".into(), "x".into());
-        let catalog = StaticCatalog::new(vec![hello_entry(), other]);
-        let x86: Vec<_> = catalog.entries("x86_64");
-        assert_eq!(x86.len(), 1);
-        assert_eq!(x86[0].flatpak_ref(), Some("app/com.example.Hello/x86_64/stable"));
+        server.abort();
     }
 }

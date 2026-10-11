@@ -11,3 +11,6 @@ gpui = { workspace = true }
 orchard-core = { workspace = true }
 orchard-flatpak = { workspace = true }
 orchard-indexd = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+ureq = { workspace = true }

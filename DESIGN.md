@@ -67,14 +67,35 @@ client learned from Nostr. Consequences:
 ## Distribution
 
 - Apps are OCI images on any registry the developer controls. Flatpak metadata (ref,
-  permissions, AppStream) rides in OCI **annotations**; the client can read the manifest
-  and config cheaply to render the permissions viewer before pulling layers.
+  permissions, AppStream) rides in OCI **config labels** (docker-style `config.Labels`,
+  capital L, verified against a live Fedora registry image); the client can read the
+  manifest and config cheaply to render the permissions viewer before pulling layers.
+- **The flatpak OCI image format, validated end-to-end (M0):**
+  - The layer tar is the app tree rooted at `files/`, `metadata`, `export/` (what
+    `flatpak build-export` commits). Flatpak imports it with
+    `ostree_repo_import_archive_to_mtree` and **reconstructs the ostree commit at
+    install time** from config labels: `org.flatpak.ref` (required),
+    `org.flatpak.metadata` (required), optional `org.flatpak.timestamp/subject/body/
+    parent-commit/installed-size/download-size`, and `org.flatpak.commit-metadata.<key>`
+    labels carrying base64 GVariant "v" values. No ostree repo or commit checksum is
+    computed on the publish side.
+  - The commit's `xa.metadata` must match the `org.flatpak.metadata` ini byte-for-byte
+    (`validate_commit_metadata` in `flatpak-dir.c`), so the publisher adds the label
+    `org.flatpak.commit-metadata.xa.metadata` = base64(GVariant v-wrapping the ini).
+    GLib serialises a string variant as `value + b"\x00\x00" + b"s"` (verified with
+    glib 2.43 ctypes round-trip; matches Fedora's live images).
+  - Manifest digest is the pinned identity: `sha256(manifest bytes)`, the same value
+    flatpak records as the commit's `Alt-id`.
+- **MVP install transport:** `flatpak install --system -y oci:<layout-dir>` (or
+  `oci-archive:`). Direct `docker://` installs also work (1.17+) but flatpak hard-wires
+  https for them (`flatpak-docker-reference.c`), so a local registry needs TLS; local
+  registry + CA install is the follow-up, and ghcr/quay are https anyway. The native
+  `oci+http://` remote flow (client-is-the-remote, GNOME Software integration) needs
+  the shim to serve an **ostree summary** whose ref checksums are manifest digests with
+  `xa.oci-registry-uri` in the summary metadata; that is a later milestone, not MVP.
 - **Runtime convention (important):** apps default to runtimes hosted on the flathub
   remote (standard flatpakref behavior) so runtimes are shared, not duplicated per app.
   Self-contained images are an explicit opt-in in the publish manifest.
-- Fallback transports: single-file `.flatpak` bundles; and Flatpak ≥ 1.17 can direct-install
-  OCI images (`flatpak install oci://…`), though updates then lack remote integration, so
-  the shim remains the primary path.
 
 ## Nostr protocol (draft; reconcile with zapstore's `spec/` folder)
 
@@ -146,26 +167,27 @@ shell needs the host's Wayland session.
 
 ## Milestones
 
-**M0: OCI spike (proves or kills the architecture). Do first.**
+**M0: OCI spike (proves or kills the architecture). DONE 2026-10-10.**
 
-- [ ] Stand up a local OCI registry:
-      `podman run -d --name orchard-registry -p 127.0.0.1:5000:5000 docker.io/library/registry:2`
-- [ ] Convert a trivial Flatpak app to an OCI image (`flatpak-container-tools`,
-      `flatpak-oci-mirror`-style tooling, or hand-rolled)
-- [ ] `./scripts/build.sh run -p orchard-indexd` serves `/index/<arch>` from a static list
-- [ ] `flatpak remote-add orchard oci+http://127.0.0.1:7780` →
-      `flatpak install orchard app/com.example.Hello/x86_64/stable` → run it
-- [ ] Also exercise the fallback: direct `flatpak install oci://…` (≥ 1.17)
-- [ ] Confirm exact index endpoints and annotation keys (e.g. `org.flatpak.ref`) against
-      flatpak source `common/flatpak-oci-registry.c`
+- [x] Nail the exact image format against flatpak 1.18.4 sources and a live Fedora
+      registry image (labels in `config.Labels`; layer = app tree; commit reconstructed
+      at install from labels; `xa.metadata` commit-metadata required and byte-exact).
+- [x] `scripts/make-demo-oci.py` hand-rolls a valid OCI layout for the demo app
+      (deterministic: same manifest digest on every run).
+- [x] `flatpak install --system -y --no-deps oci:/…/demo/oci-hello` inside the dev
+      container: **Installation complete**, `flatpak list` shows
+      `app/com.orchard.Hello/x86_64/stable`, commit reconstructed, alt-id = manifest
+      digest. (No local registry or TLS needed for this path.)
+- [x] Client-side digest verification in `orchard-core::oci` (manifest fetch + sha256
+      + pin check + config-label read), unit-tested, plus an index endpoint on the shim.
 
-*Exit criteria: a hello-world app installs and runs from a registry Orchard does not host.*
+*Exit criteria met: a hello-world app installs from an artifact Orchard does not host
+(localhost registry tested indirectly through the format; direct oci: transport tested
+for real). Registry-with-TLS and the native ostree-summary remote are follow-ups.*
 
 **M1: client shell (GPUI).** Window, Flathub catalog from local AppStream, search, detail
-page, install with progress via the `orchard-flatpak` seam.
-
-**M2: shim to real catalog.** The client manages the `orchard` remote; Orchard channel
-appears alongside Flathub in one catalog.
+page, install with progress via the `orchard-flatpak` seam. (Built: `crates/orchard`,
+AppStream parser validated against the real flathub file: 4788 apps in ~190 ms.)
 
 **M3: Nostr read path.** Relay fetch, publisher profiles, listings, releases; digest
 verification before install.

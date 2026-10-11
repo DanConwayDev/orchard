@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=Orchard Hello
+Comment=Demo app installed through Orchard
+Exec=hello-orchard
+Terminal=false
+Type=Application
+Categories=Utility;

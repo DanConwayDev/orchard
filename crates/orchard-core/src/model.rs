@@ -72,3 +72,117 @@ pub struct Listing {
     /// Latest first, empty until the first release event is seen.
     pub releases: Vec<Release>,
 }
+
+/// The MVP catalog transport: a JSON document with the same information the
+/// Nostr events will carry, one entry per published app. When the Nostr read
+/// path lands (M3) this becomes a projection of kind 30063/30064 events and
+/// the schema below is the event payload contract, so the client code does
+/// not change shape.
+///
+/// Served by `orchard-indexd` at `/v1/catalog` and read by the client.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogFile {
+    pub version: u32,
+    pub apps: Vec<CatalogApp>,
+}
+
+/// One published app in the MVP catalog: a [Listing] plus its latest [Release].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogApp {
+    pub app_id: String,
+    pub name: String,
+    pub summary: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub icon_url: Option<String>,
+    pub publisher: Publisher,
+    pub version: String,
+    /// Full flatpak ref, e.g. `app/com.example.Hello/x86_64/stable`.
+    pub flatpak_ref: String,
+    /// Artifact location: `oci:<dir>` or `docker://<registry>/<repo>:<tag>`.
+    pub location: String,
+    /// Pinned manifest digest, `sha256:…`. Installs refuse to run on mismatch.
+    #[serde(default)]
+    pub digest: Option<String>,
+    /// Flatpak metadata ini, for the permissions viewer.
+    #[serde(default)]
+    pub metadata: Option<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
+    #[serde(default)]
+    pub published_at: i64,
+}
+
+/// Which half of the store an app came from, for badges and install routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    /// Flathub: the reviewed, centralized channel.
+    Reviewed,
+    /// An Orchard catalog: permissionless, publisher-owned, digest-pinned.
+    Publisher,
+}
+
+/// The merged, UI-facing app record. One of these per row in the client,
+/// whether it came from AppStream (reviewed) or the Orchard catalog.
+#[derive(Debug, Clone)]
+pub struct StoreApp {
+    pub app_id: String,
+    pub name: String,
+    pub summary: String,
+    pub description: Option<String>,
+    pub version: Option<String>,
+    pub license: Option<String>,
+    pub source: Source,
+    pub icon_path: Option<std::path::PathBuf>,
+    pub icon_url: Option<String>,
+    pub categories: Vec<String>,
+    /// Publisher pubkey (publisher channel only).
+    pub publisher: Option<String>,
+    /// Flatpak metadata ini (publisher channel only).
+    pub metadata: Option<String>,
+    /// Artifact location string (publisher channel only).
+    pub location: Option<String>,
+    /// Pinned digest (publisher channel only).
+    pub pinned_digest: Option<String>,
+}
+
+impl StoreApp {
+    pub fn from_appstream(app: &crate::appstream::AppstreamApp) -> Self {
+        StoreApp {
+            app_id: app.id.clone(),
+            name: app.name.clone(),
+            summary: app.summary.clone(),
+            description: app.description.clone(),
+            version: app.version.clone(),
+            license: app.license.clone(),
+            source: Source::Reviewed,
+            icon_path: app.icon_path.clone(),
+            icon_url: app.icon_url.clone(),
+            categories: app.categories.clone(),
+            publisher: None,
+            metadata: None,
+            location: None,
+            pinned_digest: None,
+        }
+    }
+
+    pub fn from_catalog(app: &CatalogApp) -> Self {
+        StoreApp {
+            app_id: app.app_id.clone(),
+            name: app.name.clone(),
+            summary: app.summary.clone(),
+            description: app.description.clone(),
+            version: Some(app.version.clone()),
+            license: None,
+            source: Source::Publisher,
+            icon_path: None,
+            icon_url: app.icon_url.clone(),
+            categories: Vec::new(),
+            publisher: Some(app.publisher.pubkey.clone()),
+            metadata: app.metadata.clone(),
+            location: Some(app.location.clone()),
+            pinned_digest: app.digest.clone(),
+        }
+    }
+}
