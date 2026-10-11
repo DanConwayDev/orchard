@@ -127,6 +127,31 @@ pub fn remote_metadata(remote: &str, app_id: &str) -> Command {
     cmd
 }
 
+/// Summary of the remote's current commit for an app, before install:
+/// `flatpak remote-info <remote> <app>` — version and the download /
+/// installed sizes of what would be installed.
+pub fn remote_info(remote: &str, app_id: &str) -> Command {
+    let mut cmd = flatpak_command();
+    cmd.args(["remote-info", "--system", remote, app_id]);
+    cmd
+}
+
+/// The download and installed sizes from `flatpak remote-info` output
+/// (right-aligned keys, humanized values).
+pub fn parse_remote_info(output: &str) -> (Option<String>, Option<String>) {
+    let mut download = None;
+    let mut installed = None;
+    for line in output.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("Download Size:") {
+            download = Some(rest.trim().to_string());
+        } else if let Some(rest) = line.strip_prefix("Installed Size:") {
+            installed = Some(rest.trim().to_string());
+        }
+    }
+    (download, installed)
+}
+
 /// The sandbox metadata ini of an installed app, read straight from the
 /// deploy (`app/<id>/current/active/metadata`). System install first,
 /// then user. This is what powers the permissions view for apps that
@@ -187,5 +212,21 @@ mod tests {
         assert!(args.contains(&"--oci".to_string()));
         assert!(args.contains(&"oci+http://127.0.0.1:7780".to_string()));
         assert!(args.contains(&REMOTE_NAME.to_string()));
+    }
+
+    #[test]
+    fn parse_remote_info_reads_size_lines() {
+        let (download, installed) = parse_remote_info(
+            "\n        ID: com.spotify.Client\n        Ref: \
+             app/com.spotify.Client/x86_64/stable\n    Download Size: 9.8 MB\n   \
+             Installed Size: 14.1 MB\n     Runtime: \
+             org.freedesktop.Platform/x86_64/25.08\n",
+        );
+        assert_eq!(download.as_deref(), Some("9.8 MB"));
+        assert_eq!(installed.as_deref(), Some("14.1 MB"));
+
+        let (download, installed) = parse_remote_info("no sizes here\n");
+        assert_eq!(download, None);
+        assert_eq!(installed, None);
     }
 }

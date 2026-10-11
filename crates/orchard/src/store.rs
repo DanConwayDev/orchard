@@ -97,8 +97,11 @@ pub struct StoreRoot {
     /// installed (reviewed channel), fetched on page open and cached
     /// for the session.
     remote_metadata: HashMap<String, String>,
-    /// Remote-metadata fetches in flight, keyed by app id.
-    remote_metadata_fetching: HashSet<String>,
+    /// Sizes of the remote commit for apps that are not installed:
+    /// app id -> (download, installed), humanized by flatpak.
+    remote_sizes: HashMap<String, (Option<String>, Option<String>)>,
+    /// Remote fetches in flight (metadata + sizes), keyed by app id.
+    remote_fetching: HashSet<String>,
     /// Detail page open? Selection survives closing, so keyboard
     /// navigation resumes where it left off.
     page_open: bool,
@@ -114,6 +117,8 @@ pub struct StoreRoot {
     search_layout: Option<TextLayout>,
     /// Scroll handle for the screenshot strip (wheel capture).
     shot_handle: ScrollHandle,
+    /// Scroll handle for the detail page (reset on app switch).
+    page_scroll: ScrollHandle,
     /// Scroll handle for the virtualized list (keyboard reveal).
     list_handle: UniformListScrollHandle,
 }
@@ -134,13 +139,15 @@ impl StoreRoot {
             fetched: HashMap::new(),
             fetching: HashSet::new(),
             remote_metadata: HashMap::new(),
-            remote_metadata_fetching: HashSet::new(),
+            remote_sizes: HashMap::new(),
+            remote_fetching: HashSet::new(),
             page_open: false,
             category: None,
             cursor: 0,
             anchor: None,
             search_layout: None,
             shot_handle: ScrollHandle::new(),
+            page_scroll: ScrollHandle::new(),
             list_handle: UniformListScrollHandle::new(),
         };
 
@@ -243,8 +250,10 @@ impl StoreRoot {
         let is_new = self.selected.as_deref() != Some(app_id);
         self.selected = Some(app_id.to_string());
         if is_new {
-            // the strip's horizontal scroll must not leak between apps
+            // the strip's horizontal scroll and the page's vertical
+            // scroll must not leak between apps
             self.shot_handle.set_offset(Point::new(px(0.), px(0.)));
+            self.page_scroll.set_offset(Point::new(px(0.), px(0.)));
         }
         if self.page_open {
             return;
@@ -272,35 +281,36 @@ impl StoreRoot {
             }
         }
         self.ensure_fetched(urls, cx);
-        // pre-install sandbox metadata for reviewed apps: the remote
-        // serves the manifest of the commit that would install
+        // pre-install data for reviewed apps: the remote serves the
+        // manifest and sizes of the commit that would install
         let reviewed = self
             .apps
             .iter()
             .find(|a| a.app_id == app_id)
             .is_some_and(|app| app.source == Source::Reviewed);
         if reviewed && !self.installed.contains_key(app_id) {
-            self.ensure_remote_metadata(app_id, cx);
+            self.ensure_remote_data(app_id, cx);
         }
         cx.notify();
     }
 
-    /// Fetch an app's sandbox metadata from the remote (once per
-    /// session; failures retry on the next page open).
-    fn ensure_remote_metadata(&mut self, app_id: &str, cx: &mut Context<Self>) {
-        if self.remote_metadata.contains_key(app_id)
-            || !self.remote_metadata_fetching.insert(app_id.to_string())
+    /// Fetch an app's remote commit summary and sandbox manifest
+    /// (once per session; failures retry on the next page open).
+    fn ensure_remote_data(&mut self, app_id: &str, cx: &mut Context<Self>) {
+        if (self.remote_metadata.contains_key(app_id) && self.remote_sizes.contains_key(app_id))
+            || !self.remote_fetching.insert(app_id.to_string())
         {
             return;
         }
         let app_id = app_id.to_string();
         let remote = FLATHUB_REMOTE.to_string();
         cx.spawn(async move |this, cx| {
-            let key = app_id.clone();
+            let id = app_id.clone();
+            let remote_meta = remote.clone();
             let metadata = cx
                 .background_executor()
                 .spawn(async move {
-                    orchard_flatpak::remote_metadata(&remote, &app_id)
+                    orchard_flatpak::remote_metadata(&remote_meta, &id)
                         .output()
                         .ok()
                         .filter(|out| out.status.success())
@@ -308,11 +318,29 @@ impl StoreRoot {
                         .filter(|text| !text.is_empty())
                 })
                 .await;
+            let id = app_id.clone();
+            let sizes = cx
+                .background_executor()
+                .spawn(async move {
+                    orchard_flatpak::remote_info(&remote, &id)
+                        .output()
+                        .ok()
+                        .filter(|out| out.status.success())
+                        .map(|out| {
+                            orchard_flatpak::parse_remote_info(&String::from_utf8_lossy(
+                                &out.stdout,
+                            ))
+                        })
+                })
+                .await;
             let _ = this.update(cx, |this, cx| {
                 if let Some(metadata) = metadata {
-                    this.remote_metadata.insert(key.clone(), metadata);
+                    this.remote_metadata.insert(app_id.clone(), metadata);
                 }
-                this.remote_metadata_fetching.remove(&key);
+                if let Some(sizes) = sizes {
+                    this.remote_sizes.insert(app_id.clone(), sizes);
+                }
+                this.remote_fetching.remove(&app_id);
                 cx.notify();
             });
         })
@@ -1189,12 +1217,28 @@ impl StoreRoot {
                                         .clone()
                                         .map(|date| div().child(format!("· updated {date}"))),
                                 )
-                                .children(
-                                    self.installed
-                                        .get(&app_id)
-                                        .and_then(|info| info.size.clone())
+                                .children(match self.installed.get(&app_id) {
+                                    // installed: the size on disk; not
+                                    // installed: what the remote would
+                                    // download (or occupy once it lands)
+                                    Some(info) => info
+                                        .size
+                                        .clone()
                                         .map(|size| div().child(format!("· {size}"))),
-                                )
+                                    None => self
+                                        .remote_sizes
+                                        .get(&app_id)
+                                        .and_then(|(download, installed)| {
+                                            download
+                                                .clone()
+                                                .map(|size| div().child(format!("· {size} download")))
+                                                .or_else(|| {
+                                                    installed.clone().map(|size| {
+                                                        div().child(format!("· {size} installed"))
+                                                    })
+                                                })
+                                        }),
+                                })
                                 .children(
                                     app.license.clone().map(|l| div().child(format!("· {l}"))),
                                 ),
@@ -1312,7 +1356,7 @@ impl StoreRoot {
                         .text_size(px(ui::TEXT_SIZE))
                         .text_color(ui::text())
                         .child(ui::icon("icons/shield.svg", 13., ui::text_dim()))
-                        .child(if self.remote_metadata_fetching.contains(&app_id) {
+                        .child(if self.remote_fetching.contains(&app_id) {
                             "Reading the sandbox manifest from flathub…"
                         } else {
                             "Flatpak apps run in a sandbox; this app's permissions appear here once its manifest is available."
@@ -1332,6 +1376,7 @@ impl StoreRoot {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
+                    .track_scroll(&self.page_scroll)
                     .child(div().flex().justify_center().child(content)),
             )
             .child(
