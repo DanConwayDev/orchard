@@ -1,0 +1,9 @@
+[Application]
+name=com.orchard.Orchard
+runtime=org.freedesktop.Platform/x86_64/25.08
+command=orchard
+
+[Context]
+sockets=x11;wayland;
+shared=network;
+filesystems=home;

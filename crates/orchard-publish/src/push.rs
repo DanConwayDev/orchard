@@ -1,6 +1,11 @@
 //! Registry push, Docker v2 API: blob upload (single PUT, monolithic),
 //! then the manifest, then a read-back check. Plain http for localhost
 //! registries, https otherwise, matching the client's verify path.
+//! Bearer-token challenge/response for the public registries (ghcr.io):
+//! on a 401 with a Bearer challenge, fetch a token and ride it on every
+//! request. Credentials come from ORCHARD_REGISTRY_USER and
+//! ORCHARD_REGISTRY_PASSWORD when set; without them the token request
+//! is anonymous.
 
 use std::path::Path;
 
@@ -33,6 +38,7 @@ pub fn push_layout(registry_repo: &str, tag: &str, layout: &Path) -> Result<Stri
     let agent = ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(120))
         .build();
+    let token = bearer_token(&agent, &base, repository)?;
 
     // which blobs the index references: config, layers, and the manifest
     let index: serde_json::Value = serde_json::from_slice(&std::fs::read(layout.join("index.json"))?)
@@ -56,11 +62,11 @@ pub fn push_layout(registry_repo: &str, tag: &str, layout: &Path) -> Result<Stri
     }
 
     for digest in &referenced {
-        if blob_present(&agent, &base, repository, digest)? {
+        if blob_present(&agent, &base, repository, digest, token.as_deref())? {
             println!("  {registry}: blob {} already present", &digest[..19.min(digest.len())]);
             continue;
         }
-        upload_blob(&agent, &base, repository, &read_blob(layout, digest)?)?;
+        upload_blob(&agent, &base, repository, &read_blob(layout, digest)?, token.as_deref())?;
         println!("  {registry}: pushed blob {}", &digest[..19.min(digest.len())]);
     }
 
@@ -69,6 +75,7 @@ pub fn push_layout(registry_repo: &str, tag: &str, layout: &Path) -> Result<Stri
     agent
         .put(&format!("{base}/v2/{repository}/manifests/{tag}"))
         .set("Content-Type", MEDIA_MANIFEST)
+        .set_bearer(token.as_deref())
         .send_bytes(&manifest_bytes)
         .map_err(|err| anyhow::anyhow!("pushing manifest: {err}"))?;
     println!("  {registry}: pushed manifest {tag}");
@@ -77,6 +84,7 @@ pub fn push_layout(registry_repo: &str, tag: &str, layout: &Path) -> Result<Stri
     let served = agent
         .get(&format!("{base}/v2/{repository}/manifests/{manifest_digest}"))
         .set("Accept", MEDIA_MANIFEST)
+        .set_bearer(token.as_deref())
         .call()
         .context("reading back the pushed manifest")?;
     let mut served_bytes = Vec::new();
@@ -97,9 +105,16 @@ fn read_blob(layout: &Path, digest: &str) -> Result<Vec<u8>> {
     Ok(std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?)
 }
 
-fn blob_present(agent: &ureq::Agent, base: &str, repository: &str, digest: &str) -> Result<bool> {
+fn blob_present(
+    agent: &ureq::Agent,
+    base: &str,
+    repository: &str,
+    digest: &str,
+    token: Option<&str>,
+) -> Result<bool> {
     match agent
         .head(&format!("{base}/v2/{repository}/blobs/{digest}"))
+        .set_bearer(token)
         .call()
     {
         Ok(_) => Ok(true),
@@ -108,10 +123,17 @@ fn blob_present(agent: &ureq::Agent, base: &str, repository: &str, digest: &str)
     }
 }
 
-fn upload_blob(agent: &ureq::Agent, base: &str, repository: &str, blob: &[u8]) -> Result<()> {
+fn upload_blob(
+    agent: &ureq::Agent,
+    base: &str,
+    repository: &str,
+    blob: &[u8],
+    token: Option<&str>,
+) -> Result<()> {
     let digest = sha256_digest(blob);
     let upload = agent
         .post(&format!("{base}/v2/{repository}/blobs/uploads/"))
+        .set_bearer(token)
         .call()
         .context("starting blob upload")?;
     let location = upload
@@ -127,6 +149,7 @@ fn upload_blob(agent: &ureq::Agent, base: &str, repository: &str, blob: &[u8]) -
     let separator = if url.contains('?') { '&' } else { '?' };
     agent
         .put(&format!("{url}{separator}digest={digest}"))
+        .set_bearer(token)
         .send_bytes(blob)
         .map_err(|err| anyhow::anyhow!("uploading blob {digest}: {err}"))?;
     Ok(())
@@ -142,6 +165,124 @@ fn registry_base(registry: &str, scheme: Option<&str>) -> String {
     format!("{scheme}://{registry}")
 }
 
+/// The token to ride on every registry request, when the registry
+/// demands one. Probing `/v2/` is the Docker v2 handshake: 200 means
+/// no auth (the local demo registry), a 401 with a Bearer challenge
+/// means fetch a token from the named realm, anything else is an
+/// error worth surfacing.
+fn bearer_token(agent: &ureq::Agent, base: &str, repository: &str) -> Result<Option<String>> {
+    match agent.get(&format!("{base}/v2/")).call() {
+        Ok(_) => Ok(None),
+        Err(ureq::Error::Status(401, response)) => {
+            let header = response
+                .header("WWW-Authenticate")
+                .context("401 without WWW-Authenticate")?
+                .to_string();
+            let challenge = parse_bearer_challenge(&header)
+                .with_context(|| format!("unreadable challenge: {header}"))?;
+            let mut url = format!(
+                "{}?service={}&scope=repository:{repository}:pull,push",
+                challenge.realm, challenge.service,
+            );
+            if let Some(account) = std::env::var("ORCHARD_REGISTRY_USER").ok().filter(|value| !value.is_empty()) {
+                url.push_str(&format!("&account={account}"));
+            }
+            let mut request = agent.get(&url);
+            if let (Some(user), Some(pass)) = (
+                std::env::var("ORCHARD_REGISTRY_USER").ok().filter(|value| !value.is_empty()),
+                std::env::var("ORCHARD_REGISTRY_PASSWORD").ok().filter(|value| !value.is_empty()),
+            ) {
+                request = request.set("Authorization", &basic_auth(&user, &pass));
+            }
+            let response = request
+                .call()
+                .with_context(|| format!("fetching a registry token from {}", challenge.realm))?;
+            let body: serde_json::Value = response.into_json().context("token response")?;
+            let token = body["token"]
+                .as_str()
+                .or_else(|| body["access_token"].as_str())
+                .with_context(|| {
+                    format!(
+                        "no token in the registry's response: {}",
+                        serde_json::to_string(&body).unwrap_or_default()
+                    )
+                })?;
+            Ok(Some(token.to_string()))
+        }
+        Err(err) => Err(err).context("probing the registry"),
+    }
+}
+
+/// `Bearer realm="…",service="…",scope="…"`: comma-separated key="value"
+/// pairs, values possibly quoted.
+fn parse_bearer_challenge(header: &str) -> Option<Challenge> {
+    let rest = header.strip_prefix("Bearer ")?;
+    let mut realm = None;
+    let mut service = String::new();
+    for pair in rest.split(',') {
+        let pair = pair.trim();
+        let (key, value) = pair.split_once('=')?;
+        let value = value.trim_matches('"');
+        match key {
+            "realm" => realm = Some(value.to_string()),
+            "service" => service = value.to_string(),
+            _ => {}
+        }
+    }
+    Some(Challenge {
+        realm: realm?,
+        service,
+    })
+}
+
+struct Challenge {
+    realm: String,
+    service: String,
+}
+
+/// `Authorization: Basic …` for the token endpoint. Standard base64 of
+/// `user:pass`, hand-rolled to keep the dependency list at zero.
+fn basic_auth(user: &str, pass: &str) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let input = format!("{user}:{pass}");
+    let mut out = String::from("Basic ");
+    for chunk in input.as_bytes().chunks(3) {
+        let bytes = [
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        ];
+        let window = u32::from_be_bytes([0, bytes[0], bytes[1], bytes[2]]);
+        out.push(ALPHABET[(window >> 18) as usize & 63] as char);
+        out.push(ALPHABET[(window >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(window >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[window as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// Attach the Authorization header when a token exists.
+trait SetBearer {
+    fn set_bearer(self, token: Option<&str>) -> Self;
+}
+
+impl SetBearer for ureq::Request {
+    fn set_bearer(self, token: Option<&str>) -> Self {
+        match token {
+            Some(token) => self.set("Authorization", &format!("Bearer {token}")),
+            None => self,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,5 +295,71 @@ mod tests {
             registry_base("localhost:5000", Some("https")),
             "https://localhost:5000"
         );
+    }
+
+    #[test]
+    fn challenge_parses_realm_and_service() {
+        // ghcr.io's exact shape
+        let challenge = parse_bearer_challenge(
+            "Bearer realm=\"https://ghcr.io/token\",service=\"ghcr.io\"",
+        )
+        .expect("parses");
+        assert_eq!(challenge.realm, "https://ghcr.io/token");
+        assert_eq!(challenge.service, "ghcr.io");
+        // scope may or may not ride along; we always request our own
+        assert!(parse_bearer_challenge("Basic realm=\"x\"").is_none());
+        assert!(parse_bearer_challenge("Bearer").is_none());
+    }
+
+    #[test]
+    fn basic_auth_encodes_user_colon_pass() {
+        // the classic RFC 4648 test vectors through this path
+        assert_eq!(basic_auth("user", "pass"), "Basic dXNlcjpwYXNz");
+        // padding when the input length hits 4k+1 and 4k+2 byte counts
+        assert_eq!(basic_auth("a", "b"), "Basic YTpi");
+        assert_eq!(basic_auth("a", ""), "Basic YTo=");
+        // ghcr with a GITHUB_TOKEN: the actor name and a long token
+        let header = basic_auth("Letdown2491", "ghs_0123456789abcdef");
+        assert!(header.starts_with("Basic "));
+        let decoded = header
+            .strip_prefix("Basic ")
+            .and_then(base64_decode)
+            .expect("decodes");
+        assert_eq!(decoded, b"Letdown2491:ghs_0123456789abcdef");
+    }
+
+    /// Test helper: minimal base64 decoder for the encoder's output.
+    fn base64_decode(encoded: &str) -> Option<Vec<u8>> {
+        const ALPHABET: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = Vec::new();
+        let bytes: Vec<u8> = encoded
+            .bytes()
+            .filter(|b| *b != b'=')
+            .map(|b| {
+                ALPHABET
+                    .iter()
+                    .position(|a| *a == b)
+                    .map(|i| i as u8)
+                    .unwrap_or(64)
+            })
+            .collect();
+        if bytes.iter().any(|b| *b > 63) {
+            return None;
+        }
+        for chunk in bytes.chunks(4) {
+            let window = (u32::from(chunk[0]) << 18)
+                | (u32::from(chunk[1]) << 12)
+                | (u32::from(*chunk.get(2).unwrap_or(&0)) << 6)
+                | u32::from(*chunk.get(3).unwrap_or(&0));
+            out.push((window >> 16) as u8);
+            if chunk.len() > 2 {
+                out.push((window >> 8) as u8);
+            }
+            if chunk.len() > 3 {
+                out.push(window as u8);
+            }
+        }
+        Some(out)
     }
 }

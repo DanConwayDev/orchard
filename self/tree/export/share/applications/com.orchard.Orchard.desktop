@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Orchard
+Comment=A permissionless Flatpak store
+Exec=orchard
+Icon=com.orchard.Orchard
+Terminal=false
+Categories=Utility;

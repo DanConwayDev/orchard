@@ -1,0 +1,47 @@
+# Orchard publishing itself. On a version tag (v1.2.3): build the
+# binary in the dev container, assemble the app tree, push the OCI
+# artifact to ghcr.io, and sign the NIP-82 events to the relays.
+# Orchard then lists Orchard; updating Orchard is its own update path.
+#
+# Required repository secrets:
+#   ORCHARD_NSEC    the publisher identity's secret key (nsec hex)
+#   ORCHARD_RELAYS  comma-separated relay URLs the events go to
+# GITHUB_TOKEN is the registry password; the package turns public via
+# its settings after the first push.
+
+name: self-publish
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install podman
+        run: sudo apt-get update && sudo apt-get install -y podman
+
+      - name: Build
+        run: ./scripts/build.sh build --release
+
+      - name: Assemble the app tree
+        run: ./self/assemble.sh
+
+      - name: Push and sign
+        env:
+          ORCHARD_NSEC: ${{ secrets.ORCHARD_NSEC }}
+          ORCHARD_REGISTRY_USER: ${{ github.actor }}
+          ORCHARD_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # v1.2.3 becomes 1.2.3
+          export ORCHARD_PUBLISH_VERSION="${GITHUB_REF_NAME#v}"
+          target/release/orchard-publish self/orchard.publish.toml \
+            --registry "ghcr.io/${GITHUB_REPOSITORY,,}" \
+            --relays "${{ secrets.ORCHARD_RELAYS }}"

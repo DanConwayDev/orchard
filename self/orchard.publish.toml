@@ -1,0 +1,27 @@
+# Orchard publishing itself: the same path every publisher uses,
+# run on our own artifact. CI runs this on a version tag with
+# ORCHARD_NSEC, the registry, and the relays supplied by flags and
+# env; a local run against the demo registry is the dry run.
+#
+#   ORCHARD_NSEC=<key> orchard-publish self/orchard.publish.toml \
+#     --registry ghcr.io/letdown2491/orchard --relays <wss urls>
+
+[app]
+id = "com.orchard.Orchard"
+name = "Orchard"
+summary = "A permissionless Flatpak store"
+description = "Install and update Flatpak apps without gatekeepers. Publishers sign their own releases as Nostr events; reviews are real events too, so trust comes from the people who use the app rather than from a curator. Orchard is published through Orchard, updates included."
+categories = ["Utility"]
+
+[release]
+version = "0.1.0"
+arch = "linux-x86_64"
+runtime = "org.freedesktop.Platform/x86_64/25.08"
+notes = "First self-hosted release: Orchard installing and updating Orchard through its own registry and relays."
+
+[artifact]
+tree = "tree"
+
+[publish]
+relays = ["ws://127.0.0.1:8008"]
+tag = "latest"

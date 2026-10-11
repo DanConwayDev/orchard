@@ -90,7 +90,14 @@ fn parse_args() -> Result<Args> {
 
 fn run() -> Result<()> {
     let args = parse_args()?;
-    let manifest = manifest::load(&args.manifest_path)?;
+    let mut manifest = manifest::load(&args.manifest_path)?;
+    // CI derives the version from the pushed tag; the manifest's
+    // version is the local default.
+    if let Ok(from_env) = std::env::var("ORCHARD_PUBLISH_VERSION") {
+        if !from_env.trim().is_empty() {
+            manifest.release.version = from_env.trim().to_string();
+        }
+    }
     let app_id = &manifest.app.id;
     let version = &manifest.release.version;
 
