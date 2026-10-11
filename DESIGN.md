@@ -523,6 +523,18 @@ opening items because they need the push, the signing secret, and a tag.
       parse time; this closes the future-only hole, and fixes the
       undated arms of the sort, which were inverted (undated apps rose
       to the top instead of sinking).
+- [x] A catalog sort picker, as a chosen option rather than a hidden
+      reordering: Updated (the recency rank, the default), Name
+      (alphabetical), Verified first (repo-verified rows, then rows
+      from followed publishers, recency inside each tier). The choice
+      persists in settings like the other view preferences. This
+      closes the cold-start ranking question: the client curates
+      nothing the user did not pick, so a hostile flood of fresh keys
+      is answered by channels plus an explicit trust sort, not by the
+      client quietly knowing better. Per-publisher clustering was
+      dropped from the plan; its real content is publisher pages
+      (everything from one key in one place), parked as a navigation
+      feature for later.
 - [x] Client relay configuration, as a full settings page: Sources (channel
       visibility switches, the channel the store opens on), Relays (the event
       and social sets, editable rows with add, remove, and a reset to the
