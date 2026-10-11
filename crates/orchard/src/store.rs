@@ -123,6 +123,8 @@ pub struct StoreRoot {
     shot_handle: ScrollHandle,
     /// Scroll handle for the detail page (reset on app switch).
     page_scroll: ScrollHandle,
+    /// The enlarged screenshot (its url), over a dimmed page.
+    lightbox: Option<String>,
     /// Scroll handle for the virtualized list (keyboard reveal).
     list_handle: UniformListScrollHandle,
 }
@@ -152,6 +154,7 @@ impl StoreRoot {
             search_layout: None,
             shot_handle: ScrollHandle::new(),
             page_scroll: ScrollHandle::new(),
+            lightbox: None,
             list_handle: UniformListScrollHandle::new(),
         };
 
@@ -272,9 +275,10 @@ impl StoreRoot {
         self.selected = Some(app_id.to_string());
         if is_new {
             // the strip's horizontal scroll and the page's vertical
-            // scroll must not leak between apps
+            // scroll must not leak between apps, nor a lightbox
             self.shot_handle.set_offset(Point::new(px(0.), px(0.)));
             self.page_scroll.set_offset(Point::new(px(0.), px(0.)));
+            self.lightbox = None;
         }
         if self.page_open {
             return;
@@ -372,6 +376,7 @@ impl StoreRoot {
     /// navigation resumes where it left off.
     fn close_page(&mut self, cx: &mut Context<Self>) {
         self.page_open = false;
+        self.lightbox = None;
         cx.notify();
     }
 
@@ -669,9 +674,11 @@ impl StoreRoot {
                 self.delete_text(false);
             }
             "escape" => {
-                // back out one level: page, then selection, then text,
-                // then row selection
-                if self.page_open {
+                // back out one level: lightbox, page, then selection,
+                // then text, then row selection
+                if self.lightbox.is_some() {
+                    self.lightbox = None;
+                } else if self.page_open {
                     self.close_page(cx);
                 } else if self.anchor.is_some() {
                     self.anchor = None;
@@ -1336,14 +1343,28 @@ impl StoreRoot {
                     }))
                     .children(app.screenshots.iter().take(6).map(|url| {
                         match self.fetched.get(url) {
-                            Some(Some(path)) => gpui::img(path.clone())
-                                .w(px(280.))
-                                .h(px(158.))
+                            Some(Some(path)) => div()
+                                .id(SharedString::from(format!("shot-{url}")))
                                 .flex_none()
-                                .object_fit(gpui::ObjectFit::Cover)
+                                .cursor_pointer()
                                 .rounded_sm()
                                 .border_1()
                                 .border_color(ui::divider())
+                                .overflow_hidden()
+                                .hover(|style| style.border_color(ui::accent()))
+                                .on_click(cx.listener({
+                                    let url = url.clone();
+                                    move |this, _e: &ClickEvent, _w, cx| {
+                                        this.lightbox = Some(url.clone());
+                                        cx.notify();
+                                    }
+                                }))
+                                .child(
+                                    gpui::img(path.clone())
+                                        .w(px(280.))
+                                        .h(px(158.))
+                                        .object_fit(gpui::ObjectFit::Cover),
+                                )
                                 .into_any_element(),
                             slot => image_placeholder(slot.is_none()),
                         }
@@ -1647,6 +1668,7 @@ impl Render for StoreRoot {
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::key_down))
             .size_full()
+            .relative()
             .flex()
             .flex_col()
             .bg(ui::inset())
@@ -1878,6 +1900,40 @@ impl Render for StoreRoot {
                             .child(format!("⚠ {error}"))
                     })),
             )
+            .when_some(self.lightbox.clone(), |root, url| {
+                // the lightbox: a dimmed overlay over everything with
+                // the fetched image contained in the viewport; any
+                // click or Escape dismisses it
+                root.child(
+                    div()
+                        .id("lightbox")
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .w_full()
+                        .h_full()
+                        .bg(gpui::rgba(0x000000B3))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .p_6()
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
+                            this.lightbox = None;
+                            cx.notify();
+                        }))
+                        .children(
+                            self.fetched
+                                .get(&url)
+                                .and_then(|slot| slot.clone())
+                                .map(|path| {
+                                    gpui::img(path)
+                                        .size_full()
+                                        .object_fit(gpui::ObjectFit::Contain)
+                                }),
+                        ),
+                )
+            })
             .id("store-root")
             .on_click(cx.listener(|this, _e: &ClickEvent, window, _cx| {
                 // Keep the keyboard attached to the search context.
