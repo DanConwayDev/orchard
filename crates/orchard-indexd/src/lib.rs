@@ -87,6 +87,14 @@ impl IndexEntry {
 pub trait CatalogDocument: Send + Sync + 'static {
     /// The full catalog document to serve.
     fn document(&self) -> CatalogFile;
+
+    /// The reviews document to serve. Static files carry none.
+    fn reviews(&self) -> orchard_core::ReviewsFile {
+        orchard_core::ReviewsFile {
+            version: 1,
+            reviews: Vec::new(),
+        }
+    }
 }
 
 impl CatalogDocument for CatalogFile {
@@ -114,6 +122,10 @@ impl CatalogDocument for NostrCatalog {
         apps.sort_by(|a, b| a.app_id.cmp(&b.app_id));
         CatalogFile { version: 1, apps }
     }
+
+    fn reviews(&self) -> orchard_core::ReviewsFile {
+        self.feed.lock().expect("feed lock poisoned").reviews()
+    }
 }
 
 /// Shared server state: the catalog document (and the OCI index derived
@@ -138,6 +150,7 @@ pub fn router(state: ServerState) -> Router {
         .route("/", get(root))
         .route("/index/{arch}", get(index))
         .route("/v1/catalog", get(catalog))
+        .route("/v1/reviews", get(reviews))
         .with_state(state)
 }
 
@@ -179,6 +192,11 @@ async fn index(
 
 async fn catalog(State(state): State<ServerState>) -> Json<CatalogFile> {
     Json(state.document.document())
+}
+
+/// The reviews document, straight from the live feed.
+async fn reviews(State(state): State<ServerState>) -> Json<orchard_core::ReviewsFile> {
+    Json(state.document.reviews())
 }
 
 /// Bind and serve. The port is reachable from the host even when Orchard runs

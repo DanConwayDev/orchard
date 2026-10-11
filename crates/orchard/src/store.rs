@@ -25,6 +25,9 @@ use crate::ui::{self, app_icon, badge, button};
 /// Port the in-process indexd listens on. The client is the remote.
 pub const INDEXD_PORT: u16 = 7780;
 
+/// The default dev relay, shared by the embedded indexd and review posts.
+const LOCAL_RELAY: &str = "ws://127.0.0.1:8008";
+
 const FLATHUB_REMOTE: &str = "flathub";
 const APPSTREAM_ARCH: &str = "x86_64";
 
@@ -111,6 +114,28 @@ pub struct StoreRoot {
     /// Failed pre-install digest checks: app id -> why. Security
     /// relevant, so it shows on the page, not just in the log.
     verify_errors: HashMap<String, String>,
+    /// Reviews from indexd (kind 30065): app id -> newest first.
+    reviews: HashMap<String, Vec<orchard_core::Review>>,
+    /// A reviews fetch in flight (whole document; small at this scale).
+    reviews_fetching: bool,
+    /// Compose mode: keystrokes go to the review draft, not the search
+    /// box or the page's type-to-close. Entered by clicking the compose
+    /// box or pressing r on a page; left by Escape or a successful post.
+    composing: bool,
+    /// The draft review: (rating 1.0 to 5.0, text). Kept across
+    /// accidental Escapes, cleared on post and on page switch.
+    review_draft: (Option<f32>, String),
+    /// Draft text cursor (byte index) and selection anchor, mirroring
+    /// the search box fields.
+    review_cursor: usize,
+    review_anchor: Option<usize>,
+    /// Layout handle for the draft text (caret mapping). None until the
+    /// first frame with text has been laid out.
+    review_layout: Option<TextLayout>,
+    /// A review post in flight.
+    review_posting: bool,
+    /// Review compose/post error, shown next to the compose box.
+    review_error: Option<String>,
     /// Detail page open? Selection survives closing, so keyboard
     /// navigation resumes where it left off.
     page_open: bool,
@@ -154,6 +179,15 @@ impl StoreRoot {
             remote_fetching: HashSet::new(),
             publisher_fetching: HashSet::new(),
             verify_errors: HashMap::new(),
+            reviews: HashMap::new(),
+            reviews_fetching: false,
+            composing: false,
+            review_draft: (None, String::new()),
+            review_cursor: 0,
+            review_anchor: None,
+            review_layout: None,
+            review_posting: false,
+            review_error: None,
             page_open: false,
             category: None,
             cursor: 0,
@@ -193,6 +227,10 @@ impl StoreRoot {
                     .await;
                 let _ = this.update(cx, |this, cx| {
                     this.apply_orchard_apps(orchard_apps, cx);
+                    // reviews only move while somebody is looking
+                    if this.page_open {
+                        this.ensure_reviews(cx);
+                    }
                 });
             }
         })
@@ -304,6 +342,13 @@ impl StoreRoot {
             self.shot_handle.set_offset(Point::new(px(0.), px(0.)));
             self.page_scroll.set_offset(Point::new(px(0.), px(0.)));
             self.lightbox = None;
+            // a half-written review belongs to the app it was for
+            self.composing = false;
+            self.review_draft = (None, String::new());
+            self.review_cursor = 0;
+            self.review_anchor = None;
+            self.review_layout = None;
+            self.review_error = None;
         }
         if self.page_open {
             return;
@@ -342,6 +387,7 @@ impl StoreRoot {
             Some(Source::Publisher) if not_installed => self.ensure_publisher_data(app_id, cx),
             _ => {}
         }
+        self.ensure_reviews(cx);
         cx.notify();
     }
 
@@ -512,11 +558,86 @@ impl StoreRoot {
         .detach();
     }
 
+    // ----- reviews (kind 30065) -----
+
+    /// Fetch the reviews document from indexd (once per page open; the
+    /// refresh loop repeats the call while a page is open). The whole
+    /// document is small at this scale; per-app filtering happens here.
+    fn ensure_reviews(&mut self, cx: &mut Context<Self>) {
+        if self.reviews_fetching {
+            return;
+        }
+        self.reviews_fetching = true;
+        cx.spawn(async move |this, cx| {
+            let fetched = cx
+                .background_executor()
+                .spawn(async move { load_reviews() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.reviews_fetching = false;
+                match fetched {
+                    Ok(reviews) => {
+                        this.reviews = reviews;
+                        cx.notify();
+                    }
+                    Err(err) => {
+                        // keep the old reviews; the next page open or
+                        // refresh tick retries
+                        eprintln!("reviews fetch failed: {err:#}");
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Post the draft review for the open page: sign with the local
+    /// identity, send to the relays, refresh the section.
+    fn post_review(&mut self, app_id: &str, cx: &mut Context<Self>) {
+        if self.review_posting {
+            return;
+        }
+        let Some((rating, _)) = self.review_draft.0.map(|r| (r, ())) else {
+            self.review_error = Some("Pick a rating first (keys 1 to 5).".into());
+            cx.notify();
+            return;
+        };
+        let content = self.review_draft.1.trim().to_string();
+        self.review_posting = true;
+        self.review_error = None;
+        let app_id = app_id.to_string();
+        cx.spawn(async move |this, cx| {
+            let posted = cx
+                .background_executor()
+                .spawn(async move { post_review(&app_id, rating, content) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.review_posting = false;
+                match posted {
+                    Ok(()) => {
+                        this.review_draft = (None, String::new());
+                        this.review_cursor = 0;
+                        this.review_anchor = None;
+                        this.review_layout = None;
+                        this.composing = false;
+                        this.ensure_reviews(cx);
+                    }
+                    Err(err) => {
+                        this.review_error = Some(format!("{err:#}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// Close the detail page. Selection survives so keyboard
     /// navigation resumes where it left off.
     fn close_page(&mut self, cx: &mut Context<Self>) {
         self.page_open = false;
         self.lightbox = None;
+        self.composing = false;
         cx.notify();
     }
 
@@ -756,6 +877,48 @@ impl StoreRoot {
         let key = keystroke.key.as_str();
         let shift = keystroke.modifiers.shift;
         let ctrl = keystroke.modifiers.control || keystroke.modifiers.platform;
+
+        // ----- review compose: keystrokes go to the draft, not the
+        // search box, and typing does not close the page -----
+        if self.composing {
+            match key {
+                "escape" => {
+                    // compose first, page second: a stray Escape does
+                    // not throw the reader out of the app
+                    self.composing = false;
+                }
+                "enter" => {
+                    if !self.review_posting {
+                        let app_id = self.selected.clone().unwrap_or_default();
+                        self.post_review(&app_id, cx);
+                    }
+                }
+                // digits 1 to 5 set the star rating, discoverable and
+                // one keypress each
+                "1" | "2" | "3" | "4" | "5" => {
+                    self.review_draft.0 = Some(key.parse::<u8>().unwrap() as f32);
+                    self.review_error = None;
+                }
+                "left" | "right" | "home" | "end" | "backspace" | "delete" => {
+                    self.move_draft_cursor(key, shift);
+                }
+                other if other.chars().count() == 1 && !ctrl => {
+                    self.insert_draft_text(other);
+                }
+                _ => {}
+            }
+            cx.notify();
+            return;
+        }
+
+        // r starts a review from the page, before the type-to-close
+        // rule eats the keystroke
+        if self.page_open && key == "r" && !ctrl {
+            self.composing = true;
+            cx.notify();
+            return;
+        }
+
         match key {
             // ----- search editing: the input is always live -----
             "left" => self.move_cursor(false, shift),
@@ -936,6 +1099,73 @@ impl StoreRoot {
         };
         if !extend {
             self.anchor = None;
+        }
+    }
+
+    /// Draft-review text edits: the same model as the search box,
+    /// pointed at the review draft instead. `key` is a gpui key name.
+    fn insert_draft_text(&mut self, text: &str) {
+        let (start, end) = self.draft_selection();
+        self.review_draft.1.replace_range(start..end, text);
+        self.review_cursor = start + text.len();
+        self.review_anchor = None;
+    }
+
+    fn delete_draft_text(&mut self, backspace: bool) {
+        let (start, end) = self.draft_selection();
+        let body = &mut self.review_draft.1;
+        if start != end {
+            body.replace_range(start..end, "");
+            self.review_cursor = start;
+            self.review_anchor = None;
+            return;
+        }
+        if backspace && start > 0 {
+            let prev = body[..start]
+                .chars()
+                .next_back()
+                .map_or(0, |c| c.len_utf8());
+            body.replace_range(start - prev..start, "");
+            self.review_cursor = start - prev;
+        } else if !backspace && end < body.len() {
+            let next = body[end..].chars().next().map_or(0, |c| c.len_utf8());
+            body.replace_range(end..end + next, "");
+        }
+        self.review_anchor = None;
+    }
+
+    fn move_draft_cursor(&mut self, key: &str, extend: bool) {
+        if key == "backspace" || key == "delete" {
+            self.delete_draft_text(key == "backspace");
+            return;
+        }
+        let body = &self.review_draft.1;
+        self.review_cursor = match key {
+            "left" => body[..self.review_cursor]
+                .chars()
+                .next_back()
+                .map_or(0, |c| self.review_cursor - c.len_utf8()),
+            "right" => body[self.review_cursor..]
+                .chars()
+                .next()
+                .map_or(self.review_cursor, |c| self.review_cursor + c.len_utf8()),
+            "home" => 0,
+            "end" => body.len(),
+            _ => return,
+        };
+        if !extend {
+            self.review_anchor = None;
+        }
+    }
+
+    /// The draft's selected byte range, ordered; `(cursor, cursor)`
+    /// when empty.
+    fn draft_selection(&self) -> (usize, usize) {
+        match self.review_anchor {
+            Some(anchor) if anchor != self.review_cursor => {
+                (anchor.min(self.review_cursor), anchor.max(self.review_cursor))
+            }
+            _ => (self.review_cursor, self.review_cursor),
         }
     }
 
@@ -1302,10 +1532,10 @@ impl StoreRoot {
     /// permissions, and the install action in one scrollable view.
     /// The page is where the install decision happens, so the action
     /// bar stays pinned while the content scrolls.
-    fn render_page(&self, app: StoreApp, cx: &mut Context<Self>) -> AnyElement {
+    fn render_page(&mut self, app: StoreApp, font: gpui::Font, cx: &mut Context<Self>) -> AnyElement {
         let app_id = app.app_id.clone();
         let installed = self.installed.contains_key(&app_id);
-        let job = self.jobs.get(&app_id);
+        let job = self.jobs.get(&app_id).cloned();
         let verified = self.verified.get(&app_id).cloned();
 
         // the permissions source, in order: catalog metadata (Orchard
@@ -1570,6 +1800,7 @@ impl StoreRoot {
                     .child(ui::icon("icons/globe.svg", 13., ui::accent()))
                     .child(url)
             }))
+            .child(self.render_reviews(&app_id, font.clone(), cx))
             .when_some(sandbox_metadata, |section, metadata| {
                 section.child(
                     div()
@@ -1753,6 +1984,322 @@ fn image_placeholder(loading: bool) -> gpui::AnyElement {
         .text_color(ui::text_dim())
         .child(if loading { "loading…" } else { "unavailable" })
         .into_any_element()
+}
+
+impl StoreRoot {
+    /// The reviews section of the app page: the list (newest first)
+    /// plus the compose box. Compose is a mode, not an always-live
+    /// input: keystrokes reach the draft only once it is active, so
+    /// type-to-close keeps working elsewhere on the page.
+    fn render_reviews(&mut self, app_id: &str, font: gpui::Font, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let reviews = self
+            .reviews
+            .get(app_id)
+            .cloned()
+            .unwrap_or_default();
+
+        let section = div().flex().flex_col().gap_2().w_full();
+
+        // header: count and average, quiet
+        let average = if reviews.is_empty() {
+            None
+        } else {
+            let rated: Vec<f32> = reviews.iter().filter_map(|r| r.rating).collect();
+            (!rated.is_empty()).then(|| rated.iter().sum::<f32>() / rated.len() as f32)
+        };
+        let section = section.child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .text_size(px(ui::TEXT_SIZE_EMPHASIS - 1.))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(ui::text())
+                .child(ui::icon("icons/star.svg", 13., ui::text()))
+                .child(if reviews.is_empty() {
+                    "No reviews yet".to_string()
+                } else {
+                    match average {
+                        Some(value) => format!(
+                            "Reviews · {} ({} {})",
+                            reviews.len(),
+                            value,
+                            stars(value)
+                        ),
+                        None => format!("Reviews · {}", reviews.len()),
+                    }
+                }),
+        );
+
+        // the reviews themselves
+        let mut section = section;
+        for review in &reviews {
+            let author = review
+                .name
+                .clone()
+                .or_else(|| review.nip05.clone())
+                .unwrap_or_else(|| format!("{}…", &review.pubkey[..review.pubkey.len().min(12)]));
+            let when = relative_time(review.created_at);
+            section = section.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(ui::divider_soft())
+                    .px_3()
+                    .py_2()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_size(px(ui::TEXT_SIZE_LABEL))
+                            .text_color(ui::text_dim())
+                            .child(div().child(author))
+                            .children(review.rating.map(|value| {
+                                div()
+                                    .text_color(ui::accent())
+                                    .child(stars(value))
+                            }))
+                            .child(div().child(when)),
+                    )
+                    .children((!review.content.is_empty()).then(|| {
+                        div()
+                            .flex()
+                            .flex_col()
+                            .text_size(px(ui::TEXT_SIZE))
+                            .text_color(ui::text())
+                            .children(
+                                review
+                                    .content
+                                    .lines()
+                                    .map(|line| div().w_full().child(line.to_string())),
+                            )
+                    })),
+            );
+        }
+
+        // compose: either the live draft or the quiet invitation
+        section = if self.composing {
+            section.child(self.render_review_compose(app_id, font.clone(), cx))
+        } else {
+            section.child(
+                div()
+                    .id("write-review")
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .cursor_pointer()
+                    .text_size(px(ui::TEXT_SIZE))
+                    .text_color(ui::accent())
+                    .hover(|style| style.text_color(ui::text()))
+                    .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
+                        this.composing = true;
+                        cx.notify();
+                    }))
+                    .child("Write a review (r)"),
+            )
+        };
+
+        section.into_any_element()
+    }
+
+    /// The live compose box: star row, draft input with a real caret,
+    /// post button, error line.
+    fn render_review_compose(&mut self, app_id: &str, font: gpui::Font, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let (draft_rating, draft_text) = (self.review_draft.0, self.review_draft.1.clone());
+        let placeholder = draft_text.is_empty();
+
+        // star row: five clicks, or keys 1 to 5
+        let mut star_row = div().flex().items_center().gap_1();
+        for value in 1u8..=5 {
+            let filled = draft_rating.is_some_and(|r| r >= value as f32);
+            star_row = star_row.child(
+                div()
+                    .id(SharedString::from(format!("star-{value}")))
+                    .cursor_pointer()
+                    .text_size(px(ui::TEXT_SIZE_EMPHASIS))
+                    .text_color(if filled { ui::accent() } else { ui::text_dim() })
+                    .hover(|style| style.text_color(ui::accent()))
+                    .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
+                        this.review_draft.0 = Some(value as f32);
+                        this.review_error = None;
+                        cx.notify();
+                    }))
+                    .child("★"),
+            );
+        }
+
+        // the draft input mirrors the search box: StyledText carries the
+        // selection, the layout handle maps the caret, one frame stale
+        let mut styled = StyledText::new(draft_text.clone());
+        if !placeholder {
+            let (start, end) = self.draft_selection();
+            let plain: Hsla = ui::text().into();
+            let mut highlighted: Hsla = ui::accent().into();
+            highlighted.a = 0.35;
+            let mut runs: Vec<TextRun> = Vec::new();
+            let make_run = |len: usize, bg: Option<Hsla>| TextRun {
+                len,
+                font: font.clone(),
+                color: plain,
+                background_color: bg,
+                underline: None,
+                strikethrough: None,
+            };
+            if start > 0 {
+                runs.push(make_run(start, None));
+            }
+            if end > start {
+                runs.push(make_run(end - start, Some(highlighted)));
+            }
+            if end < draft_text.len() {
+                runs.push(make_run(draft_text.len() - end, None));
+            }
+            styled = styled.with_runs(runs);
+        }
+        let prev_layout = self.review_layout.clone();
+        let live_layout = styled.layout().clone();
+        if !placeholder {
+            self.review_layout = Some(live_layout.clone());
+        }
+        let caret_x = if placeholder {
+            Some(px(0.))
+        } else {
+            prev_layout.and_then(|layout| {
+                layout
+                    .position_for_index(self.review_cursor.min(draft_text.len()))
+                    .map(|pos| pos.x - layout.bounds().origin.x)
+            })
+        };
+
+        let input = div()
+            .id("review-input")
+            .cursor_pointer()
+            .relative()
+            .flex()
+            .items_center()
+            .min_h(px(22.))
+            .text_size(px(ui::TEXT_SIZE))
+            .text_color(if placeholder {
+                ui::text_dim()
+            } else {
+                ui::text()
+            })
+            .when(placeholder, |slot| {
+                slot.child("What did you think? Optional; Enter posts your review.")
+            })
+            // the StyledText itself must paint: measurement happens at
+            // paint time, and the caret's next-frame position_for_index
+            // panics on an unmeasured handle
+            .when(!placeholder, |slot| slot.child(styled));
+
+        // the caret rides inside the input (its relative parent) as a
+        // plain absolute overlay: it carries no id, so clicks land on
+        // the input itself
+        let input = if let Some(caret_x) = caret_x {
+            input.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left_0()
+                    .flex()
+                    .items_center()
+                    .child(
+                        div().ml(caret_x).w(px(1.5)).h(px(16.)).bg(ui::text()),
+                    ),
+            )
+        } else {
+            input
+        };
+
+        let mut compose = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .rounded_sm()
+            .border_1()
+            .border_color(ui::accent())
+            .px_3()
+            .py_2()
+            .child(star_row)
+            .child(input);
+
+        compose = compose.child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_size(px(ui::TEXT_SIZE_LABEL))
+                        .text_color(ui::text_dim())
+                        .child(if self.review_posting {
+                            "Posting…"
+                        } else {
+                            "Enter posts, Esc keeps editing, 1 to 5 rate"
+                        }),
+                )
+                .child(
+                    button("btn-post-review", None, "Post review", true).on_click(
+                        cx.listener({
+                            let app_id = app_id.to_string();
+                            move |this, _e: &ClickEvent, _w, cx| {
+                                this.post_review(&app_id, cx);
+                            }
+                        }),
+                    ),
+                ),
+        );
+
+        if let Some(error) = &self.review_error {
+            compose = compose.child(
+                div()
+                    .text_size(px(ui::TEXT_SIZE_LABEL))
+                    .text_color(ui::risk_color(Risk::Medium))
+                    .child(error.clone()),
+            );
+        }
+
+        compose.into_any_element()
+    }
+}
+
+/// Five-star text: rounded to the nearest star, filled over dim.
+fn stars(rating: f32) -> String {
+    let filled = rating.round().clamp(0.0, 5.0) as usize;
+    let mut out = String::new();
+    for _ in 0..filled {
+        out.push('★');
+    }
+    for _ in filled..5 {
+        out.push('☆');
+    }
+    out
+}
+
+/// Human relative time for a review's created_at (unix seconds).
+fn relative_time(secs: i64) -> String {
+    let delta = (chrono_now() - secs).max(0);
+    const MINUTE: i64 = 60;
+    const HOUR: i64 = 60 * MINUTE;
+    const DAY: i64 = 24 * HOUR;
+    match delta {
+        0..=MINUTE => "just now".into(),
+        d if d < HOUR => format!("{} minutes ago", d / MINUTE),
+        d if d < DAY => format!("{} hours ago", d / HOUR),
+        d => format!("{} days ago", d / DAY),
+    }
+}
+
+fn chrono_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 fn render_permissions_static(metadata: &str) -> gpui::AnyElement {
@@ -2033,7 +2580,7 @@ impl Render for StoreRoot {
             // full app page
             .child(if page_open {
                 match selected {
-                    Some(app) => self.render_page(app, cx).into_any_element(),
+                    Some(app) => self.render_page(app, window.text_style().font(), cx).into_any_element(),
                     None => self.render_browse(cx),
                 }
             } else {
@@ -2189,6 +2736,83 @@ fn load_orchard_catalog() -> Vec<StoreApp> {
     catalog
         .map(|catalog| catalog.apps.iter().map(StoreApp::from_catalog).collect())
         .unwrap_or_default()
+}
+
+/// Reviews from indexd, grouped by app id (newest first within an app).
+fn load_reviews() -> anyhow::Result<HashMap<String, Vec<orchard_core::Review>>> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(5))
+        .build();
+    let file: orchard_core::ReviewsFile = agent
+        .get(&format!("http://127.0.0.1:{INDEXD_PORT}/v1/reviews"))
+        .call()?
+        .into_json()?;
+    let mut grouped: HashMap<String, Vec<orchard_core::Review>> = HashMap::new();
+    for review in file.reviews {
+        grouped
+            .entry(review.app_id.clone())
+            .or_default()
+            .push(review);
+    }
+    Ok(grouped)
+}
+
+/// Sign and send one review event to the review relays. Blocking: runs
+/// on the background pool.
+fn post_review(app_id: &str, rating: f32, content: String) -> anyhow::Result<()> {
+    let keys = identity_keys()?;
+    let event = orchard_nostr::events::sign_review(
+        &keys,
+        &orchard_nostr::events::Review {
+            app_id: app_id.to_string(),
+            rating: Some(rating),
+            content,
+        },
+    )?;
+    for url in review_relays() {
+        orchard_nostr::relay::send(&url, std::slice::from_ref(&event))?;
+    }
+    Ok(())
+}
+
+/// Relays to post reviews to: the same list the embedded indexd reads
+/// from (ORCHARD_RELAYS or the local dev relay).
+fn review_relays() -> Vec<String> {
+    match std::env::var("ORCHARD_RELAYS") {
+        Ok(value) if !value.trim().is_empty() => value
+            .split(',')
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .map(str::to_string)
+            .collect(),
+        _ => vec![LOCAL_RELAY.to_string()],
+    }
+}
+
+/// The reviewer identity: a local key, generated on first post and kept
+/// in the data directory. Reviews carry no personal data, but losing the
+/// file loses the reviewer identity (and the right to edit old reviews).
+fn identity_keys() -> anyhow::Result<nostr::prelude::Keys> {
+    use nostr::prelude::*;
+    let path = match std::env::var_os("XDG_DATA_HOME") {
+        Some(data) => std::path::PathBuf::from(data).join("orchard/identity.key"),
+        None => anyhow::bail!("XDG_DATA_HOME not set"),
+    };
+    if path.exists() {
+        let raw = std::fs::read_to_string(&path)?;
+        return Ok(Keys::parse(raw.trim())?);
+    }
+    let keys = Keys::generate();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, keys.secret_key().to_secret_hex())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(keys)
 }
 
 /// Parse `flatpak list --app --columns=application,version,origin,installation`.

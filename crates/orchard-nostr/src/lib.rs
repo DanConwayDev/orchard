@@ -22,7 +22,7 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context as _, Result};
 use nostr::prelude::*;
 use orchard_core::{CatalogApp, CatalogFile, Publisher};
 
@@ -33,6 +33,7 @@ pub const KIND_PROFILE: u32 = 0;
 pub const KIND_APP: u32 = 32267;
 pub const KIND_RELEASE: u32 = 30063;
 pub const KIND_ASSET: u32 = 3063;
+pub const KIND_REVIEW: u32 = 30065;
 
 /// The event fields Orchard reads, parsed once from the canonical JSON so
 /// tag handling does not depend on the `Tag` API surface.
@@ -148,6 +149,15 @@ struct Profile {
     nip05: Option<String>,
 }
 
+/// A user review (kind 30065): `d` is the app id, content the text,
+/// `rating` an optional 0.0 to 5.0 tag. Replaceable per (pubkey, app id):
+/// editing is republishing, so one identity holds one review per app.
+struct Review {
+    event: Event,
+    created_at: u64,
+    rating: Option<f32>,
+}
+
 /// The accumulated set of verified NIP-82 events, ready to project into a
 /// catalog. Replaceable semantics: the newest event per `d` wins.
 #[derive(Default)]
@@ -156,6 +166,8 @@ pub struct Feed {
     releases: BTreeMap<String, Vec<Release>>,
     assets: BTreeMap<String, Asset>,
     profiles: BTreeMap<String, Profile>,
+    /// Keyed (pubkey, app id): one review per identity per app.
+    reviews: BTreeMap<(String, String), Review>,
 }
 
 impl Feed {
@@ -180,6 +192,7 @@ impl Feed {
             KIND_RELEASE => self.absorb_release(event, parts),
             KIND_ASSET => self.absorb_asset(event, parts),
             KIND_PROFILE => self.absorb_profile(event, parts),
+            KIND_REVIEW => self.absorb_review(event, parts),
             _ => Ok(false),
         }
     }
@@ -302,6 +315,74 @@ impl Feed {
         Ok(true)
     }
 
+    fn absorb_review(&mut self, event: Event, parts: Parts) -> Result<bool> {
+        let Some(app_id) = parts.tag("d") else {
+            bail!("review without d tag");
+        };
+        // a rating tag, when present, must be a sane 0.0 to 5.0: a client
+        // that publishes another format is broken, not lying
+        let rating = match parts.tag("rating") {
+            Some(raw) => {
+                let value: f32 = raw
+                    .parse()
+                    .with_context(|| format!("review rating {raw:?} is not a number"))?;
+                if !(0.0..=5.0).contains(&value) {
+                    bail!("review rating {value} outside 0.0 to 5.0");
+                }
+                Some(value)
+            }
+            None => None,
+        };
+        let key = (parts.pubkey.clone(), app_id);
+        let newer = self
+            .reviews
+            .get(&key)
+            .is_none_or(|old| old.created_at <= parts.created_at);
+        if !newer {
+            return Ok(false);
+        }
+        self.reviews.insert(
+            key,
+            Review {
+                created_at: parts.created_at,
+                rating,
+                event,
+            },
+        );
+        Ok(true)
+    }
+
+    /// The feed's reviews, app id ascending, newest first within each
+    /// app. Author name fields resolve from the author's kind 0 profile
+    /// when one has been seen.
+    pub fn reviews(&self) -> orchard_core::ReviewsFile {
+        let mut reviews: Vec<orchard_core::Review> = self
+            .reviews
+            .iter()
+            .map(|((pubkey, app_id), review)| orchard_core::Review {
+                app_id: app_id.clone(),
+                pubkey: pubkey.clone(),
+                name: self
+                    .profiles
+                    .get(pubkey)
+                    .and_then(|p| {
+                        let event: serde_json::Value =
+                            serde_json::from_str(&p.event.content).unwrap_or_default();
+                        event["name"].as_str().map(str::to_string)
+                    }),
+                nip05: self.profiles.get(pubkey).and_then(|p| p.nip05.clone()),
+                rating: review.rating,
+                content: review.event.content.clone(),
+                created_at: review.created_at as i64,
+            })
+            .collect();
+        reviews.sort_by(|a, b| a.app_id.cmp(&b.app_id).then(b.created_at.cmp(&a.created_at)));
+        orchard_core::ReviewsFile {
+            version: 1,
+            reviews,
+        }
+    }
+
     /// Project the feed into a catalog: only apps with a listing, a
     /// release, and an asset, all signed by the same publisher key,
     /// become rows. `metadata` is deliberately `None`: the client reads
@@ -381,6 +462,11 @@ impl Feed {
                 .map(|r| (r.created_at, r.event.as_json())),
         );
         events.extend(self.assets.values().map(|a| (a.created_at, a.event.as_json())));
+        events.extend(
+            self.reviews
+                .values()
+                .map(|r| (r.created_at, r.event.as_json())),
+        );
         events.extend(
             self.profiles
                 .values()

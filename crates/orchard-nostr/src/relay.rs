@@ -18,12 +18,14 @@ use tungstenite::Message;
 
 use crate::Feed;
 
-/// NIP-82 kinds Orchard reads: profiles, listings, releases, assets.
-const SUB_KINDS: [u16; 4] = [
+/// NIP-82 kinds Orchard reads: profiles, listings, releases, assets,
+/// reviews.
+const SUB_KINDS: [u16; 5] = [
     crate::KIND_PROFILE as u16,
     crate::KIND_APP as u16,
     crate::KIND_RELEASE as u16,
     crate::KIND_ASSET as u16,
+    crate::KIND_REVIEW as u16,
 ];
 
 const BACKOFF: Duration = Duration::from_secs(5);

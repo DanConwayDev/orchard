@@ -47,6 +47,15 @@ pub struct Profile {
     pub nip05: Option<String>,
 }
 
+/// One user review (kind 30065): `d` is the app id, content the text.
+/// Replaceable per (pubkey, app id), so editing is republishing.
+pub struct Review {
+    pub app_id: String,
+    /// 0.0 to 5.0, one decimal.
+    pub rating: Option<f32>,
+    pub content: String,
+}
+
 fn tag(name: &str, value: &str) -> Tag {
     Tag::custom(name, [value])
 }
@@ -100,6 +109,17 @@ pub fn sign_profile(keys: &Keys, profile: &Profile) -> Result<Event> {
         "nip05": profile.nip05,
     });
     Ok(EventBuilder::new(Kind::Metadata, metadata.to_string()).finalize(keys)?)
+}
+
+pub fn sign_review(keys: &Keys, review: &Review) -> Result<Event> {
+    let builder = EventBuilder::new(Kind::Custom(crate::KIND_REVIEW as u16), review.content.as_str())
+        .tag(tag("d", &review.app_id));
+    let builder = match review.rating {
+        // one decimal keeps ratings uniform across publishers of reviews
+        Some(value) => builder.tag(tag("rating", &format!("{value:.1}"))),
+        None => builder,
+    };
+    Ok(builder.finalize(keys)?)
 }
 
 #[cfg(test)]
@@ -159,5 +179,92 @@ mod tests {
         assert_eq!(app.name, "Hello");
         assert_eq!(app.categories, ["Utilities"]);
         assert_eq!(app.description.as_deref(), Some("Long description."));
+    }
+
+    /// Reviews: one per identity per app (replaceable), rating
+    /// validated, author names resolved from profiles.
+    #[test]
+    fn reviews_absorb_replace_and_project() {
+        let alice = Keys::generate();
+        let bob = Keys::generate();
+        let sign = |keys: &Keys, app_id: &str, rating: Option<f32>, text: &str| {
+            sign_review(
+                keys,
+                &Review {
+                    app_id: app_id.into(),
+                    rating,
+                    content: text.into(),
+                },
+            )
+            .unwrap()
+        };
+        let mut feed = crate::Feed::new();
+
+        // a rating outside 0.0 to 5.0 is a hard error
+        let bogus = EventBuilder::new(Kind::Custom(crate::KIND_REVIEW as u16), "bogus")
+            .tag(Tag::custom("d", ["com.example.Hello"]))
+            .tag(Tag::custom("rating", ["9.9"]))
+            .finalize(&alice)
+            .unwrap();
+        assert!(feed.absorb(bogus).is_err());
+
+        // alice reviews, then edits: the newest wins, one review remains
+        feed.absorb(sign(&alice, "com.example.Hello", Some(3.0), "Meh."))
+            .unwrap();
+        feed.absorb(sign(&alice, "com.example.Hello", Some(5.0), "Great."))
+            .unwrap();
+        // bob reviews the same app: two identities, two reviews
+        feed.absorb(sign(&bob, "com.example.Hello", None, "Text only."))
+            .unwrap();
+        // a review of another app does not collide
+        feed.absorb(sign(&bob, "com.example.Other", Some(4.0), "Other app."))
+            .unwrap();
+
+        // replaceability: republish with a NEWER created_at to win
+        let newer = EventBuilder::new(Kind::Custom(crate::KIND_REVIEW as u16), "Updated.")
+            .tag(Tag::custom("d", ["com.example.Hello"]))
+            .tag(Tag::custom("rating", ["5.0"]))
+            .custom_created_at(Timestamp::now() + 10)
+            .finalize(&alice)
+            .unwrap();
+        feed.absorb(newer).unwrap();
+
+        let reviews = feed.reviews().reviews;
+        let hello: Vec<_> = reviews.iter().filter(|r| r.app_id == "com.example.Hello").collect();
+        assert_eq!(hello.len(), 2, "one per identity, edits replace");
+        // newest first within the app
+        assert_eq!(hello[0].content, "Updated.");
+        assert_eq!(hello[0].rating, Some(5.0));
+        assert_eq!(hello[1].content, "Text only.");
+        assert_eq!(hello[1].rating, None);
+        assert_eq!(hello[0].pubkey, alice.get_public_key().unwrap().to_string());
+        // the other app's review projects under its own id
+        assert_eq!(reviews.last().unwrap().content, "Other app.");
+        assert_eq!(reviews.last().unwrap().app_id, "com.example.Other");
+    }
+
+    /// Review author names resolve from kind 0 profiles the feed has seen.
+    #[test]
+    fn reviews_carry_profile_names() {
+        let keys = Keys::generate();
+        let mut feed = crate::Feed::new();
+        feed.absorb(sign_profile(&keys, &Profile { name: Some("Alice".into()), nip05: None }).unwrap())
+            .unwrap();
+        feed.absorb(
+            sign_review(
+                &keys,
+                &Review {
+                    app_id: "com.example.Hello".into(),
+                    rating: Some(5.0),
+                    content: "Hi.".into(),
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let reviews = feed.reviews().reviews;
+        assert_eq!(reviews.len(), 1);
+        assert_eq!(reviews[0].name.as_deref(), Some("Alice"));
+        assert_eq!(reviews[0].pubkey, keys.get_public_key().unwrap().to_string());
     }
 }

@@ -253,6 +253,17 @@ Cosign is dropped from M5: the Nostr signature already binds publisher identity 
 pinned digest, and a second signature chain would add a trust source without adding
 trust.
 
+**M6, reviews slice (built).** Kind 30065 joins the draft: `d` = app id, content = the
+review text, `rating` = optional 0.0 to 5.0 one-decimal tag. Replaceable per (pubkey,
+app id), so editing is republishing and one identity holds one review per app; a
+malformed rating is a hard error like any other protocol violation. indexd serves the
+merged document at `/v1/reviews`; the client fetches on page open and while a page is
+open on the refresh tick, renders reviews under the description, and posts with a local
+reviewer identity (key generated on first post, kept at `$XDG_DATA_HOME/orchard/identity.key`,
+mode 0600). Compose is a mode (r, or click "Write a review"): keystrokes go to the draft
+instead of the search box, digits 1 to 5 rate, Enter posts, Escape leaves compose before
+it closes the page. Sybil resistance and the web of trust stay open.
+
 **M6: reviews + web of trust; self-distribution.** CI builds Orchard's own `.flatpak`
 bundle; dogfood the update path by updating Orchard through Orchard.
 

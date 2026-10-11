@@ -86,6 +86,33 @@ pub struct CatalogFile {
     pub apps: Vec<CatalogApp>,
 }
 
+/// One user review (kind 30065). Replaceable per (pubkey, app id): a
+/// reviewer edits by republishing, so one identity holds at most one
+/// review per app. Author name fields resolve from the author's kind 0
+/// profile when the feed has seen one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Review {
+    pub app_id: String,
+    pub pubkey: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub nip05: Option<String>,
+    /// 0.0 to 5.0, one decimal. Absent: text-only review.
+    #[serde(default)]
+    pub rating: Option<f32>,
+    pub content: String,
+    pub created_at: i64,
+}
+
+/// The reviews transport: served by `orchard-indexd` at `/v1/reviews` and
+/// read by the client.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewsFile {
+    pub version: u32,
+    pub reviews: Vec<Review>,
+}
+
 /// One published app in the MVP catalog: a [Listing] plus its latest [Release].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CatalogApp {
