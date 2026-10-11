@@ -149,6 +149,12 @@ pub struct StoreRoot {
     profiles: std::collections::BTreeMap<String, ProfileBits>,
     /// A profiles fetch in flight.
     profiles_fetching: bool,
+    /// NIP-05 verdicts per publisher pubkey: the claim that was
+    /// checked and whether the domain backed it. Absent means
+    /// unchecked, not unverified.
+    nip05: std::collections::BTreeMap<String, Nip05Verdict>,
+    /// Publisher keys with a NIP-05 check in flight.
+    nip05_checking: Vec<String>,
     /// The signed-in identity's own social-relay profile fetch in
     /// flight (one per session; stops once the profile lands).
     own_profile_fetching: bool,
@@ -248,6 +254,8 @@ impl StoreRoot {
             graph_fetching: false,
             profiles: Default::default(),
             profiles_fetching: false,
+            nip05: Default::default(),
+            nip05_checking: Vec::new(),
             own_profile_fetching: false,
             reviews_expanded: false,
             reviewer: load_reviewer(),
@@ -616,7 +624,44 @@ impl StoreRoot {
             self.selected_publisher = None;
             self.page_open = false;
         }
+        self.ensure_nip05_checks(cx);
         cx.notify();
+    }
+
+    /// Kick a NIP-05 check for every publisher whose profile claims an
+    /// address and whose claim has no verdict yet: the domain behind
+    /// the claim is the only party that can confirm it, so the client
+    /// asks, once per claim per session, and renders the address only
+    /// when the answer is yes. A claim on its own shows nothing.
+    fn ensure_nip05_checks(&mut self, cx: &mut Context<Self>) {
+        let pending: Vec<(String, String)> = self
+            .apps
+            .iter()
+            .filter(|app| app.source == Source::Publisher)
+            .filter_map(|app| app.publisher.clone())
+            .filter(|pubkey| !self.nip05.contains_key(pubkey) && !self.nip05_checking.contains(pubkey))
+            .filter_map(|pubkey| {
+                let claim = self.profiles.get(&pubkey)?.nip05.clone()?;
+                Some((pubkey, claim))
+            })
+            .collect();
+        for (pubkey, claim) in pending {
+            self.nip05_checking.push(pubkey.clone());
+            cx.spawn(async move |this, cx| {
+                let check_key = pubkey.clone();
+                let check_claim = claim.clone();
+                let verified = cx
+                    .background_executor()
+                    .spawn(async move { verify_nip05(&check_claim, &check_key) })
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    this.nip05_checking.retain(|key| key != &pubkey);
+                    this.nip05.insert(pubkey, Nip05Verdict { claim, verified });
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
     }
 
     /// Pre-install artifact check for publisher apps: one manifest fetch
@@ -714,6 +759,7 @@ impl StoreRoot {
                         for (pubkey, bits) in profiles {
                             this.profiles.insert(pubkey, bits);
                         }
+                        this.ensure_nip05_checks(cx);
                         cx.notify();
                     }
                     Err(err) => {
@@ -2265,7 +2311,7 @@ impl StoreRoot {
                     .tooltip(|_window, cx| {
                         cx.new(|_| {
                             TextTooltip(
-                                "Install requires an exact match to this publisher-signed digest",
+                                "Install requires an exact match to this publisher-signed digest".into(),
                             )
                         })
                         .into()
@@ -2307,7 +2353,7 @@ impl StoreRoot {
                         .tooltip(|_window, cx| {
                             cx.new(|_| {
                                 TextTooltip(
-                                    "Publisher-verified: the release events carry this publisher's signature",
+                                    "Publisher-verified: the release events carry this publisher's signature".into(),
                                 )
                             })
                             .into()
@@ -2315,14 +2361,48 @@ impl StoreRoot {
                         .child(ui::icon("icons/check.svg", 12., ui::accent())),
                 )
                 .children(app.publisher.as_ref().map(|pubkey| {
-                    let label = match self.profiles.get(pubkey).and_then(|p| p.name.clone()) {
-                        Some(name) => format!("Published by {name}."),
-                        None => format!("Published by {}.", short_npub(pubkey)),
+                    let profile = self.profiles.get(pubkey);
+                    let verdict = self.nip05.get(pubkey);
+                    // the address shows only when the domain backed
+                    // it: a claim alone is marketing, the check is
+                    // the fact. A claim that no longer matches the
+                    // profile reads as unverified until rechecked.
+                    let verified_claim = verdict
+                        .filter(|verdict| verdict.verified)
+                        .filter(|verdict| {
+                            profile.and_then(|p| p.nip05.as_deref()) == Some(verdict.claim.as_str())
+                        })
+                        .map(|verdict| verdict.claim.clone());
+                    let label = match &verified_claim {
+                        Some(claim) => format!("Published by {claim}."),
+                        None => {
+                            match profile.and_then(|p| p.name.clone()) {
+                                Some(name) => format!("Published by {name}."),
+                                None => format!("Published by {}.", short_npub(pubkey)),
+                            }
+                        }
                     };
+                    let note = verified_claim.as_ref().and_then(|claim| {
+                        split_nip05(claim)
+                            .map(|(local, domain)| format!("{domain} lists {local} as this key"))
+                    });
                     div()
+                        .flex()
+                        .gap_1()
+                        .items_center()
                         .text_size(px(ui::TEXT_SIZE))
                         .text_color(ui::text())
                         .child(label)
+                        .children(note.map(|note| {
+                            div()
+                                .id(SharedString::from(format!("nip05-{pubkey}")))
+                                .flex_none()
+                                .hover(|style| style.bg(gpui::transparent_black()))
+                                .tooltip(move |_window, cx| {
+                                    cx.new(|_| TextTooltip(note.clone().into())).into()
+                                })
+                                .child(ui::icon("icons/check.svg", 12., ui::accent()))
+                        }))
                 }))
                 // continuity: this app id was published by another key
                 // before this client ever saw this one; a signed
@@ -2354,7 +2434,7 @@ impl StoreRoot {
                         .flex_none()
                         .hover(|style| style.bg(gpui::transparent_black()))
                         .tooltip(|_window, cx| {
-                            cx.new(|_| TextTooltip(note)).into()
+                            cx.new(|_| TextTooltip(note.into())).into()
                         })
                         .child(badge(
                             label,
@@ -2765,7 +2845,7 @@ fn image_placeholder(loading: bool) -> gpui::AnyElement {
 /// A hover tooltip: quiet chrome, one line of text. The new-key
 /// sprout uses it so the glyph stays quiet and the meaning is on
 /// demand.
-struct TextTooltip(&'static str);
+struct TextTooltip(SharedString);
 
 impl gpui::Render for TextTooltip {
     fn render(
@@ -3058,7 +3138,7 @@ impl StoreRoot {
                                 .hover(|style| style.bg(gpui::transparent_black()))
                                 .tooltip(|_window, cx| {
                                     cx.new(|_| {
-                                        TextTooltip("New key: first seen on the relays under a week ago")
+                                        TextTooltip("New key: first seen on the relays under a week ago".into())
                                     })
                                     .into()
                                 })
@@ -3075,7 +3155,7 @@ impl StoreRoot {
                                 .hover(|style| style.bg(gpui::transparent_black()))
                                 .tooltip(|_window, cx| {
                                     cx.new(|_| {
-                                        TextTooltip("You follow this reviewer")
+                                        TextTooltip("You follow this reviewer".into())
                                     })
                                     .into()
                                 })
@@ -3092,7 +3172,7 @@ impl StoreRoot {
                                 .hover(|style| style.bg(gpui::transparent_black()))
                                 .tooltip(|_window, cx| {
                                     cx.new(|_| {
-                                        TextTooltip("Followed by someone you follow")
+                                        TextTooltip("Followed by someone you follow".into())
                                     })
                                     .into()
                                 })
@@ -4361,6 +4441,9 @@ fn load_graph() -> anyhow::Result<std::collections::BTreeMap<String, Vec<String>
 struct ProfileBits {
     name: Option<String>,
     picture: Option<String>,
+    /// The NIP-05 address the profile claims, `name@domain` or a bare
+    /// domain. A claim is marketing until the domain backs it.
+    nip05: Option<String>,
 }
 
 impl ProfileBits {
@@ -4372,6 +4455,7 @@ impl ProfileBits {
         ProfileBits {
             name: value["name"].as_str().map(str::to_string),
             picture: value["picture"].as_str().map(str::to_string),
+            nip05: value["nip05"].as_str().map(str::to_string),
         }
     }
 }
@@ -4398,6 +4482,78 @@ fn load_own_profile(pubkey: &str) -> Option<ProfileBits> {
         }
     }
     None
+}
+
+/// A NIP-05 verdict: the claim that was checked and whether the
+/// domain's well-known record named this key.
+#[derive(Clone)]
+struct Nip05Verdict {
+    claim: String,
+    verified: bool,
+}
+
+/// Split a NIP-05 claim into (local part, domain). A bare domain is
+/// the `_` local part. Anything the URL would lie about (empty
+/// pieces, a second `@`, a path) is not a claim.
+fn split_nip05(claim: &str) -> Option<(String, String)> {
+    let claim = claim.trim().to_ascii_lowercase();
+    if claim.is_empty() {
+        return None;
+    }
+    let (local, domain) = match claim.split_once('@') {
+        Some((local, domain)) => (local, domain),
+        None => ("_", claim.as_str()),
+    };
+    let ok = |piece: &str| {
+        !piece.is_empty()
+            && !piece.contains(['@', '/', '?', '#', ' '])
+    };
+    (ok(local) && ok(domain)).then(|| (local.to_string(), domain.to_string()))
+}
+
+/// The domain's NIP-05 record: the names it publishes, keyed by local
+/// part. None when the fetch or the JSON fails; hostile payloads are
+/// unverified, never a guess. `base` is the scheme plus host, so the
+/// tests can point at a local server.
+fn fetch_nip05_names(base: &str, local: &str) -> Option<std::collections::BTreeMap<String, String>> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(5))
+        .build();
+    let record: serde_json::Value = agent
+        .get(&format!("{base}/.well-known/nostr.json?name={local}"))
+        .call()
+        .ok()?
+        .into_json()
+        .ok()?;
+    let names = record.get("names")?.as_object()?;
+    Some(
+        names
+            .into_iter()
+            .filter_map(|(local, key)| {
+                let key = key.as_str()?.to_string();
+                Some((local.to_string(), key))
+            })
+            .collect(),
+    )
+}
+
+/// The claim checks out when the base url's well-known record names
+/// this exact key. Case-insensitive, per the NIP. Blocking: runs on
+/// the background pool.
+fn claim_matches_record(base: &str, local: &str, pubkey: &str) -> bool {
+    fetch_nip05_names(base, local)
+        .and_then(|names| names.get(local).cloned())
+        .is_some_and(|key| key.eq_ignore_ascii_case(pubkey))
+}
+
+/// NIP-05 verification: the domain behind the claim must name this
+/// key. Any failure is unverified: the check is a fact earned, never
+/// a guess. Blocking: runs on the background pool.
+fn verify_nip05(claim: &str, pubkey: &str) -> bool {
+    let Some((local, domain)) = split_nip05(claim) else {
+        return false;
+    };
+    claim_matches_record(&format!("https://{domain}"), &local, pubkey)
 }
 
 /// Sign and send one review event through the signer, then publish it
@@ -4909,13 +5065,69 @@ mod tests {
         let bits = ProfileBits::parse(r#"{"name":"Marta","picture":"https://x/m.png","nip05":"marta@x.org"}"#);
         assert_eq!(bits.name.as_deref(), Some("Marta"));
         assert_eq!(bits.picture.as_deref(), Some("https://x/m.png"));
+        assert_eq!(bits.nip05.as_deref(), Some("marta@x.org"));
         // wrong shapes parse as absent, never crash
         let junk = ProfileBits::parse("not json");
         assert!(junk.name.is_none());
         assert!(junk.picture.is_none());
+        assert!(junk.nip05.is_none());
         let empty = ProfileBits::parse(r#"{"about":""}"#);
         assert!(empty.name.is_none());
         assert!(empty.picture.is_none());
+        assert!(empty.nip05.is_none());
+    }
+
+    #[test]
+    fn nip05_claims_split_or_refuse() {
+        let claim = |claim| split_nip05(claim);
+        assert_eq!(
+            claim("me@example.com"),
+            Some(("me".into(), "example.com".into()))
+        );
+        // uppercase and stray spaces are presentation, not identity
+        assert_eq!(
+            claim("  ME@Example.COM "),
+            Some(("me".into(), "example.com".into()))
+        );
+        // a bare domain claims the `_` local part
+        assert_eq!(
+            claim("example.com"),
+            Some(("_".into(), "example.com".into()))
+        );
+        // anything the url would lie about refuses
+        assert_eq!(claim(""), None);
+        assert_eq!(claim("@example.com"), None);
+        assert_eq!(claim("me@"), None);
+        assert_eq!(claim("a@b@c"), None);
+        assert_eq!(claim("a@example.com/x"), None);
+    }
+
+    /// The record check against a live local server: the domain's
+    /// names decide, and everything else is unverified.
+    #[test]
+    fn nip05_check_against_a_local_record() {
+        let record = r#"{"names": {"alice": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bob": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{record}",
+            record.len()
+        );
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            use std::io::Write as _;
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let base = format!("http://127.0.0.1:{port}");
+        let alice = "A".repeat(64);
+        // the record names alice with the same key, case-insensitively
+        assert!(claim_matches_record(&base, "alice", &alice));
+        // bob's claim against alice's key is not verified
+        assert!(!claim_matches_record(&base, "bob", &alice));
+        // a claim for a name the record does not carry: unverified
+        assert!(!claim_matches_record(&base, "carol", &alice));
+        // a malformed claim never checks out
+        assert!(!verify_nip05("@", &alice));
     }
 
     #[test]
