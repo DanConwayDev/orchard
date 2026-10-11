@@ -1104,11 +1104,11 @@ impl StoreRoot {
                 .flex_wrap()
                 .items_center()
                 .gap_2()
-                .child(badge("Reviewed by Flathub", ui::text_dim()))
+                .child(badge("Reviewed by Flathub", ui::text()))
                 .child(
                     div()
                         .text_size(px(ui::TEXT_SIZE))
-                        .text_color(ui::text_dim())
+                        .text_color(ui::text())
                         .child("Moderator-reviewed listing; installs from your flathub remote."),
                 )
                 .into_any_element(),
@@ -1126,7 +1126,7 @@ impl StoreRoot {
                     let short = &pubkey[..pubkey.len().min(16)];
                     div()
                         .text_size(px(ui::TEXT_SIZE))
-                        .text_color(ui::text_dim())
+                        .text_color(ui::text())
                         .child(format!(
                             "Published by {short}…; the artifact digest is checked before install."
                         ))
