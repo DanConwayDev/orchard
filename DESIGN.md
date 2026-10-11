@@ -553,6 +553,14 @@ opening items because they need the push, the signing secret, and a tag.
       empty view shows nothing. A flood reads as composition ("48
       apps from 3 publishers"), not as rank: the client states what
       is here and leaves the judging to the person reading.
+- [x] The row's "digest ok" badge means this client has checked the
+      artifact against the signed pin (the page-open manifest check
+      or the install), so it appears lazily and says "checked",
+      never "unchecked". In the Orchard channel view it hides:
+      every row there is digest-pinned by construction, and a badge
+      on the visited subset implies the rest are something less. In
+      All and Installed its presence is real information, so it
+      shows. The page's digest pin chip is unaffected.
 - [x] Client relay configuration, as a full settings page: Sources (channel
       visibility switches, the channel the store opens on), Relays (the event
       and social sets, editable rows with add, remove, and a reset to the

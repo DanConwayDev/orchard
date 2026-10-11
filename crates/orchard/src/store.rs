@@ -2844,11 +2844,25 @@ impl StoreRoot {
                                         Source::Reviewed => badge("Flathub", ui::text_dim()),
                                         Source::Publisher => badge("Orchard", ui::accent()),
                                     })
-                                    .when(verified_digest.is_some(), |row| {
-                                        row.child(badge("digest ok", ui::risk_color(
-                                            orchard_core::Risk::Low,
-                                        )))
-                                    })
+                                    // digest ok: this client has checked
+                                    // the artifact against the signed
+                                    // pin. Hidden in the Orchard view:
+                                    // every row there is digest-pinned
+                                    // by construction, so a badge on the
+                                    // visited subset implies the rest
+                                    // are something less. In All and
+                                    // Installed the presence is real
+                                    // information.
+                                    .when(
+                                        verified_digest.is_some()
+                                            && self.filter != Filter::Publisher,
+                                        |row| {
+                                            row.child(badge(
+                                                "digest ok",
+                                                ui::risk_color(orchard_core::Risk::Low),
+                                            ))
+                                        },
+                                    )
                                     // repo-verified: the forge hosts
                                     // this publisher key (quiet by
                                     // default, details on the page)
