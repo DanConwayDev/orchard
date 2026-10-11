@@ -114,6 +114,11 @@ pub struct StoreRoot {
     /// "Sure?" until the second press starts the job, or Escape, page
     /// close, or another install dismisses it.
     confirm_install: Option<String>,
+    /// The app awaiting a remove confirmation: its Remove reads
+    /// "Sure?" until the second press starts the job, or Escape,
+    /// a page close, or another action dismisses it. Mirrors
+    /// `confirm_install` and dies in the same places.
+    confirm_remove: Option<String>,
     error: Option<String>,
     flathub_loading: bool,
     /// Remote images resolved through the disk cache: url -> path, or
@@ -281,6 +286,7 @@ impl StoreRoot {
             selected_publisher: None,
             jobs: HashMap::new(),
             confirm_install: None,
+            confirm_remove: None,
             verified: HashMap::new(),
             continuity: load_continuity(),
             error: None,
@@ -1357,6 +1363,7 @@ impl StoreRoot {
         self.composing = false;
         self.reviews_expanded = false;
         self.confirm_install = None;
+        self.confirm_remove = None;
         self.close_signin();
         cx.notify();
     }
@@ -1677,6 +1684,7 @@ impl StoreRoot {
 
     fn install(&mut self, app_id: &str, cx: &mut Context<Self>) {
         self.confirm_install = None;
+        self.confirm_remove = None;
         // the selection's publisher names the twin: two publishers of
         // one app id install from different artifacts
         let Some(app) = self
@@ -1784,6 +1792,7 @@ impl StoreRoot {
     }
 
     fn uninstall(&mut self, app_id: &str, cx: &mut Context<Self>) {
+        self.confirm_remove = None;
         if self.jobs.contains_key(app_id) {
             return;
         }
@@ -2101,6 +2110,7 @@ impl StoreRoot {
                 // back out one level: lightbox, page, then selection,
                 // then text, then row selection
                 self.confirm_install = None;
+                self.confirm_remove = None;
                 if self.lightbox.is_some() {
                     self.lightbox = None;
                 } else if self.page_open {
@@ -2446,7 +2456,7 @@ impl StoreRoot {
                 chip.bg(ui::accent()).text_color(ui::accent_fg())
             })
             .when(!active, |chip| {
-                chip.text_color(ui::text_dim())
+                chip.text_color(ui::text())
                     .hover(|style| style.bg(ui::surface()).text_color(ui::text()))
             })
             .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
@@ -2636,49 +2646,78 @@ impl StoreRoot {
                             ui::risk_color(orchard_core::Risk::Medium),
                         )
                         .into_any_element(),
-                        None if is_installed => div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(if outdated {
-                                badge(
-                                    "Update available",
-                                    ui::risk_color(orchard_core::Risk::Medium),
-                                )
-                            } else {
-                                badge("Installed", ui::risk_color(orchard_core::Risk::Low))
-                            })
-                            .child(ui::small_button(
-                                format!("row-open-{action_id}-{}", row_publisher.as_deref().unwrap_or("")),
-                                Some("icons/play.svg"),
-                                "Open",
-                                false,
-                            )
-                            .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
-                                cx.stop_propagation();
-                                this.open(action_id.as_str(), cx);
-                            })))
-                            .when(outdated, |slot| {
-                                let update_id = row_update_id.clone();
-                                slot.child(
-                                    ui::small_button(
-                                        format!(
-                                            "row-update-{update_id}-{}",
-                                            row_publisher.as_deref().unwrap_or("")
-                                        ),
-                                        Some("icons/update.svg"),
-                                        "Update",
-                                        false,
+                        None if is_installed => {
+                            // two-press remove: the row's Remove reads
+                            // "Sure?" until the second press, so a
+                            // mis-press beside Open cannot delete the
+                            // app on its own
+                            let remove_confirming = self.confirm_remove.as_deref()
+                                == Some(action_id.as_str());
+                            let remove_id = action_id.clone();
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(if outdated {
+                                    badge(
+                                        "Update available",
+                                        ui::risk_color(orchard_core::Risk::Medium),
                                     )
-                                    .on_click(cx.listener(
-                                        move |this, _e: &ClickEvent, _w, cx| {
-                                            cx.stop_propagation();
-                                            this.update(update_id.as_str(), cx);
-                                        },
-                                    )),
+                                } else {
+                                    badge("Installed", ui::risk_color(orchard_core::Risk::Low))
+                                })
+                                .child(ui::small_button(
+                                    format!("row-open-{action_id}-{}", row_publisher.as_deref().unwrap_or("")),
+                                    Some("icons/play.svg"),
+                                    "Open",
+                                    true,
                                 )
-                            })
-                            .into_any_element(),
+                                .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
+                                    cx.stop_propagation();
+                                    this.open(action_id.as_str(), cx);
+                                })))
+                                .when(outdated, |slot| {
+                                    let update_id = row_update_id.clone();
+                                    slot.child(
+                                        ui::small_button(
+                                            format!(
+                                                "row-update-{update_id}-{}",
+                                                row_publisher.as_deref().unwrap_or("")
+                                            ),
+                                            Some("icons/update.svg"),
+                                            "Update",
+                                            false,
+                                        )
+                                        .on_click(cx.listener(
+                                            move |this, _e: &ClickEvent, _w, cx| {
+                                                cx.stop_propagation();
+                                                this.update(update_id.as_str(), cx);
+                                            },
+                                        )),
+                                    )
+                                })
+                                .child(ui::small_button(
+                                    format!(
+                                        "row-remove-{remove_id}-{}",
+                                        row_publisher.as_deref().unwrap_or("")
+                                    ),
+                                    Some("icons/trash.svg"),
+                                    if remove_confirming { "Sure?" } else { "Remove" },
+                                    false,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _e: &ClickEvent, _w, cx| {
+                                        cx.stop_propagation();
+                                        if remove_confirming {
+                                            this.uninstall(remove_id.as_str(), cx);
+                                        } else {
+                                            this.confirm_remove = Some(remove_id.clone());
+                                            cx.notify();
+                                        }
+                                    },
+                                )))
+                                .into_any_element()
+                        }
                         None if app.version.is_none() && app.source == Source::Publisher => {
                             // the chain exists but nothing built for
                             // this machine: the honest note replaces
@@ -3176,7 +3215,7 @@ impl StoreRoot {
                             if installed {
                                 let open_id = app_id.clone();
                                 buttons.push(
-                                    button("btn-open", Some("icons/play.svg"), "Open", false)
+                                    button("btn-open", Some("icons/play.svg"), "Open", true)
                                         .on_click(
                                             cx.listener(move |this, _e: &ClickEvent, _w, cx| {
                                                 this.open(open_id.as_str(), cx);
@@ -3206,14 +3245,29 @@ impl StoreRoot {
                                     );
                                 }
                                 let remove_id = app_id.clone();
+                                // two-press: the destructive action
+                                // reads "Sure?" before it runs, same
+                                // as the row's Remove
+                                let remove_confirming = self.confirm_remove.as_deref()
+                                    == Some(app_id.as_str());
                                 buttons.push(
-                                    button("btn-remove", Some("icons/trash.svg"), "Remove", false)
-                                        .on_click(
-                                            cx.listener(move |this, _e: &ClickEvent, _w, cx| {
+                                    button(
+                                        "btn-remove",
+                                        Some("icons/trash.svg"),
+                                        if remove_confirming { "Sure?" } else { "Remove" },
+                                        false,
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _e: &ClickEvent, _w, cx| {
+                                            if remove_confirming {
                                                 this.uninstall(remove_id.as_str(), cx);
-                                            }),
-                                        )
-                                        .into_any_element(),
+                                            } else {
+                                                this.confirm_remove = Some(remove_id.clone());
+                                                cx.notify();
+                                            }
+                                        },
+                                    ))
+                                    .into_any_element(),
                                 );
                             } else if app.version.is_none() && app.source == Source::Publisher {
                                 // the honest note replaces an install
@@ -4567,6 +4621,7 @@ impl StoreRoot {
                             // a pending install confirm does not
                             // survive a channel switch
                             this.confirm_install = None;
+                            this.confirm_remove = None;
                             cx.notify();
                         }))
                         .child(f.label().to_string())
