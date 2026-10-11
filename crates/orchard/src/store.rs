@@ -3216,15 +3216,20 @@ impl StoreRoot {
     /// The window-level layers, if any. The wrapper carries no
     /// hitbox of its own; each layer is a click-away overlay with the
     /// panel as a later sibling, so clicks on the panel stay the
-    /// panel's and every click outside closes the layer. The modal
-    /// paints last: it covers the dropdowns too.
+    /// panel's and every click outside closes the layer. The panel
+    /// must swallow mouse down for exactly this reason: the overlay's
+    /// close would unmount the panel between the user's down and up,
+    /// and a click whose element is gone before the up never fires.
+    /// The modal paints last: it covers the dropdowns too.
     fn render_layers(&mut self, font: gpui::Font, cx: &mut Context<Self>) -> gpui::AnyElement {
         let mut layers = div().absolute().inset_0();
         if self.channel_menu.is_some() {
-            layers = layers.child(self.render_channel_menu(cx));
+            let (overlay, panel) = self.render_channel_menu(cx);
+            layers = layers.child(overlay).child(panel);
         }
         if self.account_menu.is_some() {
-            layers = layers.child(self.render_account_menu(cx));
+            let (overlay, panel) = self.render_account_menu(cx);
+            layers = layers.child(overlay).child(panel);
         }
         if self.signin_modal {
             layers = layers.child(self.render_signin_modal(font, cx));
@@ -3233,10 +3238,16 @@ impl StoreRoot {
     }
 
     /// The channel dropdown: filter options with the active one marked.
-    fn render_channel_menu(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    /// The channel dropdown: filter options with the active one
+    /// marked. Two siblings, overlay then panel; the panel stops
+    /// mouse down so its items' clicks survive to the up.
+    fn render_channel_menu(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> (gpui::AnyElement, gpui::AnyElement) {
         let anchor = self.channel_menu.unwrap_or_default();
         let left = (anchor.x - px(60.)).max(px(8.));
-        div()
+        let overlay = div()
             .id("channel-menu-overlay")
             .absolute()
             .inset_0()
@@ -3247,59 +3258,68 @@ impl StoreRoot {
                     cx.notify();
                 }),
             )
-            .child(
-                div()
-                    .absolute()
-                    .left(left)
-                    .top(anchor.y + px(6.))
-                    .w(px(180.))
-                    .flex()
-                    .flex_col()
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(ui::divider())
-                    .bg(ui::panel())
-                    .py_1()
-                    .children(
-                        [
-                            Filter::All,
-                            Filter::Reviewed,
-                            Filter::Publisher,
-                            Filter::Installed,
-                        ]
-                        .iter()
-                        .map(|f| {
-                            let active = *f == self.filter;
-                            div()
-                                .id(SharedString::from(format!("channel-item-{}", f.label())))
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .px_3()
-                                .py_1()
-                                .cursor_pointer()
-                                .text_size(px(ui::TEXT_SIZE))
-                                .text_color(if active {
-                                    ui::accent()
-                                } else {
-                                    ui::text()
-                                })
-                                .hover(|style| style.bg(ui::surface()))
-                                .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
-                                    this.filter = *f;
-                                    this.channel_menu = None;
-                                    cx.notify();
-                                }))
-                                .child(f.label().to_string())
-                                .children(active.then(|| "✓".to_string()))
-                        }),
-                    ),
+            .into_any_element();
+        let panel = div()
+            .absolute()
+            .left(left)
+            .top(anchor.y + px(6.))
+            .w(px(180.))
+            .flex()
+            .flex_col()
+            .rounded_sm()
+            .border_1()
+            .border_color(ui::divider())
+            .bg(ui::panel())
+            .py_1()
+            .on_mouse_down(
+                MouseButton::Left,
+                |_e: &MouseDownEvent, _w, cx: &mut gpui::App| cx.stop_propagation(),
             )
-            .into_any_element()
+            .children(
+                [
+                    Filter::All,
+                    Filter::Reviewed,
+                    Filter::Publisher,
+                    Filter::Installed,
+                ]
+                .iter()
+                .map(|f| {
+                    let active = *f == self.filter;
+                    div()
+                        .id(SharedString::from(format!("channel-item-{}", f.label())))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .px_3()
+                        .py_1()
+                        .cursor_pointer()
+                        .text_size(px(ui::TEXT_SIZE))
+                        .text_color(if active {
+                            ui::accent()
+                        } else {
+                            ui::text()
+                        })
+                        .hover(|style| style.bg(ui::surface()))
+                        .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
+                            this.filter = *f;
+                            this.channel_menu = None;
+                            cx.notify();
+                        }))
+                        .child(f.label().to_string())
+                        .children(active.then(|| "✓".to_string()))
+                }),
+            )
+            .into_any_element();
+        (overlay, panel)
     }
 
-    /// The account dropdown: the signed-in session and sign-out.
-    fn render_account_menu(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    /// The account dropdown: the signed-in session and sign-out. Two
+    /// siblings, overlay then panel, same as the channel menu: the
+    /// panel stops mouse down so Sign out's click survives to the up.
+    fn render_account_menu(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> (gpui::AnyElement, gpui::AnyElement) {
         let anchor = self.account_menu.unwrap_or_default();
         let left = (anchor.x - px(170.)).max(px(8.));
         let display = self
@@ -3307,7 +3327,7 @@ impl StoreRoot {
             .as_ref()
             .map(|reviewer| reviewer.display())
             .unwrap_or_default();
-        div()
+        let overlay = div()
             .id("account-menu-overlay")
             .absolute()
             .inset_0()
@@ -3318,44 +3338,48 @@ impl StoreRoot {
                     cx.notify();
                 }),
             )
+            .into_any_element();
+        let panel = div()
+            .absolute()
+            .left(left)
+            .top(anchor.y + px(6.))
+            .w(px(220.))
+            .flex()
+            .flex_col()
+            .rounded_sm()
+            .border_1()
+            .border_color(ui::divider())
+            .bg(ui::panel())
+            .py_1()
+            .on_mouse_down(
+                MouseButton::Left,
+                |_e: &MouseDownEvent, _w, cx: &mut gpui::App| cx.stop_propagation(),
+            )
             .child(
                 div()
-                    .absolute()
-                    .left(left)
-                    .top(anchor.y + px(6.))
-                    .w(px(220.))
-                    .flex()
-                    .flex_col()
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(ui::divider())
-                    .bg(ui::panel())
+                    .px_3()
                     .py_1()
-                    .child(
-                        div()
-                            .px_3()
-                            .py_1()
-                            .text_size(px(ui::TEXT_SIZE_LABEL))
-                            .text_color(ui::text_dim())
-                            .child(format!("Signed in as {display}")),
-                    )
-                    .child(
-                        div()
-                            .id("account-sign-out")
-                            .px_3()
-                            .py_1()
-                            .cursor_pointer()
-                            .text_size(px(ui::TEXT_SIZE))
-                            .text_color(ui::text())
-                            .hover(|style| style.bg(ui::surface()))
-                            .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
-                                this.account_menu = None;
-                                this.sign_out(cx);
-                            }))
-                            .child("Sign out"),
-                    ),
+                    .text_size(px(ui::TEXT_SIZE_LABEL))
+                    .text_color(ui::text_dim())
+                    .child(format!("Signed in as {display}")),
             )
-            .into_any_element()
+            .child(
+                div()
+                    .id("account-sign-out")
+                    .px_3()
+                    .py_1()
+                    .cursor_pointer()
+                    .text_size(px(ui::TEXT_SIZE))
+                    .text_color(ui::text())
+                    .hover(|style| style.bg(ui::surface()))
+                    .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
+                        this.account_menu = None;
+                        this.sign_out(cx);
+                    }))
+                    .child("Sign out"),
+            )
+            .into_any_element();
+        (overlay, panel)
     }
 
     /// The channel dropdown trigger: the active filter with a chevron.
