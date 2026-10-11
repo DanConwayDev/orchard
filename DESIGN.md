@@ -287,8 +287,10 @@ closes the page. Sybil resistance and the web of trust stay open.
 the wordmark dropped), the search box centered across the full window width (an
 absolute layer spanning the bar), and two controls on the right: the channel
 dropdown (All / Flathub / Orchard / Installed replace the chip row; it stays
-visible on app pages) and the account control ("Sign in" or the reviewer's display
-name). Dropdowns are window-level layers painted after everything: a click-away
+visible on app pages) and the account control ("Sign in" when signed out; a person
+icon when signed in, the profile picture once avatars are fetched; the name still
+shows in the session menu). Dropdowns are window-level layers painted after
+everything: a click-away
 overlay with the panel as a later sibling, anchored at the click point. Sign-in is a
 window-level modal (dimmed backdrop, centered panel): the panel swallows the mouse
 down (`stop_propagation`) so clicks on it never reach the backdrop's close, a lesson

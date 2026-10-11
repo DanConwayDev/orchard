@@ -2480,7 +2480,7 @@ impl StoreRoot {
                                 .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
                                     this.sign_out(cx);
                                 }))
-                                .child("sign out (pairing stays on device)"),
+                                .child("Sign out"),
                         );
                 } else {
                     invitation = invitation.child(
@@ -3373,7 +3373,7 @@ impl StoreRoot {
                                 this.account_menu = None;
                                 this.sign_out(cx);
                             }))
-                            .child("Sign out (pairing stays on device)"),
+                            .child("Sign out"),
                     ),
             )
             .into_any_element()
@@ -3407,9 +3407,7 @@ impl StoreRoot {
     /// the session menu trigger when not.
     fn render_account_trigger(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         match self.reviewer.as_ref() {
-            Some(reviewer) => {
-                let display = reviewer.display();
-                let label: String = display.chars().take(24).collect();
+            Some(_reviewer) => {
                 div()
                     .id("account-trigger")
                     .flex()
@@ -3419,15 +3417,13 @@ impl StoreRoot {
                     .py_1()
                     .rounded_sm()
                     .cursor_pointer()
-                    .text_size(px(ui::TEXT_SIZE))
-                    .text_color(ui::text())
                     .hover(|style| style.bg(ui::surface()))
                     .on_click(cx.listener(|this, event: &ClickEvent, _w, cx| {
                         this.channel_menu = None;
                         this.account_menu = Some(event.position());
                         cx.notify();
                     }))
-                    .child(label)
+                    .child(ui::icon("icons/person.svg", 14., ui::text()))
                     .child(ui::icon("icons/chevron_down.svg", 11., ui::text_dim()))
                     .into_any_element()
             }
