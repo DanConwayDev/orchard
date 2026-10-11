@@ -242,7 +242,6 @@ fn set_read_timeout(socket: &mut WebSocket<MaybeTlsStream<std::net::TcpStream>>,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::key::GetPublicKey as _;
 
     /// The URI carries the full request surface, percent-encoded, and
     /// every value round-trips through a naive query parser.

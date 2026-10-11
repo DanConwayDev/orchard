@@ -287,6 +287,20 @@ Compose is a mode (r, or click "Write a review"): keystrokes go to the draft ins
 of the search box, digits 1 to 5 rate, Enter posts, Escape leaves compose before it
 closes the page. Sybil resistance and the web of trust stay open.
 
+**M6, review trust slice (built).** One identity one review per app is the floor
+(replaceable semantics); on top of it, publisher self-reviews are flagged on their
+rows and excluded from the aggregate average and count, disclosed in a details line
+("1 publisher review not counted"). indexd tracks the earliest event it has seen per
+author key (absorb-time bookkeeping, so the disk cache replays it across restarts)
+and serves it in the reviews document as `first_seen`; reviews from keys first seen
+under a week ago carry a "new key" row marker and a "n of m from new keys" line, and
+are never excluded: a weak heuristic does not drop votes. The aggregate counts
+everything else once per identity. Next: the personal web of trust, Zapstore's own
+answer (reviews constrained to the reader's graph): distance 1 from the signed-in
+user's own kind 3, fetched read-only from default social relays, follow markers on
+review rows plus a circle-only aggregate; distance 2 later via indexd crawling
+reviewer kind 3s.
+
 **M6, header slice (built).** The top bar is the mark (a single-color orchard tree,
 the wordmark dropped), the search box centered across the full window width (an
 absolute layer spanning the bar), and two controls on the right: the channel

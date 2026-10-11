@@ -93,6 +93,7 @@ pub trait CatalogDocument: Send + Sync + 'static {
         orchard_core::ReviewsFile {
             version: 1,
             reviews: Vec::new(),
+            first_seen: Default::default(),
         }
     }
 

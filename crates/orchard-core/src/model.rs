@@ -111,6 +111,11 @@ pub struct Review {
 pub struct ReviewsFile {
     pub version: u32,
     pub reviews: Vec<Review>,
+    /// The earliest event indexd has on record per reviewer pubkey,
+    /// unix seconds. Reviews from keys first seen under a week ago are
+    /// marked in the client; absence means unknown age, never new.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub first_seen: std::collections::BTreeMap<String, u64>,
 }
 
 /// The profiles transport: the raw kind 0 metadata each author last

@@ -169,6 +169,10 @@ pub struct Feed {
     profiles: BTreeMap<String, Profile>,
     /// Keyed (pubkey, app id): one review per identity per app.
     reviews: BTreeMap<(String, String), Review>,
+    /// The earliest event per author key, unix seconds: the client's
+    /// new-key signal for review trust. Deliberately naive: a relay
+    /// that only recently saw a key makes the key look new.
+    first_seen: BTreeMap<String, u64>,
 }
 
 impl Feed {
@@ -188,6 +192,15 @@ impl Feed {
             .map_err(|err| anyhow::anyhow!("signature verification failed: {err}"))?;
 
         let parts = Parts::parse(&event)?;
+        // first-seen bookkeeping: keep the earliest event per author
+        // key across every kind the feed retains
+        let author = event.pubkey.to_string();
+        match self.first_seen.get(&author) {
+            Some(seen) if *seen <= parts.created_at => {}
+            _ => {
+                self.first_seen.insert(author, parts.created_at);
+            }
+        }
         match parts.kind {
             KIND_APP => self.absorb_app(event, parts),
             KIND_RELEASE => self.absorb_release(event, parts),
@@ -378,9 +391,18 @@ impl Feed {
             })
             .collect();
         reviews.sort_by(|a, b| a.app_id.cmp(&b.app_id).then(b.created_at.cmp(&a.created_at)));
+        // first_seen rides along, filtered to the keys that actually
+        // review: the catalog's authors are not the client's business
+        let mut first_seen: BTreeMap<String, u64> = BTreeMap::new();
+        for ((pubkey, _), _) in &self.reviews {
+            if let Some(seen) = self.first_seen.get(pubkey) {
+                first_seen.insert(pubkey.clone(), *seen);
+            }
+        }
         orchard_core::ReviewsFile {
             version: 1,
             reviews,
+            first_seen,
         }
     }
 
@@ -767,5 +789,48 @@ mod tests {
         let catalog = feed.catalog();
         assert_eq!(catalog.apps.len(), 1);
         assert_eq!(catalog.apps[0].version, "1.0.0");
+    }
+
+    /// first_seen keeps the earliest event per key no matter the order
+    /// the feed learned about them, and rides on the reviews document
+    /// filtered to reviewing keys.
+    #[test]
+    fn first_seen_tracks_earliest_event() {
+        let keys = demo_keys();
+        let pubkey = keys.get_public_key().unwrap().to_string();
+        let older_secs: u64 = 1_700_000_000;
+        let newer_secs: u64 = older_secs + 100;
+        let later = EventBuilder::new(Kind::Custom(KIND_REVIEW as u16), "A review.")
+            .tag(Tag::custom("d", ["com.example.Hello"]))
+            .tag(Tag::custom("rating", ["4.0"]))
+            .custom_created_at(Timestamp::from_secs(newer_secs))
+            .finalize(&keys)
+            .unwrap();
+        let earlier = EventBuilder::new(Kind::Custom(KIND_APP as u16), "Older listing.")
+            .tag(Tag::custom("d", ["com.example.Old"]))
+            .custom_created_at(Timestamp::from_secs(older_secs))
+            .finalize(&keys)
+            .unwrap();
+        let mut feed = Feed::new();
+        // the feed learns the review first, the older listing second:
+        // first_seen must still be the older event
+        absorb_all(&mut feed, &[later, earlier]);
+        assert_eq!(feed.first_seen.get(&pubkey).copied(), Some(older_secs));
+
+        let file = feed.reviews();
+        assert_eq!(file.reviews.len(), 1);
+        assert_eq!(file.first_seen.get(&pubkey).copied(), Some(older_secs));
+
+        // a key that never reviewed is not the client's business
+        let quiet = Keys::generate();
+        let listing = signed(
+            &quiet,
+            KIND_APP,
+            "Just a listing.",
+            vec![("d", "com.example.Quiet"), ("f", "linux-x86_64")],
+        );
+        let mut feed = Feed::new();
+        absorb_all(&mut feed, &[listing]);
+        assert!(feed.reviews().first_seen.is_empty());
     }
 }

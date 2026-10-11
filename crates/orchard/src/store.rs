@@ -116,6 +116,9 @@ pub struct StoreRoot {
     verify_errors: HashMap<String, String>,
     /// Reviews from indexd (kind 30065): app id -> newest first.
     reviews: HashMap<String, Vec<orchard_core::Review>>,
+    /// The earliest event per reviewer pubkey, from the reviews
+    /// document: the new-key signal for the reviews aggregate.
+    first_seen: std::collections::BTreeMap<String, u64>,
     /// A reviews fetch in flight (whole document; small at this scale).
     reviews_fetching: bool,
     /// The reviews list is collapsed by default; the header toggles it.
@@ -203,6 +206,7 @@ impl StoreRoot {
             publisher_fetching: HashSet::new(),
             verify_errors: HashMap::new(),
             reviews: HashMap::new(),
+            first_seen: Default::default(),
             reviews_fetching: false,
             reviews_expanded: false,
             reviewer: load_reviewer(),
@@ -611,8 +615,9 @@ impl StoreRoot {
             let _ = this.update(cx, |this, cx| {
                 this.reviews_fetching = false;
                 match fetched {
-                    Ok(reviews) => {
-                        this.reviews = reviews;
+                    Ok((grouped, first_seen)) => {
+                        this.reviews = grouped;
+                        this.first_seen = first_seen;
                         cx.notify();
                     }
                     Err(err) => {
@@ -2172,7 +2177,7 @@ impl StoreRoot {
                     .child(ui::icon("icons/globe.svg", 13., ui::accent()))
                     .child(url)
             }))
-            .child(self.render_reviews(&app_id, font.clone(), cx))
+            .child(self.render_reviews(&app_id, app.publisher.as_deref(), font.clone(), cx))
             .when_some(sandbox_metadata, |section, metadata| {
                 section.child(
                     div()
@@ -2358,12 +2363,73 @@ fn image_placeholder(loading: bool) -> gpui::AnyElement {
         .into_any_element()
 }
 
+/// Is this review written by the app's own publisher?
+fn is_publisher_review(review: &orchard_core::Review, publisher: Option<&str>) -> bool {
+    publisher == Some(review.pubkey.as_str())
+}
+
+/// Is this reviewer's key new to the feed (first seen under a week
+/// ago)? Absence from the table means unknown age, never new.
+fn is_new_key(
+    first_seen: &std::collections::BTreeMap<String, u64>,
+    pubkey: &str,
+    now: i64,
+) -> bool {
+    const WEEK: i64 = 7 * 24 * 60 * 60;
+    first_seen
+        .get(pubkey)
+        .is_some_and(|seen| (now - *seen as i64) < WEEK)
+}
+
+/// The reviews aggregate for one app. Publisher self-reviews are
+/// excluded from the average and count (their rows stay, flagged);
+/// reviews from new keys count fully and are only reported: a weak
+/// heuristic never drops a vote. Returns the average, the counted
+/// review total, how many counted reviews come from new keys, and
+/// how many publisher reviews were excluded.
+fn reviews_aggregate(
+    reviews: &[orchard_core::Review],
+    publisher: Option<&str>,
+    first_seen: &std::collections::BTreeMap<String, u64>,
+    now: i64,
+) -> (Option<f32>, usize, usize, usize) {
+    let mut rated: Vec<f32> = Vec::new();
+    let mut new_keys = 0usize;
+    let mut publisher_reviews = 0usize;
+    for review in reviews {
+        if is_publisher_review(review, publisher) {
+            publisher_reviews += 1;
+            continue;
+        }
+        if let Some(rating) = review.rating {
+            rated.push(rating);
+        }
+        if is_new_key(first_seen, &review.pubkey, now) {
+            new_keys += 1;
+        }
+    }
+    let average = (!rated.is_empty())
+        .then(|| rated.iter().sum::<f32>() / rated.len() as f32);
+    (
+        average,
+        reviews.len() - publisher_reviews,
+        new_keys,
+        publisher_reviews,
+    )
+}
+
 impl StoreRoot {
     /// The reviews section of the app page: a quiet header that doubles
     /// as the expand/collapse toggle (the list is hidden until asked
     /// for), the review list flush with the other page fields, and the
     /// compose or sign-in form when expanded.
-    fn render_reviews(&mut self, app_id: &str, font: gpui::Font, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_reviews(
+        &mut self,
+        app_id: &str,
+        publisher: Option<&str>,
+        font: gpui::Font,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let reviews = self
             .reviews
             .get(app_id)
@@ -2372,19 +2438,19 @@ impl StoreRoot {
 
         // header: same shape as the other section headers, so the text
         // lines up; the score formats with one decimal, no float junk
-        let average = if reviews.is_empty() {
-            None
-        } else {
-            let rated: Vec<f32> = reviews.iter().filter_map(|r| r.rating).collect();
-            (!rated.is_empty()).then(|| rated.iter().sum::<f32>() / rated.len() as f32)
-        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(i64::MAX);
+        let (average, counted, new_keys, publisher_reviews) =
+            reviews_aggregate(&reviews, publisher, &self.first_seen, now);
         let label = if reviews.is_empty() {
             "No reviews yet".to_string()
         } else {
             let score = average
                 .map(|value| format!(" · {:.1} {}", value, stars(value)))
                 .unwrap_or_default();
-            format!("Reviews{} · {}", score, reviews.len())
+            format!("Reviews{} · {}", score, counted)
         };
         let mut section = div().flex().flex_col().gap_2().w_full().child(
             div()
@@ -2413,6 +2479,26 @@ impl StoreRoot {
         // border chrome, the author line and text start at the same
         // edge as the description above
         if self.reviews_expanded {
+            // the trust breakdown, disclosed rather than hidden: what
+            // the aggregate left out and which reviews are young keys
+            let mut notes: Vec<String> = Vec::new();
+            if publisher_reviews > 0 {
+                notes.push(format!(
+                    "{publisher_reviews} publisher review{} not counted",
+                    if publisher_reviews == 1 { "" } else { "s" }
+                ));
+            }
+            if new_keys > 0 {
+                notes.push(format!("{new_keys} of {counted} from new keys"));
+            }
+            if !notes.is_empty() {
+                section = section.child(
+                    div()
+                        .text_size(px(ui::TEXT_SIZE_LABEL))
+                        .text_color(ui::text_dim())
+                        .child(notes.join(" · ")),
+                );
+            }
             for review in &reviews {
                 let author = review
                     .name
@@ -2422,6 +2508,8 @@ impl StoreRoot {
                         format!("{}…", &review.pubkey[..review.pubkey.len().min(12)])
                     });
                 let when = relative_time(review.created_at);
+                let flagged_publisher = is_publisher_review(review, publisher);
+                let fresh = is_new_key(&self.first_seen, &review.pubkey, now);
                 let mut row = div().flex().flex_col().gap_1().w_full().child(
                     div()
                         .flex()
@@ -2433,7 +2521,11 @@ impl StoreRoot {
                         .children(review.rating.map(|value| {
                             div().text_color(ui::accent()).child(stars(value))
                         }))
-                        .child(div().child(when)),
+                        .child(div().child(when))
+                        .children(flagged_publisher.then(|| {
+                            div().text_color(ui::text()).child("publisher")
+                        }))
+                        .children(fresh.then(|| div().child("new key"))),
                 );
                 if !review.content.is_empty() {
                     row = row.child(
@@ -3549,8 +3641,13 @@ fn merge_profile_raw(existing: Option<&str>, name: &str) -> String {
     value.to_string()
 }
 
-/// Reviews from indexd, grouped by app id (newest first within an app).
-fn load_reviews() -> anyhow::Result<HashMap<String, Vec<orchard_core::Review>>> {    let agent = ureq::AgentBuilder::new()
+/// Reviews from indexd, grouped by app id (newest first within an
+/// app), plus the per-reviewer first-seen table.
+fn load_reviews() -> anyhow::Result<(
+    HashMap<String, Vec<orchard_core::Review>>,
+    std::collections::BTreeMap<String, u64>,
+)> {
+    let agent = ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(5))
         .build();
     let file: orchard_core::ReviewsFile = agent
@@ -3564,7 +3661,7 @@ fn load_reviews() -> anyhow::Result<HashMap<String, Vec<orchard_core::Review>>> 
             .or_default()
             .push(review);
     }
-    Ok(grouped)
+    Ok((grouped, file.first_seen))
 }
 
 /// Sign and send one review event through the signer, then publish it
@@ -3890,5 +3987,50 @@ mod tests {
         // so does a listing edit
         app.summary = "Edited summary".into();
         assert_ne!(same, orchard_fingerprint(std::slice::from_ref(&app)));
+    }
+
+    fn trust_review(pubkey: &str, rating: Option<f32>) -> orchard_core::Review {
+        orchard_core::Review {
+            app_id: "com.orchard.Hello".into(),
+            pubkey: pubkey.into(),
+            name: None,
+            nip05: None,
+            rating,
+            content: String::new(),
+            created_at: 0,
+        }
+    }
+
+    #[test]
+    fn publisher_reviews_are_flagged_and_excluded() {
+        let reviews = vec![
+            trust_review("pub-a", Some(5.0)),
+            trust_review("pub-b", Some(1.0)),
+            trust_review("pub-a", None),
+        ];
+        let (average, counted, new_keys, publisher_reviews) =
+            reviews_aggregate(&reviews, Some("pub-a"), &Default::default(), 0);
+        assert_eq!(average, Some(1.0));
+        assert_eq!(counted, 1);
+        assert_eq!(new_keys, 0);
+        assert_eq!(publisher_reviews, 2);
+    }
+
+    #[test]
+    fn new_keys_are_counted_but_never_excluded() {
+        let reviews = vec![
+            trust_review("fresh", Some(5.0)),
+            trust_review("old", Some(1.0)),
+        ];
+        let mut first_seen = std::collections::BTreeMap::new();
+        first_seen.insert("fresh".to_string(), 0);
+        // the fresh key is first seen a minute before now; the other
+        // key is absent from the table, which means unknown, not new
+        let (average, counted, new_keys, publisher_reviews) =
+            reviews_aggregate(&reviews, None, &first_seen, 60);
+        assert_eq!(average, Some(3.0));
+        assert_eq!(counted, 2);
+        assert_eq!(new_keys, 1);
+        assert_eq!(publisher_reviews, 0);
     }
 }
