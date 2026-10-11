@@ -535,15 +535,17 @@ opening items because they need the push, the signing secret, and a tag.
       dropped from the plan; its real content is publisher pages
       (everything from one key in one place), parked as a navigation
       feature for later.
-- [x] Circle-first reviews: when signed in, the review list opens on
-      the circle lens, direct follows first, then their follows
-      (second-hand trust: visually dimmer and never above the first
-      hop, however new), then everyone else, recency inside each
-      tier. Everyone is one click (the lens chips above the list) or
-      one key (`v`) away: a single recency list, relationships
-      ignored. Signed out, the lenses are the same list and the
-      toggle hides. New-key sprouts, the circle glyphs, the publisher
-      flag, and the trust notes line stay on in every lens.
+- [x] The review lens: when signed in, the list opens on "In your
+      circle", a filter rather than an ordering: only the signed-in
+      identity's own review and their follows' show, newest first.
+      Everyone is one click (the lens chips above the list) or one
+      key (`v`) away: a single recency list, relationships ignored,
+      where two-hop rows wear their glyph and read dimmer. Signed
+      out, the lenses are the same list and the toggle hides. An
+      empty circle lens says so ("No reviews from people you follow
+      yet") rather than reading as an empty section. New-key
+      sprouts, the circle glyphs, the publisher flag, and the trust
+      notes line stay on in every lens.
 - [x] A composition line above the catalog rows: quiet facts about
       the current view only, never a judgment. Rows, distinct
       publishers among them, verified listings, rows from followed

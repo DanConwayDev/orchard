@@ -3776,41 +3776,27 @@ fn composition_line(rows: usize, publishers: usize, verified: usize, circle: usi
     parts.join(" · ")
 }
 
-/// The review display order. The circle lens (the signed-in default)
-/// puts the people closest first: direct follows, then their follows
-/// (second-hand trust, visually dimmer and never above the first
-/// hop), then everyone else, recency inside each tier. The Everyone
-/// lens is one recency list: no reordering by relationship.
+/// The review display rows. Everyone is one recency list, newest
+/// first. The circle lens is a filter, not an ordering: only the
+/// signed-in identity's own review and their follows' show, so the
+/// lens reads as "your people", never as a rank of the rest.
 fn review_order(
     reviews: &[orchard_core::Review],
     everyone: bool,
+    me: Option<&str>,
     follows: &std::collections::HashSet<String>,
-    circle2: &std::collections::HashSet<String>,
 ) -> Vec<usize> {
-    let mut order: Vec<usize> = (0..reviews.len()).collect();
+    let mut order: Vec<usize> = (0..reviews.len())
+        .filter(|&i| {
+            everyone
+                || Some(reviews[i].pubkey.as_str()) == me
+                || follows.contains(&reviews[i].pubkey)
+        })
+        .collect();
     order.sort_by(|&a, &b| {
         let (x, y) = (&reviews[a], &reviews[b]);
         y.created_at
             .cmp(&x.created_at)
-            .then_with(|| x.pubkey.cmp(&y.pubkey))
-    });
-    if everyone {
-        return order;
-    }
-    let tier = |pubkey: &str| -> u8 {
-        if follows.contains(pubkey) {
-            0u8
-        } else if circle2.contains(pubkey) {
-            1
-        } else {
-            2
-        }
-    };
-    order.sort_by(|&a, &b| {
-        let (x, y) = (&reviews[a], &reviews[b]);
-        tier(&x.pubkey)
-            .cmp(&tier(&y.pubkey))
-            .then_with(|| y.created_at.cmp(&x.created_at))
             .then_with(|| x.pubkey.cmp(&y.pubkey))
     });
     order
@@ -3994,7 +3980,7 @@ impl StoreRoot {
         // as header, then its content
         if self.reviews_expanded {
             let mut body = div().flex().flex_col().gap_2().pl_3();
-            // the lens: circle first is the signed-in default, everyone
+            // the lens: your circle is the signed-in default, everyone
             // is one click (or v) away. Hidden signed out: with no
             // follows the two lenses are the same list.
             if self.reviewer.is_some() && !reviews.is_empty() {
@@ -4006,7 +3992,7 @@ impl StoreRoot {
                         .text_size(px(ui::TEXT_SIZE_LABEL))
                         .child(self.lens_chip(
                             "lens-circle",
-                            "Circle first",
+                            "In your circle",
                             !self.reviews_everyone,
                             false,
                             cx,
@@ -4052,12 +4038,25 @@ impl StoreRoot {
                 );
             }
             let mut avatar_urls: Vec<String> = Vec::new();
-            for index in review_order(
+            let order = review_order(
                 &reviews,
                 self.reviews_everyone,
+                self.reviewer
+                    .as_ref()
+                    .map(|r| r.signer_pubkey.as_str()),
                 &self.follows,
-                &circle2_set,
-            ) {
+            );
+            // the circle lens with nothing to show says so, rather
+            // than reading as an empty section
+            if !self.reviews_everyone && order.is_empty() && !reviews.is_empty() {
+                body = body.child(
+                    div()
+                        .text_size(px(ui::TEXT_SIZE))
+                        .text_color(ui::text_dim())
+                        .child("No reviews from people you follow yet."),
+                );
+            }
+            for index in order {
                 let review = &reviews[index];
                 // the author's identity on the row: the profile name
                 // when there is one, the truncated npub otherwise. A
@@ -4179,14 +4178,15 @@ impl StoreRoot {
                         })),
                 );
                 if !review.content.is_empty() {
-                    // second-hand trust reads dimmer under the circle
-                    // lens: the d2 rows sit below d1 and look it
+                    // second-hand trust reads dimmer: the two-hop rows
+                    // only appear in the Everyone lens, and there they
+                    // look what they are
                     row = row.child(
                         div()
                             .flex()
                             .flex_col()
                             .text_size(px(ui::TEXT_SIZE))
-                            .text_color(if !self.reviews_everyone && in_circle2 {
+                            .text_color(if in_circle2 {
                                 ui::text_dim()
                             } else {
                                 ui::text()
@@ -4998,7 +4998,8 @@ impl StoreRoot {
     /// Is any window-level layer (channel dropdown, account dropdown,
     /// sign-in modal) showing?
     fn any_layer_open(&self) -> bool {
-        self.channel_menu.is_some() || self.account_menu.is_some() || self.signin_modal
+        self.channel_menu.is_some() || self.account_menu.is_some() || self.sort_menu.is_some()
+            || self.signin_modal
     }
 
     /// The window-level layers, if any: the dropdown panels and the
@@ -7010,33 +7011,29 @@ mod tests {
     }
 
     #[test]
-    fn circle_lens_puts_direct_follows_above_two_hops() {
+    fn circle_lens_shows_only_your_people() {
         let mut followed = trust_review("1111", Some(4.0));
         followed.created_at = 100;
-        let mut followed_too = trust_review("4444", Some(3.0));
-        followed_too.created_at = 150;
         let mut two_hops = trust_review("2222", Some(5.0));
-        // newer than the follows, but second-hand: never above them
-        two_hops.created_at = 200;
+        two_hops.created_at = 150;
         let mut crowd = trust_review("3333", Some(2.0));
         crowd.created_at = 300;
-        let reviews = vec![crowd, two_hops, followed_too, followed];
+        let mut mine = trust_review("4444", Some(3.0));
+        mine.created_at = 50;
+        let reviews = vec![crowd, two_hops, followed, mine];
         let mut follows = std::collections::HashSet::new();
         follows.insert("1111".to_string());
-        follows.insert("4444".to_string());
-        let mut circle2 = std::collections::HashSet::new();
-        circle2.insert("2222".to_string());
 
-        // circle lens: follows first (recency inside the tier), the
-        // two-hop key next, the crowd last
-        let order = review_order(&reviews, false, &follows, &circle2);
+        // the circle lens: your own review and your follows', newest
+        // first; the two-hop key and the crowd stay out
+        let order = review_order(&reviews, false, Some("4444"), &follows);
         let keys: Vec<&str> = order.iter().map(|&i| reviews[i].pubkey.as_str()).collect();
-        assert_eq!(keys, vec!["4444", "1111", "2222", "3333"]);
+        assert_eq!(keys, vec!["1111", "4444"]);
 
         // everyone: one recency list, relationships ignored
-        let order = review_order(&reviews, true, &follows, &circle2);
+        let order = review_order(&reviews, true, Some("4444"), &follows);
         let keys: Vec<&str> = order.iter().map(|&i| reviews[i].pubkey.as_str()).collect();
-        assert_eq!(keys, vec!["3333", "2222", "4444", "1111"]);
+        assert_eq!(keys, vec!["3333", "2222", "1111", "4444"]);
     }
 
     fn trust_review(pubkey: &str, rating: Option<f32>) -> orchard_core::Review {
