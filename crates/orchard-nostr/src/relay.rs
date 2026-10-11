@@ -44,13 +44,14 @@ pub fn relay_urls(env_value: Option<&str>) -> Vec<String> {
 }
 
 /// NIP-82 kinds Orchard reads: profiles, listings, releases, assets,
-/// reviews.
-const SUB_KINDS: [u16; 5] = [
+/// reviews, migrations.
+const SUB_KINDS: [u16; 6] = [
     crate::KIND_PROFILE as u16,
     crate::KIND_APP as u16,
     crate::KIND_RELEASE as u16,
     crate::KIND_ASSET as u16,
     crate::KIND_REVIEW as u16,
+    crate::KIND_MIGRATION as u16,
 ];
 
 const BACKOFF: Duration = Duration::from_secs(5);

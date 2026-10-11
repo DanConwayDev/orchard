@@ -113,6 +113,15 @@ matching the draft NIP keeps Zapstore publishers readable on Orchard day one.
 | Release | 30063 | `<app-id>@<version>` | `i` (app id), `version`, `c` (channel: stable/beta), `e` (asset refs) | changelog |
 | Asset | 3063 | — | `i`, `x` (sha256), `version`, `url`, `m`, `size`, `f`, **`oci`**, **`runtime`** | — |
 | Review | 30065 | `<app-id>` | rating, text (Orchard-draft until NIP-82 grows one; M6) | review text |
+| Publisher migration | 30066 | `<app-id>` | `p` (successor key, hex; omit to revoke) | note (Orchard-draft) |
+
+A migration statement is signed by the OLD publisher key and hands
+the app id to a successor: once the successor's own listing exists,
+the old row stops projecting, so a rotation leaves one listing, not
+two. Replaceable per (app id, old key): the newest statement from a
+key wins; revocation is a newer statement with no `p`. Only the
+listed key can authorize its own replacement — nobody else's row
+moves.
 
 Orchard's additive tags (invisible to Zapstore readers):
 
@@ -416,6 +425,9 @@ opening items because they need the push, the signing secret, and a tag.
       publisher; the page, digest badge, verify state, and install all key off the
       clicked twin (bookkeeping keyed app id plus publisher). Rows are named in
       the list ("by <publisher>") and carry unique element ids per publisher.
+      A rotation is not a second listing: kind 30066 (signed by the old key)
+      steps the old row aside once the successor lists the same id; revocation
+      with no `p` restores it.
 - [x] Key-continuity pinning: the client privately remembers which publisher keys
       it has seen per app id (continuity.json beside identity.json, never
       published). A key new for a known app id gets a "New publisher key" badge on

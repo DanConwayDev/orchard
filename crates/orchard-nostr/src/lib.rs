@@ -35,6 +35,10 @@ pub const KIND_APP: u32 = 32267;
 pub const KIND_RELEASE: u32 = 30063;
 pub const KIND_ASSET: u32 = 3063;
 pub const KIND_REVIEW: u32 = 30065;
+/// Publisher migration (Orchard-draft, same caveat as the review
+/// kind): signed by the OLD key, `d` the app id, `p` the successor
+/// key. No `p` revokes a previous designation.
+pub const KIND_MIGRATION: u32 = 30066;
 
 /// The event fields Orchard reads, parsed once from the canonical JSON so
 /// tag handling does not depend on the `Tag` API surface.
@@ -118,6 +122,16 @@ struct Listing {
     platforms: Vec<String>,
 }
 
+/// A publisher migration (kind 30066, Orchard-draft): signed by the
+/// OLD publisher key, `d` the app id, optional `p` the successor key.
+/// Replaceable per (app id, old key): the newest statement from a key
+/// wins, and an empty successor revokes the previous designation.
+struct Migration {
+    event: Event,
+    created_at: u64,
+    new_key: Option<String>,
+}
+
 /// One release (kind 30063). `d` is `<app-id>@<version>`; `e` refs asset
 /// events. Newest first in the feed's per-app vector.
 struct Release {
@@ -166,6 +180,9 @@ struct Review {
 #[derive(Default)]
 pub struct Feed {
     listings: BTreeMap<(String, String), Listing>,
+    /// (app id, old key) -> the newest migration statement that key
+    /// signed for the id.
+    migrations: BTreeMap<(String, String), Migration>,
     releases: BTreeMap<String, Vec<Release>>,
     assets: BTreeMap<String, Asset>,
     profiles: BTreeMap<String, Profile>,
@@ -209,6 +226,7 @@ impl Feed {
             KIND_ASSET => self.absorb_asset(event, parts),
             KIND_PROFILE => self.absorb_profile(event, parts),
             KIND_REVIEW => self.absorb_review(event, parts),
+            KIND_MIGRATION => self.absorb_migration(event, parts),
             _ => Ok(false),
         }
     }
@@ -247,6 +265,29 @@ impl Feed {
                 categories: parts.tag_values("t"),
                 platforms,
                 event,
+            },
+        );
+        Ok(true)
+    }
+
+    fn absorb_migration(&mut self, event: Event, parts: Parts) -> Result<bool> {
+        let Some(app_id) = parts.tag("d") else {
+            bail!("migration without d tag");
+        };
+        let key = (app_id, parts.pubkey.clone());
+        let newer = self
+            .migrations
+            .get(&key)
+            .is_none_or(|old| old.created_at <= parts.created_at);
+        if !newer {
+            return Ok(false);
+        }
+        self.migrations.insert(
+            key,
+            Migration {
+                event,
+                created_at: parts.created_at,
+                new_key: parts.tag("p"),
             },
         );
         Ok(true)
@@ -420,6 +461,23 @@ impl Feed {
         // one row per (app id, publisher): the same app id signed by
         // two keys projects twice, each against its own release chain
         for ((app_id, author), listing) in &self.listings {
+            // a migration statement signed by the listed key hands the
+            // app id to a successor: once the successor's own listing
+            // exists, the old row steps aside. A revoked or successor-
+            // less designation keeps the row.
+            let superseded = self
+                .migrations
+                .get(&(app_id.clone(), author.clone()))
+                .and_then(|migration| migration.new_key.as_ref())
+                .is_some_and(|successor| {
+                    successor != author
+                        && self
+                            .listings
+                            .contains_key(&(app_id.clone(), successor.clone()))
+                });
+            if superseded {
+                continue;
+            }
             // walk releases newest-first; first one with an installable
             // asset from the same publisher wins
             let Some(picked) = self.releases.get(app_id).and_then(|releases| {
@@ -484,6 +542,11 @@ impl Feed {
     pub fn event_jsons(&self) -> Vec<String> {
         let mut events: Vec<(u64, String)> = Vec::new();
         events.extend(self.listings.values().map(|l| (l.created_at, l.event.as_json())));
+        events.extend(
+            self.migrations
+                .values()
+                .map(|m| (m.created_at, m.event.as_json())),
+        );
         events.extend(
             self.releases
                 .values()
@@ -714,6 +777,146 @@ mod tests {
             .apps
             .iter()
             .any(|app| app.summary == "second publisher"));
+    }
+
+    /// The migration case: the old key's designation hands the app id
+    /// to the successor, whose listing then stands alone instead of
+    /// doubling the row.
+    #[test]
+    fn migrated_listing_steps_aside() {
+        let a = demo_keys();
+        let b = Keys::parse(
+            "a462984d90b5badd1ddef88f19ee6ad74bfcb06f431afc9b7b6ce2f6dbf6af70",
+        )
+        .unwrap();
+        let b_pubkey = b.get_public_key().unwrap().to_string();
+        // a complete chain per key: listing, asset, release
+        let chain = |keys: &Keys, summary: &str| {
+            let listing = signed(
+                keys,
+                KIND_APP,
+                "",
+                vec![
+                    ("d", "com.example.Hello"),
+                    ("name", "Hello"),
+                    ("summary", summary),
+                    ("f", "linux-x86_64"),
+                ],
+            );
+            let asset = signed(
+                keys,
+                KIND_ASSET,
+                "",
+                vec![
+                    ("i", "com.example.Hello"),
+                    ("x", DIGEST),
+                    ("version", "1.0.0"),
+                    ("oci", "oci:/srv/registry/hello"),
+                    ("runtime", "org.freedesktop.Platform/x86_64/25.08"),
+                ],
+            );
+            let release = signed(
+                keys,
+                KIND_RELEASE,
+                "",
+                vec![
+                    ("d", "com.example.Hello@1.0.0"),
+                    ("i", "com.example.Hello"),
+                    ("version", "1.0.0"),
+                    ("c", "stable"),
+                    ("e", asset.id.to_string().as_str()),
+                ],
+            );
+            [listing, asset, release]
+        };
+        let mut feed = Feed::new();
+        // both keys publish the app: two rows
+        absorb_all(&mut feed, &chain(&a, "old key"));
+        absorb_all(&mut feed, &chain(&b, "new key"));
+        assert_eq!(feed.catalog().apps.len(), 2);
+        // the old key designates the successor: its own row steps
+        // aside and the successor's listing stands alone
+        let migration = signed(
+            &a,
+            KIND_MIGRATION,
+            "rotated to a new device",
+            vec![("d", "com.example.Hello"), ("p", &b_pubkey)],
+        );
+        absorb_all(&mut feed, &[migration]);
+        let catalog = feed.catalog();
+        assert_eq!(catalog.apps.len(), 1);
+        assert_eq!(catalog.apps[0].publisher.pubkey, b_pubkey);
+        assert_eq!(catalog.apps[0].summary, "new key");
+
+        // revocation: a newer statement from the old key with no `p`
+        // restores its row
+        let revoke = EventBuilder::new(Kind::Custom(KIND_MIGRATION as u16), "")
+            .custom_created_at(Timestamp::now())
+            .tag(Tag::custom("d", ["com.example.Hello"]))
+            .finalize(&a)
+            .unwrap();
+        absorb_all(&mut feed, &[revoke]);
+        assert_eq!(feed.catalog().apps.len(), 2);
+    }
+
+    /// A designation whose successor never lists suppresses nothing:
+    /// the app must not lose its only row over an undelivered handover.
+    #[test]
+    fn successor_less_migration_keeps_the_row() {
+        let a = demo_keys();
+        let b = Keys::parse(
+            "a462984d90b5badd1ddef88f19ee6ad74bfcb06f431afc9b7b6ce2f6dbf6af70",
+        )
+        .unwrap();
+        let stranger = b.get_public_key().unwrap().to_string();
+        let listing = signed(
+            &a,
+            KIND_APP,
+            "",
+            vec![
+                ("d", "com.example.Hello"),
+                ("name", "Hello"),
+                ("f", "linux-x86_64"),
+            ],
+        );
+        let asset = signed(
+            &a,
+            KIND_ASSET,
+            "",
+            vec![
+                ("i", "com.example.Hello"),
+                ("x", DIGEST),
+                ("version", "1.0.0"),
+                ("oci", "oci:/srv/registry/hello"),
+                ("runtime", "org.freedesktop.Platform/x86_64/25.08"),
+            ],
+        );
+        let release = signed(
+            &a,
+            KIND_RELEASE,
+            "",
+            vec![
+                ("d", "com.example.Hello@1.0.0"),
+                ("i", "com.example.Hello"),
+                ("version", "1.0.0"),
+                ("c", "stable"),
+                ("e", asset.id.to_string().as_str()),
+            ],
+        );
+        let migration = signed(
+            &a,
+            KIND_MIGRATION,
+            "",
+            vec![("d", "com.example.Hello"), ("p", &stranger)],
+        );
+        let mut feed = Feed::new();
+        absorb_all(&mut feed, &[listing, asset, release, migration]);
+        let catalog = feed.catalog();
+        assert_eq!(catalog.apps.len(), 1);
+        assert_eq!(
+            catalog.apps[0].publisher.pubkey,
+            a.get_public_key().unwrap().to_string()
+        );
     }
 
     #[test]
