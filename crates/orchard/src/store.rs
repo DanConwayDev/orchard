@@ -2744,29 +2744,6 @@ impl StoreRoot {
                 // action bar: pinned under the scrolling content
                 div().flex().items_center().gap_2().px_8().py_3().border_t_1()
                     .border_color(ui::divider()).bg(ui::panel())
-                    .children((app.source == Source::Publisher && !app.platforms.is_empty()).then(|| {
-                        // the platforms this app is published for,
-                        // resolved per arch on the device; the words
-                        // live on hover
-                        let list = app
-                            .platforms
-                            .iter()
-                            .filter_map(|platform| platform.strip_prefix("linux-"))
-                            .collect::<Vec<_>>()
-                            .join(" · ");
-                        div()
-                            .id("page-platforms")
-                            .flex_none()
-                            .hover(|style| style.bg(gpui::transparent_black()))
-                            .tooltip(|_window, cx| {
-                                cx.new(|_| {
-                                    TextTooltip("Builds published for these platforms".into())
-                                })
-                                .into()
-                            })
-                            .child(badge(&list, ui::text_dim()))
-                            .into_any_element()
-                    }))
                     .children(match job {
                         Some(state) => vec![badge(
                             state.label(),
@@ -4439,7 +4416,8 @@ fn human_size(bytes: u64) -> String {
 }
 
 /// The honest state for an app whose chain exists but builds nothing
-/// for this machine: what the platform story is, in one line.
+/// for this machine. This one line is the whole arch story: quiet
+/// everywhere else, told in full exactly where it matters.
 fn no_build_note(app: &StoreApp) -> String {
     let host = orchard_core::host_ref_arch();
     if app
@@ -4449,7 +4427,17 @@ fn no_build_note(app: &StoreApp) -> String {
     {
         "no installable build for this machine yet".to_string()
     } else {
-        format!("no {host} build yet")
+        let published = app
+            .platforms
+            .iter()
+            .filter_map(|platform| platform.strip_prefix("linux-"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if published.is_empty() {
+            format!("no {host} build yet")
+        } else {
+            format!("no {host} build yet, published for {published}")
+        }
     }
 }
 
