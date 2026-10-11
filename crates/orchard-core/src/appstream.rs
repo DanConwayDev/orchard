@@ -28,6 +28,9 @@ pub struct AppstreamApp {
     /// Remote icon URL (type="remote", width >= 64), fallback for [icon_path].
     pub icon_url: Option<String>,
     pub categories: Vec<String>,
+    /// Screenshot image URLs, best first: source images in file order,
+    /// then thumbnails widest first.
+    pub screenshots: Vec<String>,
 }
 
 /// Candidate locations of the appstream for a remote, user install first,
@@ -62,78 +65,141 @@ pub fn load(path: &Path, icons_root: &Path) -> Result<Vec<AppstreamApp>> {
         std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let gz = flate2::read::GzDecoder::new(file);
     let mut reader = quick_xml::Reader::from_reader(BufReader::new(gz));
-    reader.config_mut().trim_text(true);
+    // trim_text stays off: quick-xml splits text around general entity
+    // references (`&quot;` arrives as its own event) and trimming each
+    // fragment would eat the whitespace between them. Element helpers
+    // accumulate raw fragments and trim once instead.
 
     let mut apps = Vec::new();
     let mut current: Option<Component> = None;
     let mut buf = Vec::with_capacity(8192);
+    // Nesting depth of the stream, the depth <component> sits at, and the
+    // depth of the <screenshots> group (zero when outside one).
+    let mut depth = 0usize;
+    let mut comp_depth = 0usize;
+    let mut screenshots_depth = 0usize;
 
     loop {
         // into_owned detaches the event from `buf` so helpers can reuse it.
         let event = reader.read_event_into(&mut buf)?.into_owned();
         match event {
-            Event::Start(ref e) | Event::Empty(ref e) => {
-                let empty = matches!(event, Event::Empty(_));
+            Event::Start(ref e) => {
                 match e.name().as_ref() {
-                    b"component" => current = Some(Component::default()),
-                    b"id" if !empty => {
-                        if let Some(c) = current.as_mut() {
-                            c.id = leaf_text(&mut reader, &mut buf, e)?.map(Box::from);
-                        }
+                    b"component" => {
+                        comp_depth = depth;
+                        depth += 1;
+                        current = Some(Component::default());
                     }
-                    b"name" if !empty => {
-                        if let Some(c) = current.as_mut() {
-                            c.name = first_leaf(&mut reader, &mut buf, e, c.name.take())?;
-                        }
-                    }
-                    b"summary" if !empty => {
-                        if let Some(c) = current.as_mut() {
-                            c.summary =
-                                first_leaf(&mut reader, &mut buf, e, c.summary.take())?;
-                        }
-                    }
-                    b"description" if !empty => {
+                    b"description" => {
+                        // subtree_text consumes the whole balanced subtree
+                        // including this element's End tag, so the depth
+                        // counter must not count this Start either.
                         if let Some(c) = current.as_mut() {
                             if c.description.is_none() {
                                 let text = subtree_text(&mut reader, &mut buf)?;
                                 c.description = Some(text.into_boxed_str());
+                            } else {
+                                let _ = subtree_text(&mut reader, &mut buf)?;
                             }
                         }
                     }
-                    b"project_license" if !empty => {
+                    _ => {
+                        // Whether a helper already consumed this element's
+                        // End tag; if so the depth counter must not count
+                        // the subtree either.
+                        let mut consumed = false;
                         if let Some(c) = current.as_mut() {
-                            c.license =
-                                first_leaf(&mut reader, &mut buf, e, c.license.take())?;
-                        }
-                    }
-                    b"release" => {
-                        if let Some(c) = current.as_mut() {
-                            if c.version.is_none() {
-                                c.version = attr_value(e, b"version")?.map(Box::from);
+                            match e.name().as_ref() {
+                                // The component id is only valid as a direct
+                                // child. Nested ids (<replaces>, <provides>,
+                                // <extends>, <developer>...) must never
+                                // clobber it: apps keyed under a replaced id
+                                // vanish from installed lookups.
+                                b"id" if depth == comp_depth + 1 && c.id.is_none() => {
+                                    c.id = leaf_text(&mut reader, &mut buf, e)?.map(Box::from);
+                                    consumed = true;
+                                }
+                                b"name" => {
+                                    c.name =
+                                        first_leaf(&mut reader, &mut buf, e, c.name.take())?;
+                                    consumed = true;
+                                }
+                                b"summary" => {
+                                    c.summary = first_leaf(
+                                        &mut reader, &mut buf, e, c.summary.take(),
+                                    )?;
+                                    consumed = true;
+                                }
+                                b"project_license" => {
+                                    c.license = first_leaf(
+                                        &mut reader, &mut buf, e, c.license.take(),
+                                    )?;
+                                    consumed = true;
+                                }
+                                b"release" => {
+                                    if c.version.is_none() {
+                                        c.version = attr_value(e, b"version")?.map(Box::from);
+                                    }
+                                }
+                                b"category" => {
+                                    if let Some(cat) =
+                                        leaf_text(&mut reader, &mut buf, e)?
+                                    {
+                                        c.categories.push(cat);
+                                    }
+                                    consumed = true;
+                                }
+                                b"icon" => {
+                                    read_icon(&mut reader, &mut buf, e, false, c)?;
+                                    consumed = true;
+                                }
+                                b"image" if screenshots_depth > 0 => {
+                                    read_screenshot_image(
+                                        &mut reader, &mut buf, e, c,
+                                    )?;
+                                    consumed = true;
+                                }
+                                b"screenshots" => {
+                                    screenshots_depth = depth;
+                                }
+                                _ => {}
                             }
                         }
-                    }
-                    b"category" if !empty => {
-                        if let (Some(c), Some(cat)) = (
-                            current.as_mut(),
-                            leaf_text(&mut reader, &mut buf, e)?,
-                        ) {
-                            c.categories.push(cat);
+                        if !consumed {
+                            depth += 1;
                         }
                     }
-                    b"icon" => {
-                        if let Some(c) = current.as_mut() {
-                            read_icon(&mut reader, &mut buf, e, empty, c)?;
+                }
+            }
+            Event::End(ref e) => {
+                let closing = e.name();
+                if closing.as_ref() == b"screenshots"
+                    && screenshots_depth == depth.saturating_sub(1)
+                {
+                    screenshots_depth = 0;
+                }
+                depth = depth.saturating_sub(1);
+                if closing.as_ref() == b"component" {
+                    if let Some(app) = current.take().and_then(|c| c.finish(icons_root)) {
+                        apps.push(app);
+                    }
+                }
+            }
+            Event::Empty(ref e) => match e.name().as_ref() {
+                b"release" => {
+                    if let Some(c) = current.as_mut() {
+                        if c.version.is_none() {
+                            c.version = attr_value(e, b"version")?.map(Box::from);
                         }
                     }
-                    _ => {}
                 }
-            }
-            Event::End(ref e) if e.name().as_ref() == b"component" => {
-                if let Some(app) = current.take().and_then(|c| c.finish(icons_root)) {
-                    apps.push(app);
+                b"icon" => {
+                    if let Some(c) = current.as_mut() {
+                        read_icon(&mut reader, &mut buf, e, true, c)?;
+                    }
                 }
-            }
+                _ => {}
+            },
             Event::Eof => break,
             _ => {}
         }
@@ -143,31 +209,66 @@ pub fn load(path: &Path, icons_root: &Path) -> Result<Vec<AppstreamApp>> {
 }
 
 /// Text of a leaf element, unless it carries an xml:lang (a translation we
-/// skip in favor of the untranslated string).
+/// skip in favor of the untranslated string). Consumes through the
+/// element's End tag either way.
 fn leaf_text(
     reader: &mut quick_xml::Reader<impl BufRead>,
     buf: &mut Vec<u8>,
     start: &BytesStart<'_>,
 ) -> Result<Option<String>> {
     if is_translation(start) {
-        // Consume the text node so the stream stays aligned.
-        let _ = reader.read_event_into(buf)?;
+        consume_element(reader, buf)?;
         return Ok(None);
     }
-    if start.is_empty() {
-        return Ok(None);
-    }
-    match reader.read_event_into(buf)? {
-        Event::Text(t) => {
-            let text = t.xml_content()?.trim().to_string();
-            if text.is_empty() {
-                Ok(None)
-            } else {
-                Ok(Some(text))
-            }
+    consume_element(reader, buf)
+}
+
+/// Consume events through the matching End tag and return the element's
+/// character data. quick-xml splits text around general entity references
+/// (a `&quot;` arrives as its own `GeneralRef` event), so fragments are
+/// concatenated raw and the whole is trimmed once.
+fn consume_element(
+    reader: &mut quick_xml::Reader<impl BufRead>,
+    buf: &mut Vec<u8>,
+) -> Result<Option<String>> {
+    let mut text = String::new();
+    loop {
+        buf.clear();
+        match reader.read_event_into(buf)? {
+            Event::Text(t) => text.push_str(&t.xml_content()?),
+            Event::GeneralRef(r) => text.push_str(&resolve_ref(&r)),
+            Event::End(_) => break,
+            Event::Eof => break,
+            // Unexpected child structure inside a leaf: keep reading so
+            // alignment holds.
+            _ => {}
         }
-        _ => Ok(None),
     }
+    let text = text.trim();
+    if text.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(text.to_string()))
+    }
+}
+
+/// Resolve an entity reference: XML predefined entities and numeric
+/// character references; anything else (appstream defines no custom
+/// entities) drops out.
+fn resolve_ref(r: &quick_xml::events::BytesRef<'_>) -> String {
+    let name = String::from_utf8_lossy(r.as_ref());
+    if let Some(digits) = name.strip_prefix('#') {
+        let code = if let Some(hex) = digits.strip_prefix('x').or_else(|| digits.strip_prefix('X'))
+        {
+            u32::from_str_radix(hex, 16).ok()
+        } else {
+            digits.parse::<u32>().ok()
+        };
+        return code.and_then(char::from_u32).map(String::from).unwrap_or_default();
+    }
+    quick_xml::escape::resolve_predefined_entity(&name)
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// `first_leaf` but keeps the existing value: the first untranslated
@@ -179,39 +280,52 @@ fn first_leaf(
     existing: Option<Box<str>>,
 ) -> Result<Option<Box<str>>> {
     if existing.is_some() {
-        // Already have one; still consume the text node for stream alignment.
-        if !start.is_empty() {
-            let _ = reader.read_event_into(buf)?;
-        }
+        // Already have one; still consume the element for stream alignment.
+        consume_element(reader, buf)?;
         return Ok(existing);
     }
     leaf_text(reader, buf, start).map(|t| t.map(String::into_boxed_str))
 }
 
 /// Collect human text from a subtree (stops at the matching close tag).
+/// Runs are flushed at element boundaries so paragraphs join with single
+/// spaces while entity-split fragments stay glued together.
 fn subtree_text(
     reader: &mut quick_xml::Reader<impl BufRead>,
     buf: &mut Vec<u8>,
 ) -> Result<String> {
+    fn flush_run(run: &mut String, pieces: &mut Vec<String>) {
+        let trimmed = run.trim();
+        if !trimmed.is_empty() {
+            pieces.push(trimmed.to_string());
+        }
+        run.clear();
+    }
+
     let mut depth = 0usize;
+    let mut run = String::new();
     let mut pieces: Vec<String> = Vec::new();
     loop {
         buf.clear();
         match reader.read_event_into(buf)? {
-            Event::Start(_) => depth += 1,
+            Event::Start(_) => {
+                flush_run(&mut run, &mut pieces);
+                depth += 1;
+            }
             Event::End(_) => {
+                flush_run(&mut run, &mut pieces);
                 if depth == 0 {
                     break;
                 }
                 depth -= 1;
             }
-            Event::Text(t) => {
-                let text = t.xml_content()?.trim().to_string();
-                if !text.is_empty() {
-                    pieces.push(text);
-                }
+            Event::Text(t) => run.push_str(&t.xml_content()?),
+            // Mid-sentence references continue the current run.
+            Event::GeneralRef(r) => run.push_str(&resolve_ref(&r)),
+            Event::Eof => {
+                flush_run(&mut run, &mut pieces);
+                break;
             }
-            Event::Eof => break,
             _ => {}
         }
     }
@@ -267,6 +381,38 @@ fn read_icon(
     Ok(())
 }
 
+/// Handle an `<image>` element inside `<screenshots>`: attributes carry
+/// type/width, the text node carries the URL.
+fn read_screenshot_image(
+    reader: &mut quick_xml::Reader<impl BufRead>,
+    buf: &mut Vec<u8>,
+    start: &BytesStart<'_>,
+    component: &mut Component,
+) -> Result<()> {
+    let kind = attr_value(start, b"type")?.unwrap_or_default();
+    let width: u32 = attr_value(start, b"width")?
+        .and_then(|w| w.parse().ok())
+        .unwrap_or(0);
+    let url = leaf_text(reader, buf, start)?.unwrap_or_default();
+    if url.is_empty() {
+        return Ok(());
+    }
+    component.screenshots.push(ScreenshotImage {
+        kind: kind.into_boxed_str(),
+        width,
+        url,
+    });
+    Ok(())
+}
+
+/// One `<image>` entry from a `<screenshot>`.
+struct ScreenshotImage {
+    /// AppStream type: "source" (full resolution) or "thumbnail".
+    kind: Box<str>,
+    width: u32,
+    url: String,
+}
+
 /// Accumulator for one `<component>` element.
 #[derive(Default)]
 struct Component {
@@ -279,6 +425,7 @@ struct Component {
     categories: Vec<String>,
     cached_icon_name: Option<String>,
     icon_url: Option<String>,
+    screenshots: Vec<ScreenshotImage>,
 }
 
 impl Component {
@@ -301,6 +448,19 @@ impl Component {
                     .map(|size| icons_root.join(size).join(&basename))
                     .find(|candidate| candidate.exists())
             });
+        // Screenshots: source images in file order first, then thumbnails
+        // widest first, deduplicated.
+        let raw = std::mem::take(&mut self.screenshots);
+        let mut seen = std::collections::HashSet::new();
+        let mut screenshots: Vec<String> = Vec::new();
+        let mut thumbnails: Vec<&ScreenshotImage> =
+            raw.iter().filter(|img| img.kind.as_ref() != "source").collect();
+        thumbnails.sort_by(|a, b| b.width.cmp(&a.width));
+        for img in raw.iter().filter(|img| img.kind.as_ref() == "source").chain(thumbnails) {
+            if seen.insert(img.url.clone()) && screenshots.len() < 6 {
+                screenshots.push(img.url.clone());
+            }
+        }
         Some(AppstreamApp {
             id,
             name,
@@ -311,6 +471,7 @@ impl Component {
             icon_path,
             icon_url: self.icon_url.take(),
             categories: self.categories,
+            screenshots,
         })
     }
 }
@@ -333,6 +494,12 @@ mod tests {
       <p>First paragraph.</p>
       <ul><li>Point one</li><li>Point two</li></ul>
     </description>
+    <replaces>
+      <id>com.example.Old</id>
+    </replaces>
+    <developer id="com.example.Full">
+      <name>Example Team</name>
+    </developer>
     <releases>
       <release version="1.2.3" timestamp="1700000000"/>
       <release version="1.2.2" timestamp="1600000000"/>
@@ -340,11 +507,28 @@ mod tests {
     <categories><category>Utility</category><category>Game</category></categories>
     <icon height="64" type="cached" width="64">com.example.Full.png</icon>
     <icon height="128" type="remote" width="128">https://example.com/full.png</icon>
+    <screenshots>
+      <screenshot type="default">
+        <image type="source" width="2424" height="1515">https://example.com/shot-full.png</image>
+        <image type="thumbnail" width="752" height="471">https://example.com/shot-small.png</image>
+      </screenshot>
+      <screenshot type="extra">
+        <image type="thumbnail" width="1120" height="700">https://example.com/shot2-small.png</image>
+      </screenshot>
+    </screenshots>
   </component>
   <component type="desktop-application">
     <id>com.example.Minimal</id>
     <name>Minimal</name>
     <summary>Just the basics</summary>
+  </component>
+  <component type="desktop-application">
+    <id>com.example.Quoted</id>
+    <name>Quoted</name>
+    <summary>&quot;Five in a row&quot; board &amp; puzzle game</summary>
+    <description>
+      <p>It&apos;s a game with &amp; symbols</p>
+    </description>
   </component>
 </components>"#;
 
@@ -361,7 +545,7 @@ mod tests {
         gz.finish().unwrap();
 
         let apps = load(&xml_path, &dir.join("icons")).unwrap();
-        assert_eq!(apps.len(), 2);
+        assert_eq!(apps.len(), 3);
 
         let full = &apps[0];
         assert_eq!(full.id, "com.example.Full");
@@ -388,11 +572,35 @@ mod tests {
             full.icon_url.as_deref(),
             Some("https://example.com/full.png")
         );
+        // The nested id in <replaces> must not clobber the component id,
+        // and the developer name must not clobber the app name.
+        assert_eq!(full.id, "com.example.Full");
+        assert_eq!(full.name, "Full App");
+        // Source screenshot first, then thumbnails widest first.
+        assert_eq!(
+            full.screenshots,
+            [
+                "https://example.com/shot-full.png",
+                "https://example.com/shot2-small.png",
+                "https://example.com/shot-small.png"
+            ]
+        );
 
         let minimal = &apps[1];
         assert_eq!(minimal.id, "com.example.Minimal");
         assert!(minimal.description.is_none());
         assert!(minimal.version.is_none());
+
+        // Text starting with an entity reference must not be lost
+        // (quick-xml emits the reference as a separate event), and
+        // spacing around split fragments must survive.
+        let quoted = &apps[2];
+        assert_eq!(quoted.id, "com.example.Quoted");
+        assert_eq!(
+            quoted.summary,
+            "\"Five in a row\" board & puzzle game"
+        );
+        assert_eq!(quoted.description.as_deref(), Some("It's a game with & symbols"));
     }
 
     #[test]
