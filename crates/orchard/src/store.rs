@@ -234,6 +234,10 @@ pub struct StoreRoot {
     /// app id -> verified manifest digest (publisher channel,
     /// post-verify).
     verified: HashMap<String, String>,
+    /// Verified digest pins on disk (location|pin -> served digest): a
+    /// checked pin is a fact that cannot rot, so verdicts survive
+    /// restarts and never re-contact the registry.
+    verified_pins: std::collections::BTreeMap<String, String>,
     /// Which publisher keys this client has seen per app id: the
     /// continuity record behind the new-key disclosure.
     continuity: orchard_core::ContinuityFile,
@@ -408,6 +412,7 @@ impl StoreRoot {
             error_at: None,
             note_at: None,
             verified: HashMap::new(),
+            verified_pins: load_digest_cache_at(&digest_cache_path()),
             continuity: load_continuity(),
             error: None,
             flathub_loading: true,
@@ -1022,23 +1027,75 @@ impl StoreRoot {
     /// Pre-install artifact check for publisher apps: one manifest fetch
     /// verifies the pinned digest and reads the sandbox labels, so the
     /// page shows exactly what install will pin. Same fetch the install
-    /// button runs; failures surface on the page and retry on the next
-    /// page open.
+    /// button and the list rows run; failures surface on the page and
+    /// the next session tries again.
     fn ensure_publisher_data(&mut self, app_id: &str, cx: &mut Context<Self>) {
         let key = app_key(app_id, self.selected_publisher.as_deref());
-        if self.verified.contains_key(&key)
-            || self.verify_errors.contains_key(&key)
-            || !self.publisher_fetching.insert(key.clone())
+        let Some(app) = self.find_app(app_id) else {
+            return;
+        };
+        let (location, pinned, found_id, publisher) = (
+            app.location.clone(),
+            app.pinned_digest.clone(),
+            app.app_id.clone(),
+            app.publisher.clone(),
+        );
+        self.run_digest_check(key, location, pinned, found_id, publisher, cx);
+    }
+
+    /// The list's viewport trigger: a publisher row entering the list
+    /// earns its row badge the way a page open does, adopting a disk
+    /// verdict before any network. Skipped in the Orchard channel view:
+    /// its rows hide the badge, so checking them is registry contact
+    /// with nothing to show for it.
+    fn ensure_row_digest(
+        &mut self,
+        key: &str,
+        location: Option<String>,
+        pinned: Option<String>,
+        app_id: &str,
+        publisher: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.verified.contains_key(key)
+            || self.verify_errors.contains_key(key)
+            || self.publisher_fetching.contains(key)
         {
             return;
         }
-        let Some(app) = self.find_app(app_id).cloned() else {
-            self.publisher_fetching.remove(&key);
-            return;
+        let cached = match (location.as_deref(), pinned.as_deref()) {
+            (Some(location_text), Some(pinned)) => self
+                .verified_pins
+                .get(&digest_cache_key(location_text, pinned))
+                .cloned(),
+            _ => None,
         };
-        let publisher = app.publisher.clone();
-        let location = match app
-            .location
+        if let Some(digest) = cached {
+            self.verified.insert(key.to_string(), digest);
+            cx.notify();
+            return;
+        }
+        self.run_digest_check(key.to_string(), location, pinned, app_id.to_string(), publisher, cx);
+    }
+
+    /// The one digest check: fetch the registry manifest, compare the
+    /// pin, read the sandbox labels. Ok records the verdict in memory
+    /// and, with a location and pin present, on disk (a checked pin is
+    /// a fact that cannot rot, so the cache never expires); Err records
+    /// the failure for the page.
+    fn run_digest_check(
+        &mut self,
+        key: String,
+        location_text: Option<String>,
+        pinned: Option<String>,
+        app_id: String,
+        publisher: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.publisher_fetching.insert(key.clone()) {
+            return;
+        }
+        let location = match location_text
             .as_deref()
             .and_then(|raw| oci::Location::parse(raw).ok())
         {
@@ -1048,8 +1105,9 @@ impl StoreRoot {
                 return;
             }
         };
-        let pinned = app.pinned_digest.clone();
-        let app_id = app_id.to_string();
+        let cache_key = pinned
+            .as_deref()
+            .map(|pin| digest_cache_key(location_text.as_deref().unwrap_or(""), pin));
         cx.spawn(async move |this, cx| {
             let report = cx
                 .background_executor()
@@ -1060,6 +1118,10 @@ impl StoreRoot {
                 match report {
                     Ok(report) => {
                         this.verified.insert(key.clone(), report.digest.clone());
+                        if let Some(cache_key) = cache_key {
+                            this.verified_pins.insert(cache_key, report.digest.clone());
+                            save_digest_cache_at(&digest_cache_path(), &this.verified_pins);
+                        }
                         if let Some(app) = this.apps.iter_mut().find(|a| {
                             a.app_id == app_id && a.publisher == publisher
                         }) {
@@ -1077,8 +1139,8 @@ impl StoreRoot {
                     }
                     Err(err) => {
                         // the pin did not match or the artifact is
-                        // unreadable: show it, and keep retrying on the
-                        // next page open
+                        // unreadable: show it on the page, and the next
+                        // session tries again
                         this.verify_errors
                             .insert(key.clone(), format!("{err:#}"));
                     }
@@ -3176,6 +3238,31 @@ impl StoreRoot {
             .filter(|url| !self.fetched.contains_key(url))
             .collect();
         self.ensure_fetched(row_icon_urls, cx);
+        // the visible rows' digest checks ride the same lazy pattern:
+        // rows entering the list earn the row badge the way a page
+        // open does, so the badge is not a page-visit souvenir
+        if self.filter != Filter::Publisher {
+            let digest_jobs: Vec<(String, Option<String>, Option<String>, String, Option<String>)> =
+                range
+                    .clone()
+                    .filter_map(|ix| {
+                        let app = &self.apps[*rows.get(ix)?];
+                        if app.source != Source::Publisher {
+                            return None;
+                        }
+                        Some((
+                            app_key(&app.app_id, app.publisher.as_deref()),
+                            app.location.clone(),
+                            app.pinned_digest.clone(),
+                            app.app_id.clone(),
+                            app.publisher.clone(),
+                        ))
+                    })
+                    .collect();
+            for (key, location, pinned, app_id, publisher) in digest_jobs {
+                self.ensure_row_digest(&key, location, pinned, &app_id, publisher, cx);
+            }
+        }
         let selected = self.selected.as_deref();
         range
             .filter_map(|ix| rows.get(ix))
@@ -3193,6 +3280,7 @@ impl StoreRoot {
                     "app-row-{app_id}-{}",
                     row_publisher.as_deref().unwrap_or("")
                 );
+                let digest_id = format!("{row_id}-digest");
                 let is_selected = selected == Some(app.app_id.as_str())
                     && self.selected_publisher.as_deref() == app.publisher.as_deref();
                 let is_installed = self.installed.contains_key(&app.app_id);
@@ -3275,15 +3363,34 @@ impl StoreRoot {
                                     // visited subset implies the rest
                                     // are something less. In All and
                                     // Installed the presence is real
-                                    // information.
+                                    // information. The shield is quiet
+                                    // like the repo check; the words
+                                    // live on hover and on the page.
                                     .when(
                                         verified_digest.is_some()
                                             && self.filter != Filter::Publisher,
                                         |row| {
-                                            row.child(badge(
-                                                "digest ok",
-                                                ui::risk_color(orchard_core::Risk::Low),
-                                            ))
+                                            row.child(
+                                                div()
+                                                    .id(SharedString::from(digest_id))
+                                                    .hover(|style| {
+                                                        style.bg(gpui::transparent_black())
+                                                    })
+                                                    .tooltip(|_window, cx| {
+                                                        cx.new(|_| {
+                                                            TextTooltip(
+                                                                "Artifact matches the signed digest"
+                                                                    .into(),
+                                                            )
+                                                        })
+                                                        .into()
+                                                    })
+                                                    .child(ui::icon(
+                                                        "icons/shield.svg",
+                                                        13.,
+                                                        ui::risk_color(orchard_core::Risk::Low),
+                                                    )),
+                                            )
                                         },
                                     )
                                     // repo-verified: the forge hosts
@@ -7991,6 +8098,43 @@ fn qr_cache_dir() -> std::path::PathBuf {
     std::env::temp_dir().join("orchard")
 }
 
+/// The digest verdict cache beside the other caches.
+fn digest_cache_path() -> std::path::PathBuf {
+    qr_cache_dir().join("digest-verdicts.json")
+}
+
+/// The verdict key: artifact location plus the pinned digest. The same
+/// artifact shared by two app ids shares the verdict.
+fn digest_cache_key(location: &str, pinned: &str) -> String {
+    format!("{location}|{pinned}")
+}
+
+/// Load the digest verdict cache; a missing or unparseable file is an
+/// empty cache, never a gate (the page-open check refills it).
+fn load_digest_cache_at(
+    path: &std::path::Path,
+) -> std::collections::BTreeMap<String, String> {
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+/// Persist the digest verdict cache: tmp plus rename, so a crash
+/// mid-write cannot half-write it.
+fn save_digest_cache_at(path: &std::path::Path, cache: &std::collections::BTreeMap<String, String>) {
+    let Ok(json) = serde_json::to_vec(cache) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, json).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
+
 /// The relay the connect channel rides: a public NIP-46 relay, so a
 /// signer app on a phone or another desktop can reach it too.
 /// Override with ORCHARD_CONNECT_RELAY.
@@ -8086,6 +8230,28 @@ fn update_available(app: &StoreApp, installed: &InstalledInfo) -> bool {
 mod tests {
     use super::*;
     use orchard_core::{CatalogApp, Publisher};
+
+    #[test]
+    fn digest_cache_round_trips() {
+        let path =
+            std::env::temp_dir().join(format!("orchard-digests-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut cache = load_digest_cache_at(&path);
+        assert!(cache.is_empty());
+        cache.insert(
+            digest_cache_key("ghcr.io/a/b", "sha256:00"),
+            "sha256:00".into(),
+        );
+        save_digest_cache_at(&path, &cache);
+        let reloaded = load_digest_cache_at(&path);
+        assert_eq!(
+            reloaded
+                .get("ghcr.io/a/b|sha256:00")
+                .map(String::as_str),
+            Some("sha256:00")
+        );
+        let _ = std::fs::remove_file(&path);
+    }
 
     #[test]
     fn list_sort_orders_by_each_chosen_key() {

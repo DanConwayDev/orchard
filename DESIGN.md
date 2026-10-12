@@ -570,14 +570,21 @@ opening items because they need the push, the signing secret, and a tag.
       empty view shows nothing. A flood reads as composition ("48
       apps from 3 publishers"), not as rank: the client states what
       is here and leaves the judging to the person reading.
-- [x] The row's "digest ok" badge means this client has checked the
-      artifact against the signed pin (the page-open manifest check
-      or the install), so it appears lazily and says "checked",
-      never "unchecked". In the Orchard channel view it hides:
-      every row there is digest-pinned by construction, and a badge
-      on the visited subset implies the rest are something less. In
-      All and Installed its presence is real information, so it
-      shows. The page's digest pin chip is unaffected.
+- [x] The row's digest badge is a shield now, quiet like the repo
+      check, with the words on hover ("Artifact matches the signed
+      digest") and the full chip on the page. It means this client has
+      checked the artifact against the signed pin, and it is earned by
+      viewport: a publisher row entering the list runs the same check
+      a page open does (the shared lazy-fetch pattern the row icons
+      use), so the list fills in as you scroll instead of only after
+      visits. Verdicts cache on disk keyed by location plus pin, since
+      a checked pin is a fact that cannot rot: after the first check,
+      restarts and re-renders are free. In the Orchard channel view
+      the badge hides and the rows run no checks: every row there is
+      digest-pinned by construction, so checking is registry contact
+      with nothing to show. In All and Installed the presence is real
+      information, so it shows. The page's digest pin chip is
+      unaffected.
 - [x] The publisher page: everything one key publishes, as a card
       grid. The key is the identity, not the display name; the header
       carries the avatar, the profile name (truncated npub fallback),
