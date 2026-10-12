@@ -1,5 +1,5 @@
 [Application]
-name=com.orchard.Orchard
+name=rocks.orchard.Orchard
 runtime=org.freedesktop.Platform/x86_64/25.08
 command=orchard
 

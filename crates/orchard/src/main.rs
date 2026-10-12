@@ -105,7 +105,7 @@ fn main() {
                         title: Some("Orchard".into()),
                         ..Default::default()
                     }),
-                    app_id: Some("com.orchard.Orchard".into()),
+                    app_id: Some("rocks.orchard.Orchard".into()),
                     ..Default::default()
                 },
                 |window, cx| {
