@@ -728,6 +728,18 @@ opening items because they need the push, the signing secret, and a tag.
       ("finishing the install of X first") instead of a lock error
       reading as our failure. Cards keep their static labels; the
       bar and the page are the whole story.
+- [x] The exit code is not the outcome. Flatpak can error after its
+      own work is done (observed live: an uninstall removed the
+      deployment, then its directory cleanup tripped over a husk
+      and exited 1 with "Uninstalling: directory not empty"), so a
+      failed job is not believed until a fresh installation list
+      agrees: a remove whose app is gone, or an update with nothing
+      left to update, reports "Removed" or "Updated" with a note
+      that flatpak left a cleanup warning, not a failure. The bar's
+      lines are transient: every error and note is stamped, and the
+      tick pump retracts both after a ten second hold, so the bar
+      returns to quiet on its own instead of holding the last
+      failure forever.
 
 ## Risks / open questions
 

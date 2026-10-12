@@ -27,6 +27,11 @@ pub const INDEXD_PORT: u16 = 7780;
 
 const FLATHUB_REMOTE: &str = "flathub";
 
+/// How long a status-bar line (error or note) lingers before the
+/// tick pump retracts it: readable, not permanent. The detail that
+/// matters is the outcome, which the bar also shows.
+const STATUS_HOLD: Duration = Duration::from_secs(10);
+
 /// Lifecycle of a per-app operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JobState {
@@ -194,6 +199,11 @@ pub struct StoreRoot {
     /// receipt, the one-operation-at-a-time refusal. Cleared by the
     /// next job or a page close.
     job_note: Option<String>,
+    /// When the current error line was raised: the tick pump
+    /// retracts it once the hold lapses.
+    error_at: Option<Instant>,
+    /// When the current note line was raised, same clock.
+    note_at: Option<Instant>,
     error: Option<String>,
     flathub_loading: bool,
     /// Remote images resolved through the disk cache: url -> path, or
@@ -391,6 +401,8 @@ impl StoreRoot {
             confirm_update: None,
             confirm_cancel: None,
             job_note: None,
+            error_at: None,
+            note_at: None,
             verified: HashMap::new(),
             continuity: load_continuity(),
             error: None,
@@ -465,13 +477,32 @@ impl StoreRoot {
         }
 
         // the job tick: the elapsed counter and the indeterminate
-        // sweep repaint only while an operation runs
+        // sweep repaint while an operation runs, and the status
+        // bar's lines are retracted once their hold lapses
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_millis(500)).await;
                 if this
                     .update(cx, |this, cx| {
-                        if !this.jobs.is_empty() {
+                        let now = Instant::now();
+                        let mut changed = false;
+                        if this
+                            .error_at
+                            .is_some_and(|at| now.duration_since(at) >= STATUS_HOLD)
+                        {
+                            this.error = None;
+                            this.error_at = None;
+                            changed = true;
+                        }
+                        if this
+                            .note_at
+                            .is_some_and(|at| now.duration_since(at) >= STATUS_HOLD)
+                        {
+                            this.job_note = None;
+                            this.note_at = None;
+                            changed = true;
+                        }
+                        if changed || !this.jobs.is_empty() {
                             cx.notify();
                         }
                     })
@@ -1990,7 +2021,7 @@ impl StoreRoot {
         let location = match oci::Location::parse(&location_text) {
             Ok(location) => location,
             Err(err) => {
-                self.error = Some(format!("bad artifact location: {err:#}"));
+                self.fail(format!("bad artifact location: {err:#}"));
                 return;
             }
         };
@@ -2025,7 +2056,7 @@ impl StoreRoot {
                             .is_some_and(|job| job.cancel_requested)
                         {
                             this.jobs.remove(&app.app_id);
-                            this.job_note = Some("Install cancelled.".to_string());
+                            this.note("Install cancelled.".to_string());
                             cx.notify();
                             return;
                         }
@@ -2067,8 +2098,10 @@ impl StoreRoot {
                     }
                     Err(err) => {
                         this.jobs.remove(&app.app_id);
-                        this.error =
-                            Some(format!("verification failed for {}: {err:#}", app.name));
+                        this.fail(format!(
+                            "verification failed for {}: {err:#}",
+                            app.name
+                        ));
                     }
                 }
                 cx.notify();
@@ -2120,12 +2153,27 @@ impl StoreRoot {
 
     fn open(&mut self, app_id: &str, cx: &mut Context<Self>) {
         if orchard_flatpak::run(app_id).spawn().is_err() {
-            self.error = Some(format!("failed to launch {app_id}"));
+            self.fail(format!("failed to launch {app_id}"));
             cx.notify();
         }
     }
 
     /// Run a flatpak command in the background, then refresh installed state.
+    /// The one choke point for the status bar's error line: every
+    /// message is stamped, and the tick pump retracts it when the
+    /// hold lapses. A quiet bar is the resting state.
+    fn fail(&mut self, msg: String) {
+        self.error = Some(msg);
+        self.error_at = Some(Instant::now());
+    }
+
+    /// The quiet sibling of [Self::fail]: receipts and refusals,
+    /// retracted on the same clock.
+    fn note(&mut self, msg: String) {
+        self.job_note = Some(msg);
+        self.note_at = Some(Instant::now());
+    }
+
     /// The one-operation-at-a-time rule: flatpak serializes the
     /// system installation behind a lock anyway, and a second racer
     /// reads as our failure. Leaves a quiet note naming the running
@@ -2141,7 +2189,7 @@ impl StoreRoot {
                 .find(|a| a.app_id == *id)
                 .map(|a| a.name.clone())
                 .unwrap_or_else(|| id.clone());
-            self.job_note = Some(format!(
+            self.note(format!(
                 "One operation at a time: finishing the {} of {name} first.",
                 job.state.noun()
             ));
@@ -2206,7 +2254,7 @@ impl StoreRoot {
                 Ok(ok) => ok,
                 Err(err) => {
                     let _ = this.update(cx, |this, cx| {
-                        this.error = Some(format!("{label}: {err}"));
+                        this.fail(format!("{label}: {err}"));
                         this.jobs.remove(&app_id);
                         this.refresh_installed(cx);
                         cx.notify();
@@ -2273,6 +2321,13 @@ impl StoreRoot {
                 .background_executor()
                 .spawn(async move { child.wait() })
                 .await;
+            // the outcome, not the exit code, is the truth: a fresh
+            // installation list is fetched before a failed job is
+            // believed
+            let installed = cx
+                .background_executor()
+                .spawn(async move { list_installed() })
+                .await;
             let _ = this.update(cx, |this, cx| {
                 let cancelled = this
                     .jobs
@@ -2282,18 +2337,53 @@ impl StoreRoot {
                 if cancelled {
                     // the receipt, not a failure: the interrupt was
                     // asked for
-                    this.job_note = Some(format!("{label} cancelled."));
+                    this.note(format!("{label} cancelled."));
                     this.error = None;
+                    this.error_at = None;
                 } else {
                     match status.map(|s| s.success()) {
-                        Ok(true) => this.error = None,
-                        Ok(false) => {
-                            this.error = Some(format!("{label} failed: {}", stderr_text.trim()))
+                        Ok(true) => {
+                            this.error = None;
+                            this.error_at = None;
                         }
-                        Err(err) => this.error = Some(format!("{label}: {err}")),
+                        Ok(false) => {
+                            // flatpak's cleanup can error after the
+                            // job's work is already done (observed:
+                            // "Uninstalling: directory not empty" on a
+                            // deployment already gone), so the fresh
+                            // list decides whether the job did its work
+                            let done = match label.as_str() {
+                                "Remove" => !installed.contains_key(&app_id),
+                                "Update" => this
+                                    .apps
+                                    .iter()
+                                    .find(|a| a.app_id == app_id)
+                                    .is_some_and(|app| {
+                                        installed
+                                            .get(&app_id)
+                                            .is_some_and(|info| {
+                                                !update_available(app, info)
+                                            })
+                                    }),
+                                _ => false,
+                            };
+                            if done {
+                                this.note(format!(
+                                    "{label}d, though flatpak reported a cleanup warning."
+                                ));
+                                this.error = None;
+                                this.error_at = None;
+                            } else {
+                                this.fail(format!(
+                                    "{label} failed: {}",
+                                    stderr_text.trim()
+                                ));
+                            }
+                        }
+                        Err(err) => this.fail(format!("{label}: {err}")),
                     }
                 }
-                this.refresh_installed(cx);
+                this.installed = installed;
                 cx.notify();
             });
         })
