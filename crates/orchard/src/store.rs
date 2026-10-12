@@ -2168,6 +2168,19 @@ impl StoreRoot {
             return;
         }
 
+        // p opens the open app's publisher page, like the "Published
+        // by" row: everything one key publishes. Falls through to the
+        // type-to-close rule when the page has no publisher key (a
+        // reviewed app), and yields to it when a collection page is
+        // already up.
+        if self.page_open && key == "p" && !ctrl && self.collection_view.is_none() {
+            if let Some(pubkey) = self.selected_publisher.clone().filter(|k| !k.is_empty()) {
+                self.open_collection(CollectionPage::Publisher(pubkey), cx);
+                cx.notify();
+                return;
+            }
+        }
+
         // ----- settings page: the relay draft is the text surface;
         // Escape backs out to the list -----
         if self.settings_open {
@@ -2905,9 +2918,53 @@ impl StoreRoot {
                                                         app.publisher.as_deref().unwrap_or(""),
                                                     )
                                                 });
-                                            format!("by {who} \u{b7} {}", app.summary)
+                                            // the name links to the
+                                            // publisher page straight
+                                            // from the list; the stop
+                                            // keeps the row's own open
+                                            // from firing, same rules
+                                            // as the row buttons
+                                            let key = app.publisher.clone().unwrap_or_default();
+                                            div()
+                                                .flex()
+                                                .gap_1()
+                                                .min_w_0()
+                                                .overflow_hidden()
+                                                .whitespace_nowrap()
+                                                .child(
+                                                    div()
+                                                        .id(SharedString::from(format!(
+                                                            "row-by-{action_id}-{key}"
+                                                        )))
+                                                        .cursor_pointer()
+                                                        .hover(|style| {
+                                                            style.text_color(ui::text())
+                                                        })
+                                                        .on_click(cx.listener(
+                                                            move |this, _e: &ClickEvent, _w, cx| {
+                                                                cx.stop_propagation();
+                                                                this.open_collection(
+                                                                    CollectionPage::Publisher(
+                                                                        key.clone(),
+                                                                    ),
+                                                                    cx,
+                                                                );
+                                                            },
+                                                        ))
+                                                        .child(format!("by {who}")),
+                                                )
+                                                .child("\u{b7}")
+                                                .child(
+                                                    div()
+                                                        .overflow_hidden()
+                                                        .whitespace_nowrap()
+                                                        .child(app.summary.clone()),
+                                                )
                                         }
-                                        Source::Reviewed => app.summary.clone(),
+                                        Source::Reviewed => div()
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .child(app.summary.clone()),
                                     }),
                             ),
                     )

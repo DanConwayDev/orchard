@@ -573,9 +573,14 @@ opening items because they need the push, the signing secret, and a tag.
       one-line summary, the honest date note ("updated" only once
       true), the repo check; the same arrived-only recency rank the
       lists use, no new ordering. Entry is the app page's "Published
-      by" row (click); the app page stays mounted underneath, so
-      Escape (or the back row) returns to it; typing exits to the
-      search list from either level, matching the page rule. A page
+      by" row (click), the `p` key on the app page (a reviewed app,
+      with no key, falls through to the type-to-close rule), or the
+      list row's "by <name>" label (the row's own open is stopped,
+      same rules as the row buttons); the app page stays mounted
+      underneath when opened from one, so Escape (or the back row)
+      returns to it, and from a list row the back row reads "All
+      apps"; typing exits to the search list from either level,
+      matching the page rule. A page
       is aggregation, not curation: a spam key's page shows its
       fifty cards, and the composition line stays the flood
       disclosure.
