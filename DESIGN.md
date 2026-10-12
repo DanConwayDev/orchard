@@ -622,7 +622,6 @@ opening items because they need the push, the signing secret, and a tag.
   composition line discloses but nothing prevents; intent is unreadable
   and only permissions are enforceable. Relay-side friction (item 7) is
   operator policy at the relays, parked until after dogfooding.
-- aarch64 day-one or later?
 
 **Resolved 2026-10-11:** event kinds reconciled with Zapstore's `zsp` reference
 implementation (NIP-82 draft: 32267/30063/3063, see "Nostr protocol"); license settled
