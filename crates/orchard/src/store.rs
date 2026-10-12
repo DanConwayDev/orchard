@@ -3133,7 +3133,27 @@ impl StoreRoot {
             None
         };
         let provenance = match app.source {
-            Source::Reviewed => div()
+            Source::Reviewed => {
+                // the developer claim is navigation, not identity: a
+                // name anyone can assert, so it clicks through to the
+                // developer page and carries no checks
+                let developer = app.developer.clone().map(|name| {
+                    let label = format!("Developed by {name}.");
+                    div()
+                        .id("developed-by")
+                        .flex()
+                        .gap_1()
+                        .items_center()
+                        .text_size(px(ui::TEXT_SIZE))
+                        .text_color(ui::text())
+                        .cursor_pointer()
+                        .hover(|style| style.text_color(ui::accent()))
+                        .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
+                            this.open_collection(CollectionPage::Developer(name.clone()), cx);
+                        }))
+                        .child(label)
+                });
+                div()
                 .flex()
                 .flex_wrap()
                 .items_center()
@@ -3145,7 +3165,9 @@ impl StoreRoot {
                         .text_color(ui::text())
                         .child("Moderator-reviewed listing; installs from your flathub remote."),
                 )
-                .into_any_element(),
+                .children(developer)
+                .into_any_element()
+            }
             Source::Publisher => div()
                 .flex()
                 .flex_wrap()
@@ -3200,28 +3222,6 @@ impl StoreRoot {
                         }))
                         .child(label)
                 }))
-                // the reviewed channel's developer claim: navigation,
-                // not identity, so the wording says "developed by" and
-                // only shows when no publisher key owns the row
-                .children(app.developer.as_ref().filter(|_| app.publisher.is_none()).map(
-                    |developer| {
-                        let name = developer.clone();
-                        let label = format!("Developed by {name}.");
-                        div()
-                            .id("developed-by")
-                            .flex()
-                            .gap_1()
-                            .items_center()
-                            .text_size(px(ui::TEXT_SIZE))
-                            .text_color(ui::text())
-                            .cursor_pointer()
-                            .hover(|style| style.text_color(ui::accent()))
-                            .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
-                                this.open_collection(CollectionPage::Developer(name.clone()), cx);
-                            }))
-                            .child(label)
-                    },
-                ))
                 // continuity: this app id was published by another key
                 // before this client ever saw this one; a signed
                 // handover from that key reads calmer than an

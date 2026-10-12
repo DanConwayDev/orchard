@@ -796,6 +796,9 @@ mod tests {
     <developer id="com.example.Full">
       <name>Example Team</name>
     </developer>
+    <!-- both shapes at once, as real catalogs ship: the newer
+         element first, the classic one after -->
+    <developer_name>Example Team</developer_name>
     <url type="homepage">https://example.com/full</url>
     <releases>
       <release version="1.2.3" date="2026-02-01"/>
