@@ -3469,11 +3469,14 @@ impl StoreRoot {
                             // the button, the second starts the job
                             let confirming = self.confirm_install.as_deref()
                                 == Some(action_id.as_str());
+                            // no version badge: the raw string is a
+                            // publisher-asserted free-text thing the
+                            // card cannot compare, and the page's
+                            // details line carries it on demand
                             div()
                                 .flex()
                                 .items_center()
                                 .gap_2()
-                                .children(app.version.as_deref().map(|v| badge(v, ui::text_dim())))
                                 .child(
                                     ui::small_button(
                                         format!(
