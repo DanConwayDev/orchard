@@ -237,7 +237,7 @@ pub struct StoreRoot {
     channel_menu: Option<gpui::Point<gpui::Pixels>>,
     /// The account dropdown is open, anchored at the click point.
     account_menu: Option<gpui::Point<gpui::Pixels>>,
-    about_menu: Option<gpui::Point<gpui::Pixels>>,
+    about_modal: bool,
     /// Compose mode: keystrokes go to the review draft, not the search
     /// box or the page's type-to-close. Entered by clicking the compose
     /// box or pressing r on a page; left by Escape or a successful post.
@@ -356,7 +356,7 @@ impl StoreRoot {
             signin_for_review: false,
             channel_menu: None,
             account_menu: None,
-            about_menu: None,
+            about_modal: false,
             composing: false,
             review_draft: (None, String::new()),
             review_cursor: 0,
@@ -1472,7 +1472,7 @@ impl StoreRoot {
     /// list and the detail page alike; Escape backs out.
     fn open_settings(&mut self, cx: &mut Context<Self>) {
         self.account_menu = None;
-        self.about_menu = None;
+        self.about_modal = false;
         self.channel_menu = None;
         self.sort_menu = None;
         self.collection_view = None;
@@ -2099,14 +2099,22 @@ impl StoreRoot {
         // Escape; a click away closes it through the overlay -----
         if self.channel_menu.is_some()
             || self.account_menu.is_some()
-            || self.about_menu.is_some()
             || self.sort_menu.is_some()
         {
             if key == "escape" {
                 self.channel_menu = None;
                 self.account_menu = None;
-                self.about_menu = None;
                 self.sort_menu = None;
+                cx.notify();
+            }
+            return;
+        }
+
+        // ----- modals: an open modal swallows everything but Escape;
+        // a click away closes it through the backdrop -----
+        if self.about_modal {
+            if key == "escape" {
+                self.about_modal = false;
                 cx.notify();
             }
             return;
@@ -2714,7 +2722,7 @@ impl StoreRoot {
                             let open = this.sort_menu.is_some();
                             this.channel_menu = None;
                             this.account_menu = None;
-                            this.about_menu = None;
+                            this.about_modal = false;
                             this.sort_menu = if open { None } else { Some(event.position) };
                             cx.stop_propagation();
                             cx.notify();
@@ -5255,12 +5263,11 @@ impl Render for StoreRoot {
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, event: &MouseDownEvent, _w, cx| {
-                                    let open = this.about_menu.is_some();
+                                    let open = this.about_modal;
                                     this.channel_menu = None;
                                     this.account_menu = None;
                                     this.sort_menu = None;
-                                    this.about_menu =
-                                        if open { None } else { Some(event.position) };
+                                    this.about_modal = !open;
                                     cx.stop_propagation();
                                     cx.notify();
                                 }),
@@ -5533,7 +5540,7 @@ impl StoreRoot {
     /// sign-in modal) showing?
     fn any_layer_open(&self) -> bool {
         self.channel_menu.is_some() || self.account_menu.is_some() || self.sort_menu.is_some()
-            || self.about_menu.is_some()
+            || self.about_modal
             || self.signin_modal
     }
 
@@ -5557,11 +5564,11 @@ impl StoreRoot {
         if self.account_menu.is_some() {
             layers = layers.child(self.render_account_menu(cx));
         }
-        if self.about_menu.is_some() {
-            layers = layers.child(self.render_about_menu(cx));
-        }
         if self.signin_modal {
             layers = layers.child(self.render_signin_modal(font, cx));
+        }
+        if self.about_modal {
+            layers = layers.child(self.render_about_modal(cx));
         }
         layers.into_any_element()
     }
@@ -5573,7 +5580,6 @@ impl StoreRoot {
     fn render_menu_overlays(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         if self.channel_menu.is_none()
             && self.account_menu.is_none()
-            && self.about_menu.is_none()
             && self.sort_menu.is_none()
         {
             return None;
@@ -5588,7 +5594,6 @@ impl StoreRoot {
                     cx.listener(|this, _e: &MouseDownEvent, _w, cx| {
                         this.channel_menu = None;
                         this.account_menu = None;
-                        this.about_menu = None;
                         this.sort_menu = None;
                         cx.notify();
                     }),
@@ -6325,6 +6330,22 @@ impl StoreRoot {
                     // the keyboard is the primary navigation here
                     .child(
                         div()
+                            .id("settings-back")
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .cursor_pointer()
+                            .text_size(px(ui::TEXT_SIZE))
+                            .text_color(ui::accent())
+                            .hover(|style| style.text_color(ui::text()))
+                            .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
+                                this.close_settings(cx);
+                            }))
+                            .child(ui::icon("icons/arrow_left.svg", 13., ui::accent()))
+                            .child("Back"),
+                    )
+                    .child(
+                        div()
                             .flex()
                             .items_center()
                             .justify_between()
@@ -6423,7 +6444,7 @@ impl StoreRoot {
                 cx.listener(|this, event: &MouseDownEvent, _w, cx| {
                     let open = this.channel_menu.is_some();
                     this.account_menu = None;
-                    this.about_menu = None;
+                    this.about_modal = false;
                     this.channel_menu = if open { None } else { Some(event.position) };
                     cx.stop_propagation();
                     cx.notify();
@@ -6434,69 +6455,88 @@ impl StoreRoot {
             .into_any_element()
     }
 
-    /// The About popover: the mark's click target. Version, license,
-    /// and the source link, the "what is this app" answer a logo
-    /// click is really asking for.
-    fn render_about_menu(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let anchor = self.about_menu.unwrap_or_default();
+    /// The About modal: the mark's click target, the convention the
+    /// desktop trains (Help, About). Mark, version, license, source;
+    /// the dimmed backdrop closes it, so does Escape.
+    fn render_about_modal(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         div()
             .absolute()
-            .left(anchor.x.max(px(8.)))
-            .top(anchor.y + px(6.))
-            .w(px(230.))
+            .inset_0()
             .flex()
-            .flex_col()
-            .gap_1()
-            .rounded_sm()
-            .border_1()
-            .border_color(ui::divider())
-            .bg(ui::panel())
-            .p_3()
-            .on_mouse_down(
-                MouseButton::Left,
-                |_e: &MouseDownEvent, _w, cx: &mut gpui::App| cx.stop_propagation(),
-            )
+            .items_center()
+            .justify_center()
+            // the dimmed click-away is a FIRST sibling, the same shape
+            // as the sign-in modal: the panel after it wins every
+            // click that lands on it, and swallows the mouse down so
+            // the backdrop's close never sees it
             .child(
                 div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .children(crate::cache::orchard_mark().map(|path| {
-                        gpui::img(path).w(px(26.)).h(px(26.))
-                    }))
-                    .child(
-                        div()
-                            .text_size(px(ui::TEXT_SIZE_EMPHASIS))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(ui::text())
-                            .child("Orchard"),
+                    .id("about-modal-backdrop")
+                    .absolute()
+                    .inset_0()
+                    .bg(gpui::rgba(0x000000B3))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _e: &MouseDownEvent, _w, cx| {
+                            this.about_modal = false;
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
                     ),
             )
             .child(
-                div()
-                    .text_size(px(ui::TEXT_SIZE))
-                    .text_color(ui::text_dim())
-                    .child(format!("Version {}", env!("CARGO_PKG_VERSION"))),
-            )
-            .child(
-                div()
-                    .text_size(px(ui::TEXT_SIZE))
-                    .text_color(ui::text_dim())
-                    .child("MIT license"),
-            )
-            .child(
-                div()
-                    .id("about-repo")
-                    .mt_1()
-                    .cursor_pointer()
-                    .text_size(px(ui::TEXT_SIZE))
-                    .text_color(ui::accent())
-                    .hover(|style| style.underline())
-                    .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
-                        this.about_menu = None;
-                        cx.open_url("https://github.com/Letdown2491/orchard");
-                    }))
-                    .child("Source repository"),
+                div().on_mouse_down(
+                    MouseButton::Left,
+                    |_e: &MouseDownEvent, _w, cx: &mut gpui::App| cx.stop_propagation(),
+                ).child(
+                    div()
+                        .w(px(260.))
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap_2()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(ui::divider())
+                        .bg(ui::panel())
+                        .p_4()
+                        .children(crate::cache::orchard_mark().map(|path| {
+                            gpui::img(path).w(px(40.)).h(px(40.))
+                        }))
+                        .child(
+                            div()
+                                .text_size(px(ui::TEXT_SIZE_EMPHASIS))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(ui::text())
+                                .child("Orchard"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(ui::TEXT_SIZE))
+                                .text_color(ui::text_dim())
+                                .child(format!("Version {}", env!("CARGO_PKG_VERSION"))),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(ui::TEXT_SIZE))
+                                .text_color(ui::text_dim())
+                                .child("MIT license"),
+                        )
+                        .child(
+                            div()
+                                .id("about-repo")
+                                .mt_1()
+                                .cursor_pointer()
+                                .text_size(px(ui::TEXT_SIZE))
+                                .text_color(ui::accent())
+                                .hover(|style| style.underline())
+                                .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
+                                    this.about_modal = false;
+                                    cx.open_url("https://github.com/Letdown2491/orchard");
+                                }))
+                                .child("Source repository"),
+                        ),
+                ),
             )
             .into_any_element()
     }
@@ -6535,7 +6575,7 @@ impl StoreRoot {
                         cx.listener(|this, event: &MouseDownEvent, _w, cx| {
                             let open = this.account_menu.is_some();
                             this.channel_menu = None;
-                            this.about_menu = None;
+                            this.about_modal = false;
                             this.account_menu = if open {
                                 None
                             } else {
