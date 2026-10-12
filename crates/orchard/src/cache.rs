@@ -33,6 +33,31 @@ fn fnv1a(text: &str) -> u64 {
 /// store's worth of icons and screenshots is a few tens of MB.
 const IMAGE_CACHE_CAP: u64 = 256 * 1024 * 1024;
 
+/// The Orchard mark: the real raster from the repo's assets, written
+/// into the image directory on first use so the toolbar and the About
+/// popover can render it with the ordinary `img()` path. The crate's
+/// SVG is a placeholder; the rasters are the identity.
+const ORCHARD_MARK_PNG: &[u8] = include_bytes!("../../../assets/orchard-128.png");
+
+/// The mark's disk path, resolving (writing) it at most once per
+/// process. `None` when even the cache directory is unwritable; the
+/// callers fall back to nothing rather than block a render.
+pub fn orchard_mark() -> Option<PathBuf> {
+    static MARK: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    MARK.get_or_init(|| {
+        let dir = root();
+        std::fs::create_dir_all(&dir).ok()?;
+        let path = dir.join("orchard-mark.png");
+        if !path.exists() {
+            let tmp = dir.join(format!("orchard-mark.{}.part", std::process::id()));
+            std::fs::write(&tmp, ORCHARD_MARK_PNG).ok()?;
+            std::fs::rename(&tmp, &path).ok()?;
+        }
+        Some(path)
+    })
+    .clone()
+}
+
 /// Resolve `url` to a local file, downloading through the cache on
 /// first use. Blocking; call from a background executor. `None` on
 /// network failure (the caller keeps its placeholder).
@@ -77,6 +102,11 @@ fn enforce_cap(dir: &Path) {
             continue;
         };
         if !meta.is_file() {
+            continue;
+        }
+        // the Orchard mark is identity, not cache: exempt from the cap
+        // so a full cache never blanks the toolbar
+        if file.file_name().to_string_lossy() == "orchard-mark.png" {
             continue;
         }
         total += meta.len();

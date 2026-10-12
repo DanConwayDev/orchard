@@ -5265,7 +5265,9 @@ impl Render for StoreRoot {
                                     cx.notify();
                                 }),
                             )
-                            .child(ui::icon("icons/orchard.svg", 22., ui::accent())),
+                            .children(crate::cache::orchard_mark().map(|path| {
+                                gpui::img(path).w(px(22.)).h(px(22.))
+                            })),
                     )
                     // the search, centered on the window width: an
                     // absolute layer spanning the bar, content centered
@@ -6459,7 +6461,9 @@ impl StoreRoot {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(ui::icon("icons/orchard.svg", 26., ui::accent()))
+                    .children(crate::cache::orchard_mark().map(|path| {
+                        gpui::img(path).w(px(26.)).h(px(26.))
+                    }))
                     .child(
                         div()
                             .text_size(px(ui::TEXT_SIZE_EMPHASIS))
