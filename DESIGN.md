@@ -429,6 +429,17 @@ opening items because they need the push, the signing secret, and a tag.
       verifies once the repo is public, since the raw URL of a private repo does
       not resolve. The workflow holds `contents: write` so CI's `--prove` can
       refresh the proof file.)
+- [x] The bootstrap story is a flatpak one-liner, pinned by digest:
+      every Orchard user has flatpak as a runtime prerequisite anyway, and
+      the self-publish artifact is already a flatpak OCI image, so
+      `flatpak install --system -y docker://<ghcr>@sha256:<pin>` is the
+      whole install: the same command the client runs, with the digest
+      from the release notes or the signed listing, one pin per arch. A
+      deb is the later, non-technical path (step zero only; updates come
+      through the catalog); a GitHub tarball is the optional fallback for
+      flatpak-ancient hosts. Flip-day test: the exact command on a
+      machine that never ran Orchard, and the update handoff when
+      Orchard's own installer re-installs the ref the one-liner deployed.
 - [x] Avatars: kind 0 `picture` in the account trigger and review rows via the
       image cache; person glyph as fallback. (Built: profiles fetched and parsed
       once per refresh; avatars are round `img` crops, the glyph stands in until

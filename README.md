@@ -43,6 +43,21 @@ lands with the `v0.1.0` tag (tag and push it; CI does the rest, then
 flip the ghcr package public). `DESIGN.md` is the architecture record
 with the milestone history.
 
+## Install
+
+Once the `v0.1.0` release exists, the whole app is one flatpak command
+away, pinned to the exact bytes the release signed:
+
+    flatpak install --system -y \
+      docker://ghcr.io/letdown2491/orchard@sha256:<digest from the release notes>
+
+The digest is per-arch (x86_64 and aarch64 are separate pins); take the
+line for your arch from the release notes, or from the signed listing
+event on the rendezvous relays. It is the same command the Orchard
+client itself runs for every install, and flatpak is the one
+prerequisite Orchard has anyway. Updates after that first install come
+through Orchard's own catalog, not the command line.
+
 ## Try it (Fedora atomic host, x86_64)
 
 The host has no toolchain; everything builds in a container via
