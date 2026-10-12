@@ -9,7 +9,7 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::{
     div, prelude::*, px, uniform_list, AnyElement, AnimationExt, ClickEvent, ClipboardItem,
@@ -43,6 +43,71 @@ impl JobState {
             JobState::Installing => "Installing…",
             JobState::Updating => "Updating…",
             JobState::Removing => "Removing…",
+        }
+    }
+
+    /// The noun for the quiet notes: what the running job is called
+    /// when something else presses its button.
+    fn noun(&self) -> &'static str {
+        match self {
+            JobState::Verifying | JobState::Installing => "install",
+            JobState::Updating => "update",
+            JobState::Removing => "removal",
+        }
+    }
+}
+
+/// A live line from the runner: the stage the flatpak child reports
+/// and the percent it announced, if any.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct JobProgress {
+    stage: String,
+    percent: Option<u32>,
+}
+
+/// One running operation: the phase behind the static labels, the
+/// moment it began (the elapsed counter), the live progress from the
+/// child's stdout, and the child pid a cancel press interrupts.
+#[derive(Debug, Clone)]
+struct Job {
+    state: JobState,
+    started: std::time::Instant,
+    progress: Option<JobProgress>,
+    cancel_pid: Option<u32>,
+    cancel_requested: bool,
+}
+
+impl Job {
+    fn new(state: JobState) -> Self {
+        Job {
+            state,
+            started: Instant::now(),
+            progress: None,
+            cancel_pid: None,
+            cancel_requested: false,
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        self.state.label()
+    }
+
+    /// The status bar's running line, right-aligned: the most
+    /// specific truth available, the static phase only until the
+    /// child says something finer.
+    fn status_text(&self) -> String {
+        let elapsed = elapsed_text(self.started.elapsed());
+        match &self.progress {
+            Some(p) => match p.percent {
+                Some(n) => format!("{} · {n}% · {elapsed}", p.stage),
+                None => format!("{} · {elapsed}", p.stage),
+            },
+            None => match self.state {
+                JobState::Verifying => format!("Verifying digest · {elapsed}"),
+                JobState::Installing => format!("Installing · {elapsed}"),
+                JobState::Updating => format!("Updating · {elapsed}"),
+                JobState::Removing => format!("Removing · {elapsed}"),
+            },
         }
     }
 }
@@ -109,7 +174,7 @@ pub struct StoreRoot {
     /// and only the clicked twin is the page's subject. Keyboard
     /// selection carries None (the first twin).
     selected_publisher: Option<String>,
-    jobs: HashMap<String, JobState>,
+    jobs: HashMap<String, Job>,
     /// The app awaiting an install confirmation: its button reads
     /// "Sure?" until the second press starts the job, or Escape, page
     /// close, or another install dismisses it.
@@ -122,6 +187,13 @@ pub struct StoreRoot {
     /// The app awaiting an update confirmation, the third arm of the
     /// same idiom: starting any action disarms all of them.
     confirm_update: Option<String>,
+    /// The running job's armed cancel: its pill reads "Cancel?" until
+    /// the second press cancels, or Escape or a page close disarms.
+    confirm_cancel: Option<String>,
+    /// A quiet status-bar note that is not an error: the cancel
+    /// receipt, the one-operation-at-a-time refusal. Cleared by the
+    /// next job or a page close.
+    job_note: Option<String>,
     error: Option<String>,
     flathub_loading: bool,
     /// Remote images resolved through the disk cache: url -> path, or
@@ -317,6 +389,8 @@ impl StoreRoot {
             confirm_install: None,
             confirm_remove: None,
             confirm_update: None,
+            confirm_cancel: None,
+            job_note: None,
             verified: HashMap::new(),
             continuity: load_continuity(),
             error: None,
@@ -389,6 +463,25 @@ impl StoreRoot {
         if this.reviewer.is_some() {
             this.resolve_reviewer_name(cx);
         }
+
+        // the job tick: the elapsed counter and the indeterminate
+        // sweep repaint only while an operation runs
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_millis(500)).await;
+                if this
+                    .update(cx, |this, cx| {
+                        if !this.jobs.is_empty() {
+                            cx.notify();
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
 
         // Orchard channel: read the catalog over HTTP from the in-process
         // indexd (the client is the remote), fall back to the file. Blocking
@@ -1468,6 +1561,8 @@ impl StoreRoot {
         self.confirm_install = None;
         self.confirm_remove = None;
         self.confirm_update = None;
+        self.confirm_cancel = None;
+        self.job_note = None;
         self.close_signin();
         cx.notify();
     }
@@ -1817,6 +1912,7 @@ impl StoreRoot {
         self.confirm_install = None;
         self.confirm_remove = None;
         self.confirm_update = None;
+        self.confirm_cancel = None;
         // the selection's publisher names the twin: two publishers of
         // one app id install from different artifacts
         let Some(app) = self
@@ -1830,15 +1926,15 @@ impl StoreRoot {
         else {
             return;
         };
-        if self.jobs.contains_key(app_id) {
+        if self.jobs.contains_key(app_id) || self.refuse_if_busy() {
             return;
         }
         match app.source {
             Source::Reviewed => {
                 let cmd = orchard_flatpak::install_ref(&app.app_id, FLATHUB_REMOTE);
                 self.jobs
-                    .insert(app.app_id.clone(), JobState::Installing);
-                self.run_command(cmd, &app.app_id, "Install", cx);
+                    .insert(app.app_id.clone(), Job::new(JobState::Installing));
+                self.run_job(cmd, &app.app_id, "Install", "flathub", cx);
             }
             Source::Publisher => {
                 self.verify_then_install(app, cx);
@@ -1856,7 +1952,8 @@ impl StoreRoot {
         self.confirm_install = None;
         self.confirm_remove = None;
         self.confirm_update = None;
-        if self.jobs.contains_key(app_id) {
+        self.confirm_cancel = None;
+        if self.jobs.contains_key(app_id) || self.refuse_if_busy() {
             return;
         }
         // the row names the twin: two publishers of one app id update
@@ -1874,9 +1971,9 @@ impl StoreRoot {
         };
         match app.source {
             Source::Reviewed => {
-                self.jobs.insert(app.app_id.clone(), JobState::Updating);
+                self.jobs.insert(app.app_id.clone(), Job::new(JobState::Updating));
                 let cmd = orchard_flatpak::update_ref(&app.app_id);
-                self.run_command(cmd, &app.app_id, "Update", cx);
+                self.run_job(cmd, &app.app_id, "Update", "flathub", cx);
             }
             Source::Publisher => self.verify_then_install(app, cx),
         }
@@ -1898,8 +1995,9 @@ impl StoreRoot {
             }
         };
         let install_arg = location.install_arg();
+        let place = place_from_location(&location_text);
         self.jobs
-            .insert(app.app_id.clone(), JobState::Verifying);
+            .insert(app.app_id.clone(), Job::new(JobState::Verifying));
         cx.notify();
 
         cx.spawn(async move |this, cx| {
@@ -1919,6 +2017,18 @@ impl StoreRoot {
             let _ = this.update(cx, |this, cx| {
                 match verified {
                     Ok((flatpak_ref, digest, metadata)) => {
+                        // a cancel pressed during the verify: the
+                        // receipt, no install
+                        if this
+                            .jobs
+                            .get(&app.app_id)
+                            .is_some_and(|job| job.cancel_requested)
+                        {
+                            this.jobs.remove(&app.app_id);
+                            this.job_note = Some("Install cancelled.".to_string());
+                            cx.notify();
+                            return;
+                        }
                         this.verified
                             .insert(app_key(&app.app_id, app.publisher.as_deref()), digest.clone());
                         // Prefer the image's own metadata for the viewer.
@@ -1929,15 +2039,31 @@ impl StoreRoot {
                         // claim; flatpak enforces this again at pull time.
                         let _ = flatpak_ref;
                         let cmd = orchard_flatpak::install_image(&install_arg);
-                        this.jobs
-                            .insert(app.app_id.clone(), JobState::Installing);
+                        // the install phase continues the same job: the
+                        // elapsed clock and a cancel pressed mid-verify
+                        // carry over
+                        let next = this
+                            .jobs
+                            .get(&app.app_id)
+                            .cloned()
+                            .unwrap_or_else(|| Job::new(JobState::Installing));
+                        this.jobs.insert(
+                            app.app_id.clone(),
+                            Job {
+                                state: JobState::Installing,
+                                started: next.started,
+                                progress: None,
+                                cancel_pid: None,
+                                cancel_requested: next.cancel_requested,
+                            },
+                        );
                         // the deployment's key baseline: updates are
                         // compared against this from now on
                         this.record_installed_from(
                             &app.app_id,
                             app.publisher.as_deref(),
                         );
-                        this.run_command_detached(cmd, &app.app_id, cx);
+                        this.run_job(cmd, &app.app_id, "Install", &place, cx);
                     }
                     Err(err) => {
                         this.jobs.remove(&app.app_id);
@@ -1981,14 +2107,15 @@ impl StoreRoot {
         self.confirm_install = None;
         self.confirm_remove = None;
         self.confirm_update = None;
-        if self.jobs.contains_key(app_id) {
+        self.confirm_cancel = None;
+        if self.jobs.contains_key(app_id) || self.refuse_if_busy() {
             return;
         }
         self.record_installed_from(app_id, None);
         let cmd = orchard_flatpak::uninstall(app_id);
         self.jobs
-            .insert(app_id.to_string(), JobState::Removing);
-        self.run_command(cmd, app_id, "Remove", cx);
+            .insert(app_id.to_string(), Job::new(JobState::Removing));
+        self.run_job(cmd, app_id, "Remove", "", cx);
     }
 
     fn open(&mut self, app_id: &str, cx: &mut Context<Self>) {
@@ -1999,79 +2126,173 @@ impl StoreRoot {
     }
 
     /// Run a flatpak command in the background, then refresh installed state.
-    fn run_command(
-        &mut self,
-        cmd: std::process::Command,
-        app_id: &str,
-        label: &'static str,
-        cx: &mut Context<Self>,
-    ) {
-        let app_id = app_id.to_string();
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    let mut cmd = cmd;
-                    cmd.output().map(|output| {
-                        (
-                            output.status.success(),
-                            String::from_utf8_lossy(&output.stderr).trim().to_string(),
-                        )
-                    })
-                })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                match result {
-                    Ok((true, _)) => {
-                        this.error = None;
-                    }
-                    Ok((false, stderr)) => {
-                        this.error =
-                            Some(format!("{label} failed: {stderr}"));
-                    }
-                    Err(err) => {
-                        this.error = Some(format!("{label}: {err}"));
-                    }
-                }
-                this.jobs.remove(&app_id);
-                this.refresh_installed(cx);
-                cx.notify();
-            });
-        })
-        .detach();
+    /// The one-operation-at-a-time rule: flatpak serializes the
+    /// system installation behind a lock anyway, and a second racer
+    /// reads as our failure. Leaves a quiet note naming the running
+    /// job instead. True when the press was refused.
+    fn refuse_if_busy(&mut self) -> bool {
+        if self.jobs.is_empty() {
+            return false;
+        }
+        if let Some((id, job)) = self.jobs.iter().next() {
+            let name = self
+                .apps
+                .iter()
+                .find(|a| a.app_id == *id)
+                .map(|a| a.name.clone())
+                .unwrap_or_else(|| id.clone());
+            self.job_note = Some(format!(
+                "One operation at a time: finishing the {} of {name} first.",
+                job.state.noun()
+            ));
+        }
+        true
     }
 
-    /// Like [run_command] but for commands spawned from inside another async
-    /// update (verification chain).
-    fn run_command_detached(
+    /// The second press of "Cancel?": flag the job and interrupt the
+    /// child the way a terminal's Ctrl-C would (SIGINT, so flatpak
+    /// unwinds its own transaction). The runner's reap turns the
+    /// flag into the quiet receipt; mid-verify, the flag alone
+    /// suffices, the verify task checks it before installing.
+    fn cancel_job(&mut self, app_id: &str, cx: &mut Context<Self>) {
+        self.confirm_cancel = None;
+        let Some(job) = self.jobs.get_mut(app_id) else {
+            return;
+        };
+        job.cancel_requested = true;
+        if let Some(pid) = job.cancel_pid {
+            // the terminal's own grammar: Ctrl-C is SIGINT, and
+            // flatpak unwinds its transaction on it
+            unsafe { libc::kill(pid as i32, libc::SIGINT) };
+        }
+        cx.notify();
+    }
+
+    /// Run a flatpak child with live progress. The probe's finding
+    /// drives the shape: flatpak prints its percent lines to stdout
+    /// when piped and its errors to stderr, so the runner streams
+    /// both, parses the stdout lines into the job's progress, and
+    /// keeps the child pid where a cancel press can find it. The
+    /// pipes close when the child exits, so reaping after both
+    /// readers reach EOF is order-safe.
+    fn run_job(
         &mut self,
-        cmd: std::process::Command,
+        mut cmd: std::process::Command,
         app_id: &str,
+        label: &'static str,
+        place: &str,
         cx: &mut Context<Self>,
     ) {
         let app_id = app_id.to_string();
+        let label = label.to_string();
+        let place = place.to_string();
+        self.job_note = None;
         cx.spawn(async move |this, cx| {
-            let result = cx
+            use std::io::{BufRead, Read};
+            use std::process::Stdio;
+            let prepared = cx
                 .background_executor()
                 .spawn(async move {
-                    let mut cmd = cmd;
-                    cmd.output().map(|output| {
-                        (
-                            output.status.success(),
-                            String::from_utf8_lossy(&output.stderr).trim().to_string(),
-                        )
+                    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+                    cmd.spawn().map(|mut child| {
+                        let pid = child.id();
+                        let stdout = child.stdout.take();
+                        let stderr = child.stderr.take();
+                        (child, pid, stdout, stderr)
                     })
                 })
                 .await;
-            let _ = this.update(cx, |this, cx| {
-                match result {
-                    Ok((true, _)) => this.error = None,
-                    Ok((false, stderr)) => {
-                        this.error = Some(format!("Install failed: {stderr}"))
-                    }
-                    Err(err) => this.error = Some(format!("Install: {err}")),
+            let (mut child, pid, stdout, stderr) = match prepared {
+                Ok(ok) => ok,
+                Err(err) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.error = Some(format!("{label}: {err}"));
+                        this.jobs.remove(&app_id);
+                        this.refresh_installed(cx);
+                        cx.notify();
+                    });
+                    return;
                 }
+            };
+            let _ = this.update(cx, |this, _| {
+                if let Some(job) = this.jobs.get_mut(&app_id) {
+                    job.cancel_pid = Some(pid);
+                }
+            });
+
+            // two plain reader threads into one channel: stdout lines
+            // (the progress), one final stderr text (the failure)
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Result<String, String>>();
+            let out_tx = tx.clone();
+            std::thread::spawn(move || {
+                if let Some(mut out) = stdout {
+                    let mut reader = std::io::BufReader::new(&mut out);
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        match reader.read_line(&mut line) {
+                            Ok(0) | Err(_) => break,
+                            Ok(_) => {
+                                if out_tx
+                                    .send(Ok(line.trim_end().to_string()))
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+            std::thread::spawn(move || {
+                let mut text = String::new();
+                if let Some(mut err) = stderr {
+                    let _ = err.read_to_string(&mut text);
+                }
+                let _ = tx.send(Err(text));
+            });
+
+            let mut stderr_text = String::new();
+            while let Some(event) = rx.recv().await {
+                match event {
+                    Ok(line) => {
+                        if let Some((stage_label, percent)) = parse_progress_line(&line) {
+                            let stage = stage_text(&stage_label, &place);
+                            let _ = this.update(cx, |this, cx| {
+                                if let Some(job) = this.jobs.get_mut(&app_id) {
+                                    job.progress = Some(JobProgress { stage, percent });
+                                    cx.notify();
+                                }
+                            });
+                        }
+                    }
+                    Err(text) => stderr_text = text,
+                }
+            }
+            let status = cx
+                .background_executor()
+                .spawn(async move { child.wait() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let cancelled = this
+                    .jobs
+                    .get(&app_id)
+                    .is_some_and(|job| job.cancel_requested);
                 this.jobs.remove(&app_id);
+                if cancelled {
+                    // the receipt, not a failure: the interrupt was
+                    // asked for
+                    this.job_note = Some(format!("{label} cancelled."));
+                    this.error = None;
+                } else {
+                    match status.map(|s| s.success()) {
+                        Ok(true) => this.error = None,
+                        Ok(false) => {
+                            this.error = Some(format!("{label} failed: {}", stderr_text.trim()))
+                        }
+                        Err(err) => this.error = Some(format!("{label}: {err}")),
+                    }
+                }
                 this.refresh_installed(cx);
                 cx.notify();
             });
@@ -2337,6 +2558,7 @@ impl StoreRoot {
                 self.confirm_install = None;
                 self.confirm_remove = None;
                 self.confirm_update = None;
+                self.confirm_cancel = None;
                 if self.lightbox.is_some() {
                     self.lightbox = None;
                 } else if self.collection_view.is_some() {
@@ -3711,11 +3933,33 @@ impl StoreRoot {
                             .child(text)
                     }))
                     .children(match job {
-                        Some(state) => vec![badge(
-                            state.label(),
-                            ui::risk_color(Risk::Medium),
-                        )
-                        .into_any_element()],
+                        Some(state) => {
+                            // the running pill is the cancel surface:
+                            // first press arms "Cancel?", the second
+                            // interrupts; the bar inside stays honest
+                            // either way
+                            let confirming =
+                                self.confirm_cancel.as_deref() == Some(page_key.as_str());
+                            let sweep = (state.started.elapsed().as_millis() % 2400) as f32
+                                / 2400.;
+                            let cancel_key = page_key.clone();
+                            vec![ui::job_pill(
+                                format!("job-pill-{page_key}"),
+                                if confirming { "Cancel?" } else { state.label() },
+                                state.progress.as_ref().and_then(|p| p.percent),
+                                sweep,
+                                confirming,
+                            )
+                            .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
+                                if confirming {
+                                    this.cancel_job(cancel_key.as_str(), cx);
+                                } else {
+                                    this.confirm_cancel = Some(cancel_key.clone());
+                                    cx.notify();
+                                }
+                            }))
+                            .into_any_element()]
+                        }
                         None => {
                             let mut buttons: Vec<gpui::AnyElement> = Vec::new();
                             if installed {
@@ -3836,6 +4080,72 @@ fn risk_label(risk: Risk) -> &'static str {
         Risk::Low => "low",
         Risk::Medium => "medium",
         Risk::High => "high",
+    }
+}
+
+/// Flatpak's piped progress line, from the probe: a bare state line
+/// ("Installing…"), then updates shaped "Installing… ▊▌   8%" (label,
+/// ellipsis, a block-character bar, the percent; roughly one line a
+/// second over a real download), finally "Installation complete.".
+/// Everything else on stdout (the permission echo, the summary
+/// table) parses to None. Returns the label without the ellipsis and
+/// the announced percent.
+fn parse_progress_line(line: &str) -> Option<(String, Option<u32>)> {
+    let line = line.trim();
+    let (label, rest) = line.split_once('…')?;
+    // only flatpak's status lines: a short label, never a sentence
+    // or a field with a colon
+    let label = label.trim();
+    if label.is_empty() || label.len() > 40 || label.contains(':') || label.contains('.') {
+        return None;
+    }
+    let percent = rest
+        .trim()
+        .rsplit([' ', '\t'])
+        .next()
+        .and_then(|tok| tok.strip_suffix('%'))
+        .and_then(|num| num.parse::<u32>().ok());
+    Some((label.to_string(), percent))
+}
+
+/// The status bar's wording for a flatpak state label: the long pull
+/// is "Pulling from <place>", the deploy is "Deploying", anything
+/// unknown passes through as flatpak said it.
+fn stage_text(label: &str, place: &str) -> String {
+    if label.starts_with("Downloading") {
+        if place.is_empty() {
+            "Pulling".to_string()
+        } else {
+            format!("Pulling from {place}")
+        }
+    } else if label.starts_with("Installing") || label.starts_with("Deploying") {
+        "Deploying".to_string()
+    } else {
+        label.to_string()
+    }
+}
+
+/// The "from" host for the status line: the registry in an artifact
+/// location ("docker://ghcr.io/…"), or empty for a local layout.
+fn place_from_location(location: &str) -> String {
+    let rest = location.splitn(2, "//").nth(1).unwrap_or("");
+    // the location may carry an explicit scheme in the middle
+    // ("docker://http://…"): the host follows that "//"
+    let rest = rest
+        .strip_prefix("http://")
+        .or_else(|| rest.strip_prefix("https://"))
+        .unwrap_or(rest);
+    rest.split(['/', '@']).next().unwrap_or("").to_string()
+}
+
+/// "12s" then "1m07s": the universal fallback truth when the child
+/// announces no percent.
+fn elapsed_text(d: Duration) -> String {
+    let s = d.as_secs();
+    if s < 60 {
+        format!("{s}s")
+    } else {
+        format!("{}m{:02}s", s / 60, s % 60)
     }
 }
 
@@ -5619,6 +5929,22 @@ impl Render for StoreRoot {
                         false => format!("{total} apps · {installed_count} installed"),
                     })
                     .child(div().flex_1())
+                    // the running job, right-aligned: stage, percent,
+                    // elapsed; logistics only, never a judgment
+                    .children(self.jobs.values().next().map(|job| {
+                        div()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .child(job.status_text())
+                    }))
+                    // quiet non-error receipts: the cancel, the
+                    // one-at-a-time refusal
+                    .children(self.job_note.clone().map(|note| {
+                        div()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .child(note)
+                    }))
                     .children(self.error.clone().map(|error| {
                         div()
                             .text_color(ui::urgent())
@@ -8139,5 +8465,95 @@ mod tests {
         assert_eq!(aggregate.counted, 2);
         // signed out there are no follows, so no two hops at all
         assert!(circle2_set(&Default::default(), &graph, None).is_empty());
+    }
+
+    // ----- job progress -----
+
+    #[test]
+    fn parse_reads_flatpak_state_and_percent_lines() {
+        // bare state line: no percent yet
+        assert_eq!(
+            parse_progress_line("Installing…"),
+            Some(("Installing".to_string(), None))
+        );
+        // the probe's shape: label, ellipsis, block bar, percent
+        assert_eq!(
+            parse_progress_line("Installing… ▊▌                     8%"),
+            Some(("Installing".to_string(), Some(8)))
+        );
+        assert_eq!(
+            parse_progress_line("Downloading metadata… 45%"),
+            Some(("Downloading metadata".to_string(), Some(45)))
+        );
+        // everything else on stdout parses to nothing
+        assert_eq!(parse_progress_line("Installation complete."), None);
+        assert_eq!(
+            parse_progress_line("com.orchard.Hello permissions:"),
+            None
+        );
+        assert_eq!(
+            parse_progress_line(" 1.\tcom.orchard.Hello\tstable\ti\thello-origin\t0 bytes"),
+            None
+        );
+        assert_eq!(parse_progress_line(""), None);
+    }
+
+    #[test]
+    fn stage_wording_maps_known_labels_and_keeps_unknown() {
+        assert_eq!(stage_text("Downloading", "ghcr.io"), "Pulling from ghcr.io");
+        assert_eq!(stage_text("Downloading metadata", "flathub"), "Pulling from flathub");
+        assert_eq!(stage_text("Downloading", ""), "Pulling");
+        assert_eq!(stage_text("Installing", "ghcr.io"), "Deploying");
+        assert_eq!(stage_text("Deploying", "flathub"), "Deploying");
+        assert_eq!(stage_text("Importing", ""), "Importing");
+    }
+
+    #[test]
+    fn place_extracts_the_registry_host() {
+        assert_eq!(
+            place_from_location("docker://ghcr.io/letdown2491/orchard@sha256:abc"),
+            "ghcr.io"
+        );
+        assert_eq!(
+            place_from_location("docker://http://localhost:5000/hello"),
+            "localhost:5000"
+        );
+        assert_eq!(place_from_location("oci:/some/dir"), "");
+    }
+
+    #[test]
+    fn elapsed_reads_like_a_clock() {
+        assert_eq!(elapsed_text(Duration::from_secs(12)), "12s");
+        assert_eq!(elapsed_text(Duration::from_secs(59)), "59s");
+        assert_eq!(elapsed_text(Duration::from_secs(60)), "1m00s");
+        assert_eq!(elapsed_text(Duration::from_secs(754)), "12m34s");
+    }
+
+    #[test]
+    fn status_text_prefers_the_finer_truth() {
+        let mut job = Job::new(JobState::Installing);
+        // no child word yet: the phase and the clock
+        assert!(job.status_text().starts_with("Installing · "));
+        // the child's stage replaces it, percent when announced
+        job.progress = Some(JobProgress {
+            stage: "Pulling from ghcr.io".to_string(),
+            percent: Some(34),
+        });
+        let text = job.status_text();
+        assert!(text.starts_with("Pulling from ghcr.io · 34% · "));
+        // no percent announced: the stage and the clock only
+        job.progress = Some(JobProgress {
+            stage: "Deploying".to_string(),
+            percent: None,
+        });
+        assert!(job.status_text().starts_with("Deploying · "));
+    }
+
+    #[test]
+    fn job_nouns_name_the_running_thing() {
+        assert_eq!(Job::new(JobState::Installing).state.noun(), "install");
+        assert_eq!(Job::new(JobState::Updating).state.noun(), "update");
+        assert_eq!(Job::new(JobState::Removing).state.noun(), "removal");
+        assert_eq!(Job::new(JobState::Verifying).state.noun(), "install");
     }
 }

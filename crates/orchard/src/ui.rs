@@ -8,7 +8,7 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use gpui::{div, prelude::*, px, rgb, rgba, Div, ObjectFit, Rgba, SharedString};
+use gpui::{div, prelude::*, px, relative, rgb, rgba, Div, ObjectFit, Rgba, SharedString};
 
 use orchard_core::Risk;
 
@@ -294,6 +294,56 @@ pub fn badge(text: &str, fg: Rgba) -> Div {
         .text_color(fg)
         .bg(tint(fg))
         .child(text.to_string())
+}
+
+/// The running-job pill: the phase label with a thin bar along its
+/// bottom edge. Determinate when the child announces a percent, a
+/// slow sweeping segment when it does not. The pill's geometry never
+/// changes with progress, so the row never jumps; only the armed
+/// "Cancel?" swaps the label. `sweep` is the indeterminate segment's
+/// position, derived from the job's elapsed clock.
+pub fn job_pill(
+    id: impl Into<SharedString>,
+    label: &str,
+    percent: Option<u32>,
+    sweep: f32,
+    armed: bool,
+) -> gpui::Stateful<Div> {
+    let fg = if armed { warn() } else { risk_color(Risk::Medium) };
+    let (frac, offset) = match percent {
+        Some(p) => (p.min(100) as f32 / 100., 0.),
+        None => (0.22, sweep * 0.78),
+    };
+    div()
+        .id(id.into())
+        .relative()
+        .flex()
+        .items_center()
+        .px_2()
+        .py_0p5()
+        .rounded_sm()
+        .text_size(px(TEXT_SIZE_SMALL))
+        .text_color(fg)
+        .bg(tint(fg))
+        .cursor_pointer()
+        .hover(|style| style.bg(tint(warn())))
+        .child(label.to_string())
+        .child(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom_0()
+                .h(px(2.))
+                .overflow_hidden()
+                .child(
+                    div()
+                        .h_full()
+                        .bg(accent())
+                        .w(relative(frac))
+                        .ml(relative(offset)),
+                ),
+        )
 }
 
 /// An inline SVG icon tinted by the given color. Paths resolve through

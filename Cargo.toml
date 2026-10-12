@@ -27,7 +27,7 @@ orchard-publish = { path = "crates/orchard-publish" }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 axum = "0.8"
 gpui = "0.2.2"
 

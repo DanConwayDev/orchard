@@ -706,6 +706,28 @@ opening items because they need the push, the signing secret, and a tag.
       only while the copy is still that key, so racing two
       publishers leaves the second's word up instead of killing it
       early. Plain color, accent hover, accent while copied.
+- [x] The install speaks. The runner streams the flatpak child
+      instead of waiting on it, and the probe settled where the
+      truth lives: piped, flatpak prints its percent lines to
+      stdout ("Installing… ▊▌ 8%", about one line a second over a
+      real download) and only its errors to stderr. The status
+      bar's right side carries the running job: stage, percent,
+      elapsed ("Pulling from ghcr.io · 34% · 41s"), because
+      logistics do not belong beside the digest chip, and because
+      the numbers follow you when you browse elsewhere. The page's
+      action pill grows a thin bar along its bottom edge (real
+      percent, a slow sweeping segment when flatpak is between
+      announcements); its geometry never changes, so nothing jumps.
+      The pill is the cancel surface: first press arms "Cancel?",
+      the second interrupts the child with SIGINT (the terminal's
+      own grammar, so flatpak unwinds its transaction; a cancel
+      mid-verify waits for the verify and then stops), and the
+      receipt is a quiet bar note, not an error. One operation at a
+      time: flatpak serializes the system installation behind a
+      lock anyway, so a second press while busy leaves a note
+      ("finishing the install of X first") instead of a lock error
+      reading as our failure. Cards keep their static labels; the
+      bar and the page are the whole story.
 
 ## Risks / open questions
 

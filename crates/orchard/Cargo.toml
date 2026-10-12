@@ -19,3 +19,4 @@ tokio = { workspace = true }
 qrcodegen = { workspace = true }
 flate2 = { workspace = true }
 ureq = { workspace = true }
+libc = "0.2"
