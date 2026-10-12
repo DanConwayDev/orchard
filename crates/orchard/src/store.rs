@@ -2803,12 +2803,24 @@ impl StoreRoot {
 
     /// Build one screenful of rows for the virtualized list.
     fn render_rows(
-        &self,
+        &mut self,
         rows: &[usize],
         range: Range<usize>,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
+        // the visible rows' remote icons ride the shared cache: the
+        // list never fetched them (only open_page did), so publisher
+        // rows wore initials until their page was opened once
+        let row_icon_urls: Vec<String> = range
+            .clone()
+            .filter_map(|ix| {
+                rows.get(ix)
+                    .and_then(|&app_ix| self.apps[app_ix].icon_url.clone())
+            })
+            .filter(|url| self.fetched.get(url).is_none())
+            .collect();
+        self.ensure_fetched(row_icon_urls, cx);
         let selected = self.selected.as_deref();
         range
             .filter_map(|ix| rows.get(ix))
@@ -2864,7 +2876,17 @@ impl StoreRoot {
                         // about THIS row, not the first same-id row
                         this.selected_publisher = click_publisher.clone();
                         this.open_page(&app_id, cx);
-                    }))                    .child(app_icon(app.icon_path.as_deref(), &app.name, 40.))
+                    }))                    .child(app_icon(
+                        app.icon_path
+                            .as_deref()
+                            .or_else(|| {
+                                app.icon_url.as_deref().and_then(|url| {
+                                    self.fetched.get(url).and_then(|f| f.as_deref())
+                                })
+                            }),
+                        &app.name,
+                        40.,
+                    ))
                     .child(
                         div()
                             .flex_1()
