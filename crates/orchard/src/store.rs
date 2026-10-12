@@ -1670,10 +1670,18 @@ impl StoreRoot {
     }
 
     /// The relay group the settings page edits, for the draft input.
+    /// The required relay is pinned: a file list that omits it still
+    /// shows it first, so the display matches what the client reads.
+    /// An empty list stays empty: it means the built-in set.
     fn relay_urls_for(&self, target: RelayTarget, settings: &orchard_core::Settings) -> Vec<String> {
-        match target {
+        let list = match target {
             RelayTarget::Events => settings.event_relays.clone(),
             RelayTarget::Social => settings.social_relays.clone(),
+        };
+        if list.is_empty() {
+            list
+        } else {
+            orchard_nostr::relay::with_required_relay(list)
         }
     }
 
@@ -1730,8 +1738,21 @@ impl StoreRoot {
     /// Remove one row. While the built-in set is showing (an empty
     /// file list), removal switches the file to an explicit list: the
     /// built-ins minus the removed one. The supervisor applies the
-    /// change within a second.
+    /// change within a second. The required relay cannot be removed:
+    /// its row wears no removal button, and a removal that lands on it
+    /// anyway is a no-op.
     fn remove_relay(&mut self, target: RelayTarget, index: usize, cx: &mut Context<Self>) {
+        // the list the buttons index into: the file's list with the
+        // required relay pinned in, or the built-in set for an empty one
+        let mut display = self.relay_urls_for(target, &self.settings.get());
+        if display.is_empty() {
+            display = orchard_nostr::relay::relay_urls(None);
+        }
+        if display.get(index).map(String::as_str)
+            == Some(orchard_nostr::relay::REQUIRED_RELAY)
+        {
+            return;
+        }
         self.edit_settings(
             |settings| {
                 let list = match target {
@@ -1739,15 +1760,21 @@ impl StoreRoot {
                     RelayTarget::Social => &mut settings.social_relays,
                 };
                 if list.is_empty() {
-                    let defaults = orchard_nostr::relay::relay_urls(None);
-                    *list = defaults
-                        .into_iter()
+                    *list = display
+                        .iter()
                         .enumerate()
                         .filter(|(position, _)| *position != index)
-                        .map(|(_, url)| url)
+                        .map(|(_, url)| url.clone())
                         .collect();
-                } else if index < list.len() {
-                    list.remove(index);
+                } else {
+                    // the display sits one row above the file's list
+                    // when the pin is a display-only prepend
+                    let offset = display.len() - list.len();
+                    if let Some(position) = index.checked_sub(offset)
+                        && position < list.len()
+                    {
+                        list.remove(position);
+                    }
                 }
             },
             cx,
@@ -6450,7 +6477,7 @@ impl StoreRoot {
         target: RelayTarget,
         title: &str,
         note: &str,
-        env: Option<String>,
+        env: Option<(&'static str, String)>,
         font: gpui::Font,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
@@ -6567,11 +6594,14 @@ impl StoreRoot {
                                     .text_color(ui::text())
                                     .child(url.clone()),
                             )
-                            .children(showing_defaults.then(|| {
-                                ui::badge("built-in", ui::text_dim()).into_any_element()
-                            })),
+                            .children(if url.as_str() == orchard_nostr::relay::REQUIRED_RELAY {
+                                Some(ui::badge("required", ui::accent()).into_any_element())
+                            } else {
+                                showing_defaults
+                                    .then(|| ui::badge("built-in", ui::text_dim()).into_any_element())
+                            }),
                     )
-                    .child(
+                    .children((url.as_str() != orchard_nostr::relay::REQUIRED_RELAY).then(|| {
                         ui::small_button(
                             SharedString::from(format!("{group_id}-remove-{index}")),
                             Some("icons/trash.svg"),
@@ -6580,8 +6610,9 @@ impl StoreRoot {
                         )
                         .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
                             this.remove_relay(target, index, cx);
-                        })),
-                    )
+                        }))
+                        .into_any_element()
+                    }))
             }));
 
         let input = div()
@@ -6676,12 +6707,12 @@ impl StoreRoot {
                         })),
                     ),
             )
-            .children(env.map(|variable| {
+            .children(env.map(|(variable, value)| {
                 div()
                     .text_size(px(ui::TEXT_SIZE_SMALL))
                     .text_color(ui::text_dim())
                     .child(format!(
-                        "The ORCHARD_{variable} environment variable overrides this list while it is set."
+                        "The ORCHARD_{variable} environment variable ({value}) overrides this list while it is set."
                     ))
             }))
     }
@@ -6694,10 +6725,12 @@ impl StoreRoot {
         let settings = self.settings.get();
         let env_events = std::env::var("ORCHARD_RELAYS")
             .ok()
-            .filter(|value| !value.trim().is_empty());
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| ("RELAYS", value));
         let env_social = std::env::var("ORCHARD_SOCIAL_RELAYS")
             .ok()
-            .filter(|value| !value.trim().is_empty());
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| ("SOCIAL_RELAYS", value));
         let (image_bytes, event_bytes) = self.cache_sizes;
         // with one source hidden there is one channel, so the startup
         // choices collapse the same way the channel menu does
@@ -6762,7 +6795,7 @@ impl StoreRoot {
             .child(self.render_relay_group(
                 RelayTarget::Events,
                 "Catalog relays",
-                "Where publisher listings, releases, and reviews are read from. The built-in rows are the rendezvous set.",
+                "Where publisher listings, releases, and reviews are read from. The built-in rows are the rendezvous set. The required relay cannot be removed.",
                 env_events,
                 font.clone(),
                 cx,
@@ -6770,7 +6803,7 @@ impl StoreRoot {
             .child(self.render_relay_group(
                 RelayTarget::Social,
                 "Profile relays",
-                "Where reviewer names, avatars, and contact lists come from. The built-in rows are the rendezvous set.",
+                "Where reviewer names, avatars, and contact lists come from. The built-in rows are the rendezvous set. The required relay cannot be removed.",
                 env_social,
                 font.clone(),
                 cx,

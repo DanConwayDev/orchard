@@ -40,6 +40,16 @@ pub const RENDEZVOUS_RELAYS: &[&str] = &[
     "wss://nos.lol",
 ];
 
+/// The list plus the required relay: a custom list that omits it gets
+/// it prepended, so a reader (and the settings page that edits it) can
+/// trim the third-party relays but never the project's own.
+pub fn with_required_relay(mut urls: Vec<String>) -> Vec<String> {
+    if !urls.iter().any(|url| url == REQUIRED_RELAY) {
+        urls.insert(0, REQUIRED_RELAY.to_string());
+    }
+    urls
+}
+
 /// Parse an `ORCHARD_RELAYS`-style comma list into URLs, trimming and
 /// dropping empties. No fallback: the caller decides the default.
 pub fn parse_urls(value: &str) -> Vec<String> {
@@ -463,6 +473,18 @@ mod tests {
     #[test]
     fn required_relay_leads_the_rendezvous_set() {
         assert_eq!(RENDEZVOUS_RELAYS.first(), Some(&REQUIRED_RELAY));
+    }
+
+    /// The pin: a custom list gains the required relay at the front;
+    /// one already carrying it is untouched, order included.
+    #[test]
+    fn with_required_relay_pins_and_preserves() {
+        assert_eq!(
+            with_required_relay(vec!["wss://a".into()]),
+            vec![REQUIRED_RELAY.to_string(), "wss://a".into()]
+        );
+        let carried = vec!["wss://a".into(), REQUIRED_RELAY.to_string()];
+        assert_eq!(with_required_relay(carried.clone()), carried);
     }
 
     /// A signed stand-in event with full tag control.

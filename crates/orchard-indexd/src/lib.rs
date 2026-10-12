@@ -222,8 +222,9 @@ pub struct RelaySets {
 }
 
 /// Resolve one relay set: a non-blank environment value wins (the dev
-/// loop's escape hatch), then the settings file's list (empty means
-/// default), then the built-in default.
+/// loop's escape hatch, left unpinned on purpose), then the settings
+/// file's list with the required relay pinned in (empty means default,
+/// which already leads with it).
 pub fn resolve_set(file: &[String], env: Option<&str>, default: &[String]) -> Vec<String> {
     if let Some(value) = env
         && !value.trim().is_empty()
@@ -231,7 +232,7 @@ pub fn resolve_set(file: &[String], env: Option<&str>, default: &[String]) -> Ve
         return orchard_nostr::relay::parse_urls(value);
     }
     if !file.is_empty() {
-        file.to_vec()
+        orchard_nostr::relay::with_required_relay(file.to_vec())
     } else {
         default.to_vec()
     }
@@ -776,8 +777,15 @@ mod tests {
             vec!["ws://env", "ws://env2"]
         );
         // a blank env value does not win: it is unset in spirit
-        assert_eq!(resolve_set(&file, Some("  "), &default), file);
-        assert_eq!(resolve_set(&file, None, &default), file);
+        let pinned = orchard_nostr::relay::with_required_relay(file.clone());
+        assert_eq!(resolve_set(&file, Some("  "), &default), pinned);
+        assert_eq!(resolve_set(&file, None, &default), pinned);
+        // a file list already carrying the required relay is unchanged
+        let carried = vec![
+            orchard_nostr::relay::REQUIRED_RELAY.to_string(),
+            "wss://file".to_string(),
+        ];
+        assert_eq!(resolve_set(&carried, None, &default), carried);
         // an empty file list means default
         assert_eq!(resolve_set(&[], None, &default), default);
     }
