@@ -4484,6 +4484,17 @@ impl StoreRoot {
             }
         };
 
+        // the cards' remote icons ride the same shared cache as the
+        // list rows: a publisher app's icon exists only as a URL, and
+        // this page wore initials because nothing here asked for the
+        // fetch
+        let card_icon_urls: Vec<String> = rows
+            .iter()
+            .filter_map(|&i| self.apps[i].icon_url.clone())
+            .filter(|url| self.fetched.get(url).is_none())
+            .collect();
+        self.ensure_fetched(card_icon_urls, cx);
+
         // the header per subject: a publisher key is an identity, so
         // the profile name, the address check, and the avatar all
         // attach to it. A developer name is a claim anyone can make:
@@ -4531,7 +4542,12 @@ impl StoreRoot {
                     publisher: app.publisher.clone(),
                     name: app.name.clone(),
                     summary: app.summary.clone(),
-                    icon_path: app.icon_path.clone(),
+                    // the cached AppStream PNG, else the fetched
+                    // remote icon once it lands
+                    icon_path: app.icon_path.clone().or_else(|| {
+                        let url = app.icon_url.as_deref()?;
+                        self.fetched.get(url)?.as_deref().map(std::path::PathBuf::from)
+                    }),
                     date_note: app.release_date.as_deref().map(|date| {
                         // the claim reads as "updated" only once true
                         if date > today.as_str() {
