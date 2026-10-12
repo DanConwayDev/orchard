@@ -195,6 +195,9 @@ pub struct StoreRoot {
     /// The running job's armed cancel: its pill reads "Cancel?" until
     /// the second press cancels, or Escape or a page close disarms.
     confirm_cancel: Option<String>,
+    /// The armed settings clear ("Sure?" on a Clear button): the
+    /// same two-press grammar, keyed by the button id.
+    confirm_clear: Option<String>,
     /// A quiet status-bar note that is not an error: the cancel
     /// receipt, the one-operation-at-a-time refusal. Cleared by the
     /// next job or a page close.
@@ -400,6 +403,7 @@ impl StoreRoot {
             confirm_remove: None,
             confirm_update: None,
             confirm_cancel: None,
+            confirm_clear: None,
             job_note: None,
             error_at: None,
             note_at: None,
@@ -1593,6 +1597,7 @@ impl StoreRoot {
         self.confirm_remove = None;
         self.confirm_update = None;
         self.confirm_cancel = None;
+        self.confirm_clear = None;
         self.job_note = None;
         self.close_signin();
         cx.notify();
@@ -1607,6 +1612,7 @@ impl StoreRoot {
         self.about_modal = false;
         self.channel_menu = None;
         self.sort_menu = None;
+        self.confirm_clear = None;
         self.collection_view = None;
         self.close_signin();
         if self.page_open {
@@ -1627,6 +1633,7 @@ impl StoreRoot {
 
     fn close_settings(&mut self, cx: &mut Context<Self>) {
         self.settings_open = false;
+        self.confirm_clear = None;
         self.relay_target = None;
         self.relay_draft.clear();
         self.relay_anchor = None;
@@ -2649,6 +2656,7 @@ impl StoreRoot {
                 self.confirm_remove = None;
                 self.confirm_update = None;
                 self.confirm_cancel = None;
+                self.confirm_clear = None;
                 if self.lightbox.is_some() {
                     self.lightbox = None;
                 } else if self.collection_view.is_some() {
@@ -2946,7 +2954,9 @@ impl StoreRoot {
                 .justify_center()
                 .gap_2()
                 .bg(ui::inset())
-                .child(ui::icon("icons/search.svg", 20., ui::text_dim()))
+                // the sprout: nothing planted yet, in the mark's own
+                // vocabulary; the magnifier belongs to search states
+                .child(ui::icon("icons/sprout.svg", 20., ui::text_dim()))
                 .child(
                     div()
                         .text_size(px(ui::TEXT_SIZE_EMPHASIS))
@@ -3356,13 +3366,9 @@ impl StoreRoot {
                         )
                         .into_any_element(),
                         None if is_installed => {
-                            // two-press remove: the row's Remove reads
-                            // "Sure?" until the second press, so a
-                            // mis-press beside Open cannot delete the
-                            // app on its own
-                            let remove_confirming = self.confirm_remove.as_deref()
-                                == Some(action_id.as_str());
-                            let remove_id = action_id.clone();
+                            // remove is not on the card: a destructive
+                            // action belongs on the app page, not
+                            // beside the Open it can mis-arm
                             // the newest release is signed by a key
                             // other than the deployed artifact's: the
                             // update arms amber and the badge says so
@@ -3433,26 +3439,6 @@ impl StoreRoot {
                                         )),
                                     )
                                 })
-                                .child(ui::small_button(
-                                    format!(
-                                        "row-remove-{remove_id}-{}",
-                                        row_publisher.as_deref().unwrap_or("")
-                                    ),
-                                    Some("icons/trash.svg"),
-                                    if remove_confirming { "Sure?" } else { "Remove" },
-                                    Tone::Danger,
-                                )
-                                .on_click(cx.listener(
-                                    move |this, _e: &ClickEvent, _w, cx| {
-                                        cx.stop_propagation();
-                                        if remove_confirming {
-                                            this.uninstall(remove_id.as_str(), cx);
-                                        } else {
-                                            this.confirm_remove = Some(remove_id.clone());
-                                            cx.notify();
-                                        }
-                                    },
-                                )))
                                 .into_any_element()
                         }
                         None if app.version.is_none() && app.source == Source::Publisher => {
@@ -6946,6 +6932,9 @@ impl StoreRoot {
                     .child(self.settings_section(
                         "icons/trash.svg",
                         "Cached data",
+                        // both clears are destructive on the first
+                        // press, so they wear the two-press idiom
+                        // every other destructive button wears
                         div()
                             .flex()
                             .flex_col()
@@ -6956,11 +6945,26 @@ impl StoreRoot {
                                 ui::small_button(
                                     "settings-clear-images",
                                     None,
-                                    "Clear",
+                                    if self.confirm_clear.as_deref()
+                                        == Some("settings-clear-images")
+                                    {
+                                        "Sure?"
+                                    } else {
+                                        "Clear"
+                                    },
                                     Tone::Danger,
                                 )
                                 .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
-                                    this.clear_image_cache(cx);
+                                    if this.confirm_clear.as_deref()
+                                        == Some("settings-clear-images")
+                                    {
+                                        this.confirm_clear = None;
+                                        this.clear_image_cache(cx);
+                                    } else {
+                                        this.confirm_clear =
+                                            Some("settings-clear-images".into());
+                                        cx.notify();
+                                    }
                                 })),
                             ))
                             .child(self.settings_row(
@@ -6969,11 +6973,26 @@ impl StoreRoot {
                                 ui::small_button(
                                     "settings-clear-events",
                                     None,
-                                    "Clear",
+                                    if self.confirm_clear.as_deref()
+                                        == Some("settings-clear-events")
+                                    {
+                                        "Sure?"
+                                    } else {
+                                        "Clear"
+                                    },
                                     Tone::Danger,
                                 )
                                 .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
-                                    this.clear_event_cache(cx);
+                                    if this.confirm_clear.as_deref()
+                                        == Some("settings-clear-events")
+                                    {
+                                        this.confirm_clear = None;
+                                        this.clear_event_cache(cx);
+                                    } else {
+                                        this.confirm_clear =
+                                            Some("settings-clear-events".into());
+                                        cx.notify();
+                                    }
                                 })),
                             ))
                             .into_any_element(),

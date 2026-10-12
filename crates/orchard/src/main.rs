@@ -101,6 +101,11 @@ fn main() {
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    titlebar: Some(gpui::TitlebarOptions {
+                        title: Some("Orchard".into()),
+                        ..Default::default()
+                    }),
+                    app_id: Some("com.orchard.Orchard".into()),
                     ..Default::default()
                 },
                 |window, cx| {
