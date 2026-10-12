@@ -70,6 +70,27 @@ const SUB_KINDS: [u16; 6] = [
 
 const BACKOFF: Duration = Duration::from_secs(5);
 
+/// How far behind the feed's newest event a reconnect asks: enough
+/// overlap to survive clock skew, small enough that a busy relay's
+/// re-delivery stays cheap. Longer outages heal through the cache
+/// clear's full refill, not this filter.
+const SINCE_OVERLAP: u64 = 60 * 60;
+
+/// The subscription text for one session. Before the first full
+/// backfill it asks for everything; after, only for events newer than
+/// the feed's newest (minus overlap), so a reconnect costs a delta
+/// instead of re-downloading and re-verifying the relay's whole
+/// history.
+fn subscription(feed: &Feed, backfilled: bool) -> String {
+    let mut filter = serde_json::json!({ "kinds": SUB_KINDS });
+    if backfilled {
+        if let Some(newest) = feed.newest_created_at() {
+            filter["since"] = serde_json::json!(newest.saturating_sub(SINCE_OVERLAP));
+        }
+    }
+    serde_json::json!(["REQ", "orchard", filter]).to_string()
+}
+
 /// How long one relay read may block before the loop wakes to check
 /// the stop flag. Long enough that it is invisible; short enough that
 /// a removed relay's thread is gone in under a minute.
@@ -84,13 +105,19 @@ pub fn run_forever(
     on_change: Arc<dyn Fn() + Send + Sync>,
     stop: Arc<std::sync::atomic::AtomicBool>,
 ) {
-    let sub = serde_json::json!([
-        "REQ",
-        "orchard",
-        { "kinds": SUB_KINDS },
-    ])
-    .to_string();
+    // one clean look at the relay's stored history (a session that
+    // saw its EOSE) is what makes the since-filter safe: until then
+    // a reconnect re-pulls everything, so an interrupted first sync
+    // heals instead of freezing a partial catalog in
+    let mut backfilled = false;
     while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+        // rebuilt per session: the anchor moves as the feed grows
+        let sub = subscription(
+            &feed
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            backfilled,
+        );
         // one panicked session must not take the thread down: a
         // background thread's panic is invisible in the UI, so it
         // costs a log line and the loop continues instead
@@ -98,7 +125,8 @@ pub fn run_forever(
             session(url, &sub, &feed, &on_change, &stop)
         }));
         match outcome {
-            Ok(Ok(())) => {
+            Ok(Ok(saw_eose)) => {
+                backfilled |= saw_eose;
                 // clean close: still a stop; retry in case the relay restarts
                 std::thread::sleep(BACKOFF);
             }
@@ -130,10 +158,14 @@ fn session(
     feed: &Arc<Mutex<Feed>>,
     on_change: &Arc<dyn Fn() + Send + Sync>,
     stop: &Arc<std::sync::atomic::AtomicBool>,
-) -> Result<()> {
+) -> Result<bool> {
     let (mut socket, _response) = tungstenite::connect(url)?;
     crate::connect::set_read_timeout(&mut socket, READ_WAKE);
     socket.send(Message::text(sub))?;
+    // whether this session saw the relay's end-of-stored-events: the
+    // caller's next subscription filters on since only once this has
+    // happened once
+    let mut saw_eose = false;
     loop {
         let message = match socket.read() {
             Ok(message) => message,
@@ -144,30 +176,33 @@ fn session(
                     || err.kind() == std::io::ErrorKind::TimedOut =>
             {
                 if stop.load(std::sync::atomic::Ordering::Relaxed) {
-                    return Ok(());
+                    return Ok(saw_eose);
                 }
                 continue;
             }
             Err(err) => return Err(err.into()),
         };
         if stop.load(std::sync::atomic::Ordering::Relaxed) {
-            return Ok(());
+            return Ok(saw_eose);
         }
         match message {
             Message::Text(text) => {
-                if handle_frame(text.as_str(), feed)? {
+                let (absorbed, eose) = handle_frame(text.as_str(), feed)?;
+                saw_eose |= eose;
+                if absorbed {
                     on_change();
                 }
             }
             Message::Ping(payload) => socket.send(Message::Pong(payload))?,
-            Message::Close(_) => return Ok(()),
+            Message::Close(_) => return Ok(saw_eose),
             _ => {}
         }
     }
 }
 
-/// Process one text frame. Returns true if an event was absorbed.
-fn handle_frame(text: &str, feed: &Arc<Mutex<Feed>>) -> Result<bool> {
+/// Process one text frame. Returns whether an event was absorbed and
+/// whether the frame was the relay's end-of-stored-events marker.
+fn handle_frame(text: &str, feed: &Arc<Mutex<Feed>>) -> Result<(bool, bool)> {
     let frame: serde_json::Value = serde_json::from_str(text)?;
     match frame.as_array().and_then(|rows| rows.first()).and_then(|v| v.as_str()) {
         // ["EVENT", <sub-id>, <event>]
@@ -181,12 +216,13 @@ fn handle_frame(text: &str, feed: &Arc<Mutex<Feed>>) -> Result<bool> {
             let mut feed = feed
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            feed.absorb(event)
+            feed.absorb(event).map(|absorbed| (absorbed, false))
         }
-        // ["EOSE", <sub-id>]: stored subscription stays open, keep reading
-        Some("EOSE") => Ok(false),
+        // ["EOSE", <sub-id>]: the stored history is fully delivered;
+        // the subscription stays open, keep reading
+        Some("EOSE") => Ok((false, true)),
         // NOTICE/OK/CLOSED: nothing to act on for a read-only sub
-        _ => Ok(false),
+        _ => Ok((false, false)),
     }
 }
 
@@ -393,6 +429,54 @@ mod tests {
             RENDEZVOUS_RELAYS.iter().map(|url| url.to_string()).collect::<Vec<_>>()
         );
         assert_eq!(relay_urls(Some("  ")).len(), RENDEZVOUS_RELAYS.len());
+    }
+
+    /// A signed stand-in event with full tag control.
+    fn signed(keys: &Keys, kind: u32, content: &str, tags: Vec<(&str, &str)>) -> Event {
+        EventBuilder::new(Kind::Custom(kind as u16), content)
+            .tags(tags.into_iter().map(|(name, value)| Tag::custom(name, [value])))
+            .finalize(keys)
+            .unwrap()
+    }
+
+    /// Before a full backfill the subscription asks for everything.
+    #[test]
+    fn subscription_asks_for_everything_before_backfill() {
+        let feed = Feed::new();
+        assert!(!subscription(&feed, false).contains("since"));
+    }
+
+    /// An empty feed asks for everything even once backfilled: there
+    /// is no anchor to filter from.
+    #[test]
+    fn subscription_backfilled_empty_feed_omits_since() {
+        let feed = Feed::new();
+        assert!(!subscription(&feed, true).contains("since"));
+    }
+
+    /// After a backfill the anchor is the feed's newest event minus
+    /// the overlap, so a reconnect re-delivers recent history only.
+    #[test]
+    fn subscription_since_tracks_the_feed_newest() {
+        let keys = Keys::generate();
+        let listing = signed(
+            &keys,
+            crate::KIND_APP,
+            "A listing.",
+            vec![("d", "com.example.Hello"), ("f", "linux-x86_64")],
+        );
+        let mut feed = Feed::new();
+        feed.absorb(listing).unwrap();
+        let newest = feed.newest_created_at().unwrap();
+
+        let frame: serde_json::Value =
+            serde_json::from_str(&subscription(&feed, true)).unwrap();
+        assert_eq!(
+            frame[2]["since"].as_u64(),
+            Some(newest.saturating_sub(SINCE_OVERLAP))
+        );
+        // the same feed, pre-backfill, still carries no filter
+        assert!(!subscription(&feed, false).contains("since"));
     }
 
     /// The contact list's follows are its p tags, in tag order.

@@ -668,26 +668,39 @@ fn spawn_cache_writer(path: Option<std::path::PathBuf>, feed: Arc<Mutex<orchard_
     if std::thread::Builder::new()
         .name("nostr-cache".into())
         .spawn(move || {
-            let mut signatures = Vec::new();
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(3));
                 guarded("nostr-cache", || {
-                    let jsons = feed
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .event_jsons();
-                    if jsons != signatures {
-                        if let Some(parent) = path.parent() {
-                            let _ = std::fs::create_dir_all(parent);
+                    // the feed's change flag is the tick's whole cost
+                    // when nothing happened: no serialization, no lock
+                    // hold worth naming. When something did, trim to
+                    // what the catalog can show before serializing.
+                    let jsons = {
+                        let mut feed = feed
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        if !feed.take_dirty() {
+                            return;
                         }
-                        match serde_json::to_vec(&jsons) {
-                            Ok(bytes) => {
-                                if std::fs::write(&path, bytes).is_ok() {
-                                    signatures = jsons;
-                                }
-                            }
-                            Err(_) => {}
-                        }
+                        feed.trim();
+                        feed.event_jsons()
+                    };
+                    if let Some(parent) = path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    // atomic swap: a crash mid-write leaves the old
+                    // cache intact instead of a truncated file the
+                    // next load must discard wholesale
+                    let tmp = path.with_extension("json.tmp");
+                    let written = serde_json::to_vec(&jsons)
+                        .ok()
+                        .and_then(|bytes| std::fs::write(&tmp, bytes).ok())
+                        .and_then(|_| std::fs::rename(&tmp, &path).ok());
+                    if written.is_none() {
+                        eprintln!("nostr cache: write failed; the next tick retries");
+                        feed.lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .mark_dirty();
                     }
                 });
             }

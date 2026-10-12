@@ -188,6 +188,10 @@ struct Review {
 /// two publishers of one app id, and both rows survive.
 #[derive(Default)]
 pub struct Feed {
+    /// Set on every retained event (and on clear) and taken by the
+    /// cache writer: without a change, a writer tick costs one flag
+    /// check, not a full-feed serialization under the lock.
+    dirty: std::sync::atomic::AtomicBool,
     listings: BTreeMap<(String, String), Listing>,
     /// (app id, old key) -> the newest migration statement that key
     /// signed for the id.
@@ -213,6 +217,104 @@ impl Feed {
     /// follows on the writer's next tick.
     pub fn clear(&mut self) {
         *self = Self::default();
+        // the writer must rewrite the (now empty) file, or the disk
+        // cache the next load reads restores everything just dropped
+        self.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Swap out the change flag: true when an event was retained (or
+    /// the feed was cleared) since the last take.
+    pub fn take_dirty(&self) -> bool {
+        self.dirty.swap(false, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Re-arm the change flag after a failed persistence tick, so the
+    /// writer retries instead of assuming the loss was written.
+    pub fn mark_dirty(&self) {
+        self.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The newest event time the feed holds, across every kind: the
+    /// reconnect `since` anchor.
+    pub fn newest_created_at(&self) -> Option<u64> {
+        [
+            self.listings.values().map(|l| l.created_at).max(),
+            self.migrations.values().map(|m| m.created_at).max(),
+            self.releases
+                .values()
+                .flatten()
+                .map(|r| r.created_at)
+                .max(),
+            self.assets.values().map(|a| a.created_at).max(),
+            self.profiles.values().map(|p| p.created_at).max(),
+            self.reviews.values().map(|r| r.created_at).max(),
+        ]
+        .into_iter()
+        .flatten()
+        .max()
+    }
+
+    /// Bound the feed to what the catalog can show. Relays refill on
+    /// reconnect, so anything the projection ignores is pure cost:
+    /// foreign releases no catalog can pick, versions past the newest
+    /// few, assets nothing references, reviews of apps nobody lists,
+    /// profiles nobody reads. Without this, memory and the disk cache
+    /// grow with everything a relay ever saw, not with Orchard.
+    pub fn trim(&mut self) {
+        // a release is projectable only under a listing signed by the
+        // same author; a short tail of each app's versions keeps the
+        // newest-release-has-no-asset-yet walk working across a
+        // publisher's recent history
+        const VERSION_TAIL: usize = 10;
+        let listed: std::collections::HashSet<(String, String)> =
+            self.listings.keys().cloned().collect();
+        for (app_id, releases) in self.releases.iter_mut() {
+            releases.retain(|release| {
+                listed.contains(&(app_id.clone(), release.event.pubkey.to_string()))
+            });
+            // stored newest-first; the tail is the newest
+            releases.truncate(VERSION_TAIL);
+        }
+        self.releases.retain(|_, releases| !releases.is_empty());
+        // assets survive only while a kept release points at them,
+        // which also drops any asset whose author never listed
+        let referenced: std::collections::HashSet<String> = self
+            .releases
+            .values()
+            .flat_map(|releases| {
+                releases
+                    .iter()
+                    .flat_map(|release| release.asset_refs.iter().cloned())
+            })
+            .collect();
+        self.assets.retain(|id, _| referenced.contains(id));
+        // reviews of unlisted apps are never rendered
+        let listed_ids: std::collections::HashSet<String> =
+            self.listings.keys().map(|(id, _)| id.clone()).collect();
+        self.reviews
+            .retain(|(_, app_id), _| listed_ids.contains(app_id));
+        // profiles and first-seen live for the keys the survivors
+        // name: publishers, reviewers, and a hand-over's two ends
+        let mut wanted: std::collections::HashSet<String> = self
+            .listings
+            .keys()
+            .map(|(_, key)| key.clone())
+            .chain(self.reviews.keys().map(|(key, _)| key.clone()))
+            .collect();
+        for (app_id, migration) in self.migrations.iter() {
+            if listed_ids.contains(&app_id.0) {
+                wanted.insert(app_id.1.clone());
+                if let Some(new_key) = &migration.new_key {
+                    wanted.insert(new_key.clone());
+                }
+            }
+        }
+        self.profiles.retain(|key, _| wanted.contains(key));
+        self.first_seen.retain(|key, _| wanted.contains(key));
+        // a migration for an unlisted app id is inert: no old row can
+        // step aside for a successor when the id is not listed at all
+        self.migrations
+            .retain(|(app_id, _), _| listed_ids.contains(app_id));
     }
 
     /// Verify and absorb one event. `Ok(false)` means the event is valid
@@ -236,7 +338,7 @@ impl Feed {
                 self.first_seen.insert(author, parts.created_at);
             }
         }
-        match parts.kind {
+        let retained = match parts.kind {
             KIND_APP => self.absorb_app(event, parts),
             KIND_RELEASE => self.absorb_release(event, parts),
             KIND_ASSET => self.absorb_asset(event, parts),
@@ -244,7 +346,11 @@ impl Feed {
             KIND_REVIEW => self.absorb_review(event, parts),
             KIND_MIGRATION => self.absorb_migration(event, parts),
             _ => Ok(false),
+        };
+        if matches!(retained, Ok(true)) {
+            self.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
         }
+        retained
     }
 
     fn absorb_app(&mut self, event: Event, parts: Parts) -> Result<bool> {
@@ -1397,5 +1503,126 @@ mod tests {
         let mut feed = Feed::new();
         absorb_all(&mut feed, &[listing]);
         assert!(feed.reviews().first_seen.is_empty());
+    }
+
+    /// The trim bounds the feed to what the catalog can show: foreign
+    /// releases and their assets drop, reviews of unlisted apps drop,
+    /// and profiles nobody reads drop. Without it, memory and the
+    /// disk cache grow with everything a relay ever saw.
+    #[test]
+    fn trim_keeps_only_what_the_catalog_can_show() {
+        let publisher = demo_keys();
+        let outsider = Keys::generate();
+        let reviewer = Keys::generate();
+
+        let listing = signed(
+            &publisher,
+            KIND_APP,
+            "A listing.",
+            vec![("d", "com.example.Hello"), ("f", "linux-x86_64")],
+        );
+        let asset = signed(
+            &publisher,
+            KIND_ASSET,
+            "",
+            vec![
+                ("i", "com.example.Hello"),
+                ("x", DIGEST),
+                ("oci", "oci:/srv/registry/hello"),
+            ],
+        );
+        let asset_id = asset.id.to_string();
+        let release = signed(
+            &publisher,
+            KIND_RELEASE,
+            "",
+            vec![
+                ("d", "com.example.Hello@1.0.0"),
+                ("c", "stable"),
+                ("e", asset_id.as_str()),
+            ],
+        );
+        // an outsider's release for the same app id: no catalog can
+        // project it (the publisher check fails), so it is pure cost
+        let foreign_asset = signed(
+            &outsider,
+            KIND_ASSET,
+            "",
+            vec![
+                ("i", "com.example.Hello"),
+                ("x", DIGEST),
+                ("oci", "oci:/srv/registry/evil"),
+            ],
+        );
+        let foreign_id = foreign_asset.id.to_string();
+        let foreign_release = signed(
+            &outsider,
+            KIND_RELEASE,
+            "",
+            vec![
+                ("d", "com.example.Hello@9.9.9"),
+                ("c", "stable"),
+                ("e", foreign_id.as_str()),
+            ],
+        );
+        // a review of the listed app, and one of an app nobody lists
+        let kept_review = signed(
+            &reviewer,
+            KIND_REVIEW,
+            "Good app.",
+            vec![("d", "com.example.Hello"), ("rating", "4.0")],
+        );
+        let stray_review = signed(
+            &reviewer,
+            KIND_REVIEW,
+            "For an unlisted app.",
+            vec![("d", "com.example.Ghost"), ("rating", "1.0")],
+        );
+        // the reviewer's profile is read (review names); the
+        // outsider's is not referenced by anything kept
+        let reviewer_profile = signed(&reviewer, KIND_PROFILE, r#"{"name":"Reviewer"}"#, vec![]);
+        let stranger_profile = signed(&outsider, KIND_PROFILE, r#"{"name":"Stranger"}"#, vec![]);
+
+        let mut feed = Feed::new();
+        absorb_all(
+            &mut feed,
+            &[
+                listing, asset, release, foreign_asset, foreign_release,
+                kept_review, stray_review, reviewer_profile, stranger_profile,
+            ],
+        );
+        feed.trim();
+
+        assert_eq!(feed.catalog().apps.len(), 1);
+        let reviews = feed.reviews();
+        assert_eq!(reviews.reviews.len(), 1);
+        assert_eq!(reviews.reviews[0].content, "Good app.");
+        assert!(feed
+            .profiles
+            .contains_key(&reviewer.get_public_key().unwrap().to_string()));
+        assert!(!feed
+            .profiles
+            .contains_key(&outsider.get_public_key().unwrap().to_string()));
+    }
+
+    /// The change flag: a retained event arms it, taking disarms it,
+    /// and clear arms it (the writer must rewrite the emptied file,
+    /// or the next load restores what the user just dropped).
+    #[test]
+    fn dirty_flag_tracks_retained_events_and_clear() {
+        let keys = demo_keys();
+        let mut feed = Feed::new();
+        assert!(!feed.take_dirty());
+        let listing = signed(
+            &keys,
+            KIND_APP,
+            "A listing.",
+            vec![("d", "com.example.Hello"), ("f", "linux-x86_64")],
+        );
+        absorb_all(&mut feed, &[listing]);
+        assert!(feed.take_dirty());
+        assert!(!feed.take_dirty());
+        feed.clear();
+        assert!(feed.take_dirty());
     }
 }
