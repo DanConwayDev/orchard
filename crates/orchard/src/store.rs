@@ -206,9 +206,10 @@ pub struct StoreRoot {
     settings: orchard_core::SettingsHandle,
     /// The settings page is open (replaces the list; Escape backs out).
     settings_open: bool,
-    /// The npub just copied from a publisher header, so that header's
-    /// line reads "Copied." until a different key is shown. No
-    /// timers: the statement stays true until the clipboard moves on.
+    /// The npub just copied from a publisher header: that header's
+    /// line reads "Copied." for a beat, then reverts to the key. The
+    /// revert only fires while the copy is still this key, so copying
+    /// two publishers in quick succession leaves the second's word up.
     npub_copied: Option<String>,
     /// The relay editor's draft text, shared by both relay groups.
     relay_draft: String,
@@ -4496,12 +4497,34 @@ impl StoreRoot {
             CollectionPage::Publisher(key) => publisher_rows(&self.apps, key, &today),
             CollectionPage::Developer(label) => developer_rows(&self.apps, label, &today),
         };
+        let plural = |n: usize| if n == 1 { "" } else { "s" };
         let count_line = match &page {
             CollectionPage::Publisher(_) => {
-                format!("{} app{} on Orchard", rows.len(), if rows.len() == 1 { "" } else { "s" })
+                format!("{} app{} on Orchard", rows.len(), plural(rows.len()))
             }
             CollectionPage::Developer(_) => {
-                format!("{} app{} on Flathub", rows.len(), if rows.len() == 1 { "" } else { "s" })
+                // the claim groups listings from both halves of the
+                // store, so the line counts what is actually here
+                let orchard = rows
+                    .iter()
+                    .filter(|&&i| self.apps[i].source == Source::Publisher)
+                    .count();
+                let flathub = rows.len() - orchard;
+                match (flathub, orchard) {
+                    (0, _) => {
+                        format!("{} app{} on Orchard", rows.len(), plural(rows.len()))
+                    }
+                    (_, 0) => {
+                        format!("{} app{} on Flathub", rows.len(), plural(rows.len()))
+                    }
+                    (flathub, orchard) => format!(
+                        "{} app{}: {} on Flathub, {} on Orchard",
+                        rows.len(),
+                        plural(rows.len()),
+                        flathub,
+                        orchard
+                    ),
+                }
             }
         };
 
@@ -4761,9 +4784,9 @@ impl StoreRoot {
                                                     .text_color(if copied {
                                                         ui::accent()
                                                     } else {
-                                                        ui::text_dim()
+                                                        ui::text()
                                                     })
-                                                    .hover(|style| style.text_color(ui::text()))
+                                                    .hover(|style| style.text_color(ui::accent()))
                                                     .tooltip(|_window, cx| {
                                                         cx.new(|_| {
                                                             TextTooltip("Copy npub".into())
@@ -4782,6 +4805,31 @@ impl StoreRoot {
                                                                 this.npub_copied =
                                                                     Some(full.clone());
                                                                 cx.notify();
+                                                                // the word stays up for a
+                                                                // beat, then the key comes
+                                                                // back; only while the copy
+                                                                // is still this one
+                                                                let revert = full.clone();
+                                                                cx.spawn(async move |this, cx| {
+                                                                    cx.background_executor()
+                                                                        .timer(
+                                                                            std::time::Duration::from_millis(1600),
+                                                                        )
+                                                                        .await;
+                                                                    let _ = this.update(
+                                                                        cx,
+                                                                        |this, cx| {
+                                                                            if this.npub_copied.as_deref()
+                                                                                == Some(revert.as_str())
+                                                                            {
+                                                                                this.npub_copied =
+                                                                                    None;
+                                                                                cx.notify();
+                                                                            }
+                                                                        },
+                                                                    );
+                                                                })
+                                                                .detach();
                                                             },
                                                         )
                                                     })
@@ -4794,8 +4842,19 @@ impl StoreRoot {
                                             .child(
                                                 div()
                                                     .text_size(px(ui::TEXT_SIZE))
-                                                    .text_color(ui::text_dim())
+                                                    .text_color(ui::text())
                                                     .child(count_line),
+                                            )
+                                            .children(
+                                                matches!(&page, CollectionPage::Developer(_))
+                                                    .then(|| {
+                                                        div()
+                                                            .text_size(px(ui::TEXT_SIZE_SMALL))
+                                                            .text_color(ui::text_dim())
+                                                            .child(
+                                                                "A developer name is a claim any listing can make; the publisher's key is the identity.",
+                                                            )
+                                                    }),
                                             ),
                                     ),
                             )
@@ -5361,7 +5420,7 @@ impl Render for StoreRoot {
                             .hover(|style| style.bg(ui::surface()))
                             .on_mouse_down(
                                 MouseButton::Left,
-                                cx.listener(|this, event: &MouseDownEvent, _w, cx| {
+                                cx.listener(|this, _event: &MouseDownEvent, _w, cx| {
                                     let open = this.about_modal;
                                     this.channel_menu = None;
                                     this.account_menu = None;
