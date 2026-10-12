@@ -206,6 +206,10 @@ pub struct StoreRoot {
     settings: orchard_core::SettingsHandle,
     /// The settings page is open (replaces the list; Escape backs out).
     settings_open: bool,
+    /// The npub just copied from a publisher header, so that header's
+    /// line reads "Copied." until a different key is shown. No
+    /// timers: the statement stays true until the clipboard moves on.
+    npub_copied: Option<String>,
     /// The relay editor's draft text, shared by both relay groups.
     relay_draft: String,
     /// Which relay group the draft edits: the input the keyboard is
@@ -343,6 +347,7 @@ impl StoreRoot {
             reviews_everyone: false,
             settings: settings.clone(),
             settings_open: false,
+            npub_copied: None,
             relay_draft: String::new(),
             relay_target: None,
             relay_cursor: 0,
@@ -2095,23 +2100,9 @@ impl StoreRoot {
         let shift = keystroke.modifiers.shift;
         let ctrl = keystroke.modifiers.control || keystroke.modifiers.platform;
 
-        // ----- dropdown menus: an open menu swallows everything but
-        // Escape; a click away closes it through the overlay -----
-        if self.channel_menu.is_some()
-            || self.account_menu.is_some()
-            || self.sort_menu.is_some()
-        {
-            if key == "escape" {
-                self.channel_menu = None;
-                self.account_menu = None;
-                self.sort_menu = None;
-                cx.notify();
-            }
-            return;
-        }
-
-        // ----- modals: an open modal swallows everything but Escape;
-        // a click away closes it through the backdrop -----
+        // ----- modals outrank menus: an open modal swallows
+        // everything but Escape; a click away closes it through the
+        // backdrop -----
         if self.about_modal {
             if key == "escape" {
                 self.about_modal = false;
@@ -2219,6 +2210,21 @@ impl StoreRoot {
             }
         }
 
+        // ----- dropdown menus: an open menu swallows everything but
+        // Escape; a click away closes it through the overlay -----
+        if self.channel_menu.is_some()
+            || self.account_menu.is_some()
+            || self.sort_menu.is_some()
+        {
+            if key == "escape" {
+                self.channel_menu = None;
+                self.account_menu = None;
+                self.sort_menu = None;
+                cx.notify();
+            }
+            return;
+        }
+
         // ----- settings page: the relay draft is the text surface;
         // Escape backs out to the list -----
         if self.settings_open {
@@ -2312,15 +2318,16 @@ impl StoreRoot {
                 }
             }
             "backspace" => {
-                if self.page_open {
+                // the browser idiom: backspace backs out of a page
+                // only when the field is empty; with text present it
+                // is editing, not navigation
+                if self.page_open && self.search.is_empty() {
                     self.close_page(cx);
                 }
                 self.delete_text(true);
             }
             "delete" => {
-                if self.page_open {
-                    self.close_page(cx);
-                }
+                // forward-delete edits; it never navigates
                 self.delete_text(false);
             }
             "escape" => {
@@ -4512,8 +4519,10 @@ impl StoreRoot {
         // the header per subject: a publisher key is an identity, so
         // the profile name, the address check, and the avatar all
         // attach to it. A developer name is a claim anyone can make:
-        // the label alone, no trust furniture.
-        let (name, nip05_note, avatar_path) = match &page {
+        // the label alone, no trust furniture. The truncated npub
+        // rides along on publishers only, and a click copies the full
+        // key: the identity page is where verification happens.
+        let (name, nip05_note, avatar_path, npub_line) = match &page {
             CollectionPage::Publisher(key) => {
                 let profile = self.profiles.get(key);
                 let name = profile
@@ -4532,9 +4541,10 @@ impl StoreRoot {
                     .as_deref()
                     .and_then(|url| self.fetched.get(url))
                     .and_then(|f| f.as_deref());
-                (name, nip05_note, avatar_path)
+                let npub_line = full_npub(key).map(|full| (short_npub(key), full));
+                (name, nip05_note, avatar_path, npub_line)
             }
-            CollectionPage::Developer(label) => (label.clone(), None, None),
+            CollectionPage::Developer(label) => (label.clone(), None, None, None),
         };
 
         // the cards: cloned strings first, the builder borrows after
@@ -4739,6 +4749,48 @@ impl StoreRoot {
                                                             ))
                                                     })),
                                             )
+                                            .children(npub_line.map(|(short, full)| {
+                                                let copied = self
+                                                    .npub_copied
+                                                    .as_deref()
+                                                    == Some(full.as_str());
+                                                div()
+                                                    .id("publisher-npub")
+                                                    .cursor_pointer()
+                                                    .text_size(px(ui::TEXT_SIZE_SMALL))
+                                                    .text_color(if copied {
+                                                        ui::accent()
+                                                    } else {
+                                                        ui::text_dim()
+                                                    })
+                                                    .hover(|style| style.text_color(ui::text()))
+                                                    .tooltip(|_window, cx| {
+                                                        cx.new(|_| {
+                                                            TextTooltip("Copy npub".into())
+                                                        })
+                                                        .into()
+                                                    })
+                                                    .on_click({
+                                                        let full = full.clone();
+                                                        cx.listener(
+                                                            move |this, _e: &ClickEvent, _w, cx| {
+                                                                cx.write_to_clipboard(
+                                                                    gpui::ClipboardItem::new_string(
+                                                                        full.clone(),
+                                                                    ),
+                                                                );
+                                                                this.npub_copied =
+                                                                    Some(full.clone());
+                                                                cx.notify();
+                                                            },
+                                                        )
+                                                    })
+                                                    .child(if copied {
+                                                        "Copied.".to_string()
+                                                    } else {
+                                                        short
+                                                    })
+                                            }))
                                             .child(
                                                 div()
                                                     .text_size(px(ui::TEXT_SIZE))
@@ -4786,9 +4838,29 @@ impl StoreRoot {
             self.render_pairing_phase(cx)
         } else {
             div()
-                .text_size(px(ui::TEXT_SIZE))
-                .text_color(ui::text_dim())
-                .child("Preparing the pairing…")
+                .relative()
+                .w(px(440.))
+                .flex()
+                .flex_col()
+                .gap_3()
+                .rounded_md()
+                .border_1()
+                .border_color(ui::divider())
+                .bg(ui::panel())
+                .p_4()
+                .child(self.signin_close(cx))
+                .child(
+                    div()
+                        .text_size(px(ui::TEXT_SIZE_EMPHASIS))
+                        .text_color(ui::text())
+                        .child("Sign in"),
+                )
+                .child(
+                    div()
+                        .text_size(px(ui::TEXT_SIZE))
+                        .text_color(ui::text_dim())
+                        .child("Preparing the pairing…"),
+                )
                 .into_any_element()
         };
         div()
@@ -7322,17 +7394,23 @@ fn avatar(path: Option<&std::path::Path>, size: f32, fallback: gpui::Rgba) -> gp
 /// The full npub is the identifier of record; a label is not the
 /// place for 63 characters. Unparseable keys keep the hex fragment.
 fn short_npub(pubkey: &str) -> String {
-    use nostr::nips::nip19::ToBech32 as _;
-    let npub = nostr::prelude::PublicKey::from_hex(pubkey)
-        .ok()
-        .and_then(|key| key.to_bech32().ok());
-    match npub {
+    match full_npub(pubkey) {
         Some(npub) if npub.len() > 19 => {
             format!("{}…{}", &npub[..14], &npub[npub.len() - 4..])
         }
         Some(npub) => npub,
         None => format!("{}…", &pubkey[..pubkey.len().min(12)]),
     }
+}
+
+/// The full bech32 npub for a hex key, when it parses. The identifier
+/// of record: what a key-migration announcement names, and what a
+/// click on the truncated form puts on the clipboard.
+fn full_npub(pubkey: &str) -> Option<String> {
+    use nostr::nips::nip19::ToBech32 as _;
+    nostr::prelude::PublicKey::from_hex(pubkey)
+        .ok()
+        .and_then(|key| key.to_bech32().ok())
 }
 
 /// Load the saved NIP-46 session, if one is stored. The file holds the
