@@ -280,7 +280,7 @@ pub enum Tone {
 /// The whisper behind a colored label: keep the rgb bytes, swap in a
 /// ~13% alpha fill.
 fn tint(fg: Rgba) -> Rgba {
-    rgba((u32::from(fg) & 0xFF_FF_FF00) | 0x22)
+    rgba((u32::from(fg) & 0xFFFF_FF00) | 0x22)
 }
 
 /// A small tinted label: colored text on a whisper of the same color,

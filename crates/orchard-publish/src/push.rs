@@ -102,7 +102,7 @@ fn read_blob(layout: &Path, digest: &str) -> Result<Vec<u8>> {
     let path = layout
         .join("blobs/sha256")
         .join(digest.trim_start_matches("sha256:"));
-    Ok(std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?)
+    std::fs::read(&path).with_context(|| format!("reading {}", path.display()))
 }
 
 fn blob_present(

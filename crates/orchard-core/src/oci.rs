@@ -167,10 +167,10 @@ pub fn verify(location: &Location, pinned_digest: Option<&str>) -> Result<Verify
         } => {
             // the location's own digest, when present, is the strongest
             // pin and must agree with the catalog's
-            if let (Some(located), Some(pinned)) = (digest.as_deref(), pinned_digest) {
-                if !located.eq_ignore_ascii_case(pinned) {
-                    bail!("artifact location pins {located}, catalog pins {pinned}");
-                }
+            if let (Some(located), Some(pinned)) = (digest.as_deref(), pinned_digest)
+                && !located.eq_ignore_ascii_case(pinned)
+            {
+                bail!("artifact location pins {located}, catalog pins {pinned}");
             }
             verify_registry(
                 registry,

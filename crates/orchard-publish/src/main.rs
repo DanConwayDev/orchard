@@ -105,10 +105,10 @@ fn run() -> Result<()> {
     let mut manifest = manifest::load(&args.manifest_path)?;
     // CI derives the version from the pushed tag; the manifest's
     // version is the local default.
-    if let Ok(from_env) = std::env::var("ORCHARD_PUBLISH_VERSION") {
-        if !from_env.trim().is_empty() {
-            manifest.release.version = from_env.trim().to_string();
-        }
+    if let Ok(from_env) = std::env::var("ORCHARD_PUBLISH_VERSION")
+        && !from_env.trim().is_empty()
+    {
+        manifest.release.version = from_env.trim().to_string();
     }
     // CI's arch legs override the manifest's build arch: the
     // artifact, asset, and release of this run are for that machine,
@@ -126,10 +126,7 @@ fn run() -> Result<()> {
         Some(raw) => Keys::parse(raw.trim())?,
         None => match &manifest.publish.as_ref().and_then(|p| p.key_file.as_ref()) {
             Some(key_file) => {
-                let raw = std::fs::read_to_string(key_file)
-                    .and_then(|content| {
-                        Ok::<String, std::io::Error>(content.trim().to_string())
-                    })
+                let raw = std::fs::read_to_string(key_file).map(|content| content.trim().to_string())
                     .map_err(|err| anyhow::anyhow!("reading key file {}: {err}", key_file.display()))?;
                 Keys::parse(&raw)?
             }
@@ -234,16 +231,16 @@ fn run() -> Result<()> {
         },
     )?;
     let mut signed = vec![asset, release, listing];
-    if let Some(publish) = &manifest.publish {
-        if publish.author_name.is_some() || publish.nip05.is_some() {
-            signed.push(events::sign_profile(
-                &keys,
-                &Profile {
-                    name: publish.author_name.clone(),
-                    nip05: publish.nip05.clone(),
-                },
-            )?);
-        }
+    if let Some(publish) = &manifest.publish
+        && (publish.author_name.is_some() || publish.nip05.is_some())
+    {
+        signed.push(events::sign_profile(
+            &keys,
+            &Profile {
+                name: publish.author_name.clone(),
+                nip05: publish.nip05.clone(),
+            },
+        )?);
     }
 
     // send

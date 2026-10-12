@@ -439,10 +439,10 @@ impl Feed {
             bail!("release d tag must be <app-id>@<version>[@<platform>], got {d:?}");
         }
         // the i tag must agree with the d tag's app id when present
-        if let Some(i) = parts.tag("i") {
-            if i != app_id {
-                bail!("release i tag {i:?} disagrees with d tag {app_id:?}");
-            }
+        if let Some(i) = parts.tag("i")
+            && i != app_id
+        {
+            bail!("release i tag {i:?} disagrees with d tag {app_id:?}");
         }
         let releases = self.releases.entry(app_id.to_string()).or_default();
         if releases
@@ -577,7 +577,7 @@ impl Feed {
         // first_seen rides along, filtered to the keys that actually
         // review: the catalog's authors are not the client's business
         let mut first_seen: BTreeMap<String, u64> = BTreeMap::new();
-        for ((pubkey, _), _) in &self.reviews {
+        for (pubkey, _) in self.reviews.keys() {
             if let Some(seen) = self.first_seen.get(pubkey) {
                 first_seen.insert(pubkey.clone(), *seen);
             }
@@ -676,8 +676,7 @@ impl Feed {
             // stays invisible, as before.
             let picked = picked.or_else(|| {
                 self.releases.get(app_id).and_then(|releases| {
-                    stable(releases, author)
-                        .filter(|release| {
+                    stable(releases, author).find(|release| {
                             release
                                 .asset_refs
                                 .iter()
@@ -685,7 +684,6 @@ impl Feed {
                                 .next()
                                 .is_some()
                         })
-                        .next()
                         .map(|release| (release, None))
                 })
             });
@@ -770,7 +768,7 @@ impl Feed {
                 .values()
                 .map(|p| (p.created_at, p.event.as_json())),
         );
-        events.sort_by(|a, b| a.0.cmp(&b.0));
+        events.sort_by_key(|a| a.0);
         events.into_iter().map(|(_, json)| json).collect()
     }
 

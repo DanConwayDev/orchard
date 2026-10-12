@@ -41,18 +41,12 @@ pub fn write_qr_png(text: &str, dir: &std::path::Path) -> Result<PathBuf> {
     for y in 0..size {
         pixel_row.clear();
         pixel_row.push(0); // filter: none
-        for _ in 0..QUIET * SCALE {
-            pixel_row.push(255);
-        }
+        pixel_row.extend(std::iter::repeat_n(255u8, QUIET * SCALE));
         for x in 0..size {
             let byte = if qr.get_module(x, y) { 0u8 } else { 255u8 };
-            for _ in 0..SCALE {
-                pixel_row.push(byte);
-            }
+            pixel_row.extend(std::iter::repeat_n(byte, SCALE));
         }
-        for _ in 0..QUIET * SCALE {
-            pixel_row.push(255);
-        }
+        pixel_row.extend(std::iter::repeat_n(255u8, QUIET * SCALE));
         // every module row is SCALE pixel rows tall
         for _ in 0..SCALE {
             raw.extend_from_slice(&pixel_row);

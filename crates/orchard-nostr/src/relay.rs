@@ -83,10 +83,10 @@ const SINCE_OVERLAP: u64 = 60 * 60;
 /// history.
 fn subscription(feed: &Feed, backfilled: bool) -> String {
     let mut filter = serde_json::json!({ "kinds": SUB_KINDS });
-    if backfilled {
-        if let Some(newest) = feed.newest_created_at() {
-            filter["since"] = serde_json::json!(newest.saturating_sub(SINCE_OVERLAP));
-        }
+    if backfilled
+        && let Some(newest) = feed.newest_created_at()
+    {
+        filter["since"] = serde_json::json!(newest.saturating_sub(SINCE_OVERLAP));
     }
     serde_json::json!(["REQ", "orchard", filter]).to_string()
 }

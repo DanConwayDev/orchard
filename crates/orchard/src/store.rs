@@ -751,10 +751,10 @@ impl StoreRoot {
             .find_app(app_id)
             .map(|app| {
                 let mut urls = Vec::new();
-                if app.icon_path.is_none() {
-                    if let Some(url) = &app.icon_url {
-                        urls.push(url.clone());
-                    }
+                if app.icon_path.is_none()
+                    && let Some(url) = &app.icon_url
+                {
+                    urls.push(url.clone());
                 }
                 urls.extend(app.screenshots.iter().take(6).cloned());
                 urls
@@ -861,10 +861,10 @@ impl StoreRoot {
             .collect();
         let mut incoming = incoming;
         for app in &mut incoming {
-            if app.metadata.is_none() {
-                if let Some(Some(metadata)) = old_metadata.get(&app.app_id) {
-                    app.metadata = Some(metadata.clone());
-                }
+            if app.metadata.is_none()
+                && let Some(Some(metadata)) = old_metadata.get(&app.app_id)
+            {
+                app.metadata = Some(metadata.clone());
             }
             old_metadata.remove(&app.app_id);
         }
@@ -1152,10 +1152,11 @@ impl StoreRoot {
                 if let Some(bits) = bits {
                     // the name shows up in "Signed in as" even when
                     // indexd's feed never carried the profile
-                    if let Some(reviewer) = this.reviewer.as_mut() {
-                        if reviewer.signer_pubkey == pubkey && reviewer.name.is_none() {
-                            reviewer.name = bits.name.clone();
-                        }
+                    if let Some(reviewer) = this.reviewer.as_mut()
+                        && reviewer.signer_pubkey == pubkey
+                        && reviewer.name.is_none()
+                    {
+                        reviewer.name = bits.name.clone();
                     }
                     this.profiles.insert(pubkey, bits);
                     cx.notify();
@@ -1407,16 +1408,13 @@ impl StoreRoot {
                     }
                 })
                 .await;
-            match answer {
-                Ok(Some((signer_pubkey, secret))) => {
-                    let _ = this.update(cx, |this, cx| {
-                        this.pairing_connected(signer_pubkey, secret, cx);
-                    });
-                    break;
-                }
-                // nothing yet: poll again; relay hiccups retry the
-                // same way until the modal closes
-                _ => {}
+            // a signer's answer, or nothing yet: poll again; relay
+            // hiccups retry the same way until the modal closes
+            if let Ok(Some((signer_pubkey, secret))) = answer {
+                let _ = this.update(cx, |this, cx| {
+                    this.pairing_connected(signer_pubkey, secret, cx);
+                });
+                break;
             }
         })
         .detach();
@@ -1547,14 +1545,12 @@ impl StoreRoot {
                 .spawn(async move { fetch_profile_raws() })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if let Ok(raws) = raws {
-                    if let Some(reviewer) = this.reviewer.as_mut() {
-                        if reviewer.name.is_none() {
-                            if let Some(raw) = raws.get(&reviewer.signer_pubkey) {
-                                reviewer.name = ProfileBits::parse(raw).name;
-                            }
-                        }
-                    }
+                if let Ok(raws) = raws
+                    && let Some(reviewer) = this.reviewer.as_mut()
+                    && reviewer.name.is_none()
+                    && let Some(raw) = raws.get(&reviewer.signer_pubkey)
+                {
+                    reviewer.name = ProfileBits::parse(raw).name;
                 }
                 cx.notify();
             });
@@ -1593,11 +1589,7 @@ impl StoreRoot {
         self.lightbox = None;
         self.composing = false;
         self.reviews_expanded = false;
-        self.confirm_install = None;
-        self.confirm_remove = None;
-        self.confirm_update = None;
-        self.confirm_cancel = None;
-        self.confirm_clear = None;
+        self.disarm_confirms();
         self.job_note = None;
         self.close_signin();
         cx.notify();
@@ -1805,15 +1797,14 @@ impl StoreRoot {
                     self.relay_cursor = cursor;
                 }
             }
-            "delete" => {
-                if self.relay_cursor < len {
+            "delete"
+                if self.relay_cursor < len => {
                     let mut end = self.relay_cursor + 1;
                     while end < len && !self.relay_draft.is_char_boundary(end) {
                         end += 1;
                     }
                     self.relay_draft.replace_range(self.relay_cursor..end, "");
                 }
-            }
             _ => {}
         }
         self.relay_anchor = None;
@@ -1947,10 +1938,7 @@ impl StoreRoot {
     // ----- actions -----
 
     fn install(&mut self, app_id: &str, cx: &mut Context<Self>) {
-        self.confirm_install = None;
-        self.confirm_remove = None;
-        self.confirm_update = None;
-        self.confirm_cancel = None;
+        self.disarm_confirms();
         // the selection's publisher names the twin: two publishers of
         // one app id install from different artifacts
         let Some(app) = self
@@ -1987,10 +1975,7 @@ impl StoreRoot {
     /// is an immutable digest pin only a fresh verify-and-install can
     /// move. Detection is version-based either way.
     fn update(&mut self, app_id: &str, cx: &mut Context<Self>) {
-        self.confirm_install = None;
-        self.confirm_remove = None;
-        self.confirm_update = None;
-        self.confirm_cancel = None;
+        self.disarm_confirms();
         if self.jobs.contains_key(app_id) || self.refuse_if_busy() {
             return;
         }
@@ -2033,7 +2018,16 @@ impl StoreRoot {
             }
         };
         let install_arg = location.install_arg();
-        let place = place_from_location(&location_text);
+        // the status line's "from": the registry host the parsed
+        // location carries, or nothing for a local layout
+        let place = match &location {
+            oci::Location::Registry { registry, .. } => registry
+                .split('/')
+                .next()
+                .unwrap_or_default()
+                .to_string(),
+            oci::Location::OciDir(_) => String::new(),
+        };
         self.jobs
             .insert(app.app_id.clone(), Job::new(JobState::Verifying));
         cx.notify();
@@ -2085,16 +2079,8 @@ impl StoreRoot {
                             .get(&app.app_id)
                             .cloned()
                             .unwrap_or_else(|| Job::new(JobState::Installing));
-                        this.jobs.insert(
-                            app.app_id.clone(),
-                            Job {
-                                state: JobState::Installing,
-                                started: next.started,
-                                progress: None,
-                                cancel_pid: None,
-                                cancel_requested: next.cancel_requested,
-                            },
-                        );
+                        this.jobs
+                            .insert(app.app_id.clone(), Job { state: JobState::Installing, ..next });
                         // the deployment's key baseline: updates are
                         // compared against this from now on
                         this.record_installed_from(
@@ -2144,10 +2130,7 @@ impl StoreRoot {
     }
 
     fn uninstall(&mut self, app_id: &str, cx: &mut Context<Self>) {
-        self.confirm_install = None;
-        self.confirm_remove = None;
-        self.confirm_update = None;
-        self.confirm_cancel = None;
+        self.disarm_confirms();
         if self.jobs.contains_key(app_id) || self.refuse_if_busy() {
             return;
         }
@@ -2179,6 +2162,16 @@ impl StoreRoot {
     fn note(&mut self, msg: String) {
         self.job_note = Some(msg);
         self.note_at = Some(Instant::now());
+    }
+
+    /// Every armed confirm disarms together: starting any action,
+    /// closing a page, or Escape lets go of all of them at once.
+    fn disarm_confirms(&mut self) {
+        self.confirm_install = None;
+        self.confirm_remove = None;
+        self.confirm_update = None;
+        self.confirm_cancel = None;
+        self.confirm_clear = None;
     }
 
     /// The one-operation-at-a-time rule: flatpak serializes the
@@ -2521,12 +2514,12 @@ impl StoreRoot {
         // type-to-close rule when the page has no publisher key (a
         // reviewed app), and yields to it when a collection page is
         // already up.
-        if self.page_open && key == "p" && !ctrl && self.collection_view.is_none() {
-            if let Some(pubkey) = self.selected_publisher.clone().filter(|k| !k.is_empty()) {
-                self.open_collection(CollectionPage::Publisher(pubkey), cx);
-                cx.notify();
-                return;
-            }
+        if self.page_open && key == "p" && !ctrl && self.collection_view.is_none()
+            && let Some(pubkey) = self.selected_publisher.clone().filter(|k| !k.is_empty())
+        {
+            self.open_collection(CollectionPage::Publisher(pubkey), cx);
+            cx.notify();
+            return;
         }
 
         // ----- dropdown menus: an open menu swallows everything but
@@ -2652,11 +2645,7 @@ impl StoreRoot {
             "escape" => {
                 // back out one level: lightbox, page, then selection,
                 // then text, then row selection
-                self.confirm_install = None;
-                self.confirm_remove = None;
-                self.confirm_update = None;
-                self.confirm_cancel = None;
-                self.confirm_clear = None;
+                self.disarm_confirms();
                 if self.lightbox.is_some() {
                     self.lightbox = None;
                 } else if self.collection_view.is_some() {
@@ -3010,9 +2999,6 @@ impl StoreRoot {
 
     /// The category chip row: the browse dimension. Only categories
     /// present in the catalog get a chip.
-
-    /// The category chip row: the browse dimension. Only categories
-    /// present in the catalog get a chip.
     fn render_category_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         div()
             .flex()
@@ -3160,7 +3146,7 @@ impl StoreRoot {
                 rows.get(ix)
                     .and_then(|&app_ix| self.apps[app_ix].icon_url.clone())
             })
-            .filter(|url| self.fetched.get(url).is_none())
+            .filter(|url| !self.fetched.contains_key(url))
             .collect();
         self.ensure_fetched(row_icon_urls, cx);
         let selected = self.selected.as_deref();
@@ -4204,19 +4190,6 @@ fn stage_text(label: &str, place: &str) -> String {
     }
 }
 
-/// The "from" host for the status line: the registry in an artifact
-/// location ("docker://ghcr.io/…"), or empty for a local layout.
-fn place_from_location(location: &str) -> String {
-    let rest = location.splitn(2, "//").nth(1).unwrap_or("");
-    // the location may carry an explicit scheme in the middle
-    // ("docker://http://…"): the host follows that "//"
-    let rest = rest
-        .strip_prefix("http://")
-        .or_else(|| rest.strip_prefix("https://"))
-        .unwrap_or(rest);
-    rest.split(['/', '@']).next().unwrap_or("").to_string()
-}
-
 /// "12s" then "1m07s": the universal fallback truth when the child
 /// announces no percent.
 fn elapsed_text(d: Duration) -> String {
@@ -4241,11 +4214,9 @@ fn risk_echo(metadata: Option<&str>) -> Option<(gpui::Rgba, String)> {
             _ => grant.summary,
         })
         .collect();
-    let worst = loud
+    let worst = if loud
         .iter()
-        .any(|line| line.contains("(high)"))
-        .then(|| Risk::High)
-        .unwrap_or(Risk::Medium);
+        .any(|line| line.contains("(high)")) { Risk::High } else { Risk::Medium };
     let named = loud.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
     let names = if loud.len() > 3 {
         format!("{named} and {} more", loud.len() - 3)
@@ -4905,7 +4876,7 @@ impl StoreRoot {
         let card_icon_urls: Vec<String> = rows
             .iter()
             .filter_map(|&i| self.apps[i].icon_url.clone())
-            .filter(|url| self.fetched.get(url).is_none())
+            .filter(|url| !self.fetched.contains_key(url))
             .collect();
         self.ensure_fetched(card_icon_urls, cx);
 
@@ -5914,7 +5885,7 @@ impl Render for StoreRoot {
                                     let ix = match live_layout.index_for_position(local) {
                                         Ok(ix) | Err(ix) => ix,
                                     };
-                                    let ix = ix.min(this.search.len()).max(0);
+                                    let ix = ix.min(this.search.len());
                                     if event.modifiers.shift && this.anchor.is_some() {
                                         this.cursor = ix;
                                     } else {
@@ -7525,10 +7496,10 @@ fn load_orchard_catalog() -> Vec<StoreApp> {
         .and_then(|response| response.into_json::<CatalogFile>().ok())
         .or_else(|| {
             for path in crate::catalog_file_paths() {
-                if let Ok(bytes) = std::fs::read(&path) {
-                    if let Ok(catalog) = serde_json::from_slice::<CatalogFile>(&bytes) {
-                        return Some(catalog);
-                    }
+                if let Ok(bytes) = std::fs::read(&path)
+                    && let Ok(catalog) = serde_json::from_slice::<CatalogFile>(&bytes)
+                {
+                    return Some(catalog);
                 }
             }
             None
@@ -7566,10 +7537,12 @@ fn merge_profile_raw(existing: Option<&str>, name: &str) -> String {
 
 /// Reviews from indexd, grouped by app id (newest first within an
 /// app), plus the per-reviewer first-seen table.
-fn load_reviews() -> anyhow::Result<(
+type ReviewsIndex = (
     HashMap<String, Vec<orchard_core::Review>>,
     std::collections::BTreeMap<String, u64>,
-)> {
+);
+
+fn load_reviews() -> anyhow::Result<ReviewsIndex> {
     let agent = ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(5))
         .build();
@@ -8618,19 +8591,6 @@ mod tests {
         assert_eq!(stage_text("Installing", "ghcr.io"), "Deploying");
         assert_eq!(stage_text("Deploying", "flathub"), "Deploying");
         assert_eq!(stage_text("Importing", ""), "Importing");
-    }
-
-    #[test]
-    fn place_extracts_the_registry_host() {
-        assert_eq!(
-            place_from_location("docker://ghcr.io/letdown2491/orchard@sha256:abc"),
-            "ghcr.io"
-        );
-        assert_eq!(
-            place_from_location("docker://http://localhost:5000/hello"),
-            "localhost:5000"
-        );
-        assert_eq!(place_from_location("oci:/some/dir"), "");
     }
 
     #[test]

@@ -249,10 +249,10 @@ pub fn load(path: &Path, icons_root: &Path) -> Result<Vec<AppstreamApp>> {
                     screenshots_depth = 0;
                 }
                 depth = depth.saturating_sub(1);
-                if closing.as_ref() == b"component" {
-                    if let Some(app) = current.take().and_then(|c| c.finish(icons_root)) {
-                        apps.push(app);
-                    }
+                if closing.as_ref() == b"component"
+                    && let Some(app) = current.take().and_then(|c| c.finish(icons_root))
+                {
+                    apps.push(app);
                 }
             }
             Event::Empty(ref e) => match e.name().as_ref() {
@@ -691,7 +691,7 @@ impl Component {
         let mut screenshots: Vec<String> = Vec::new();
         let mut thumbnails: Vec<&ScreenshotImage> =
             raw.iter().filter(|img| img.kind.as_ref() != "source").collect();
-        thumbnails.sort_by(|a, b| b.width.cmp(&a.width));
+        thumbnails.sort_by_key(|img| std::cmp::Reverse(img.width));
         for img in raw.iter().filter(|img| img.kind.as_ref() == "source").chain(thumbnails) {
             if seen.insert(img.url.clone()) && screenshots.len() < 6 {
                 screenshots.push(img.url.clone());

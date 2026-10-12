@@ -115,7 +115,7 @@ fn enforce_cap(dir: &Path) {
     if total <= IMAGE_CACHE_CAP {
         return;
     }
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries.sort_by_key(|a| a.0);
     for (_, size, path) in entries {
         if total <= IMAGE_CACHE_CAP {
             break;

@@ -225,10 +225,10 @@ pub struct RelaySets {
 /// loop's escape hatch), then the settings file's list (empty means
 /// default), then the built-in default.
 pub fn resolve_set(file: &[String], env: Option<&str>, default: &[String]) -> Vec<String> {
-    if let Some(value) = env {
-        if !value.trim().is_empty() {
-            return orchard_nostr::relay::parse_urls(value);
-        }
+    if let Some(value) = env
+        && !value.trim().is_empty()
+    {
+        return orchard_nostr::relay::parse_urls(value);
     }
     if !file.is_empty() {
         file.to_vec()
