@@ -6,7 +6,7 @@
 //! stable hash of the URL, and survive restarts.
 
 use std::io::Read as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The cache root: `$XDG_CACHE_HOME/orchard` or `$HOME/.cache/orchard`.
 fn root() -> PathBuf {
@@ -26,6 +26,12 @@ fn fnv1a(text: &str) -> u64 {
     }
     hash
 }
+
+/// The disk cache's ceiling, in bytes: old entries evict oldest-first
+/// (insertion time, not access time) so the cache is bounded by
+/// policy instead of growing until the user notices. Generous: a
+/// store's worth of icons and screenshots is a few tens of MB.
+const IMAGE_CACHE_CAP: u64 = 256 * 1024 * 1024;
 
 /// Resolve `url` to a local file, downloading through the cache on
 /// first use. Blocking; call from a background executor. `None` on
@@ -53,7 +59,41 @@ pub fn fetch(url: &str) -> Option<PathBuf> {
     let tmp = dir.join(format!("{}.{}.part", fnv1a(url), std::process::id()));
     std::fs::write(&tmp, &bytes).ok()?;
     std::fs::rename(&tmp, &path).ok()?;
+    enforce_cap(&dir);
     Some(path)
+}
+
+/// Evict oldest-written entries until the cache is under the cap.
+/// Runs after each new file lands: the walk stats one smallish
+/// directory, on a background fetch cadence, never in render.
+fn enforce_cap(dir: &Path) {
+    let mut entries: Vec<(std::time::SystemTime, u64, PathBuf)> = Vec::new();
+    let mut total = 0u64;
+    let Ok(files) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for file in files.flatten() {
+        let Ok(meta) = file.metadata() else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        total += meta.len();
+        entries.push((meta.modified().unwrap_or(std::time::UNIX_EPOCH), meta.len(), file.path()));
+    }
+    if total <= IMAGE_CACHE_CAP {
+        return;
+    }
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    for (_, size, path) in entries {
+        if total <= IMAGE_CACHE_CAP {
+            break;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            total -= size;
+        }
+    }
 }
 
 /// The absorbed-events cache the embedded indexd writes, or None when

@@ -129,6 +129,9 @@ pub struct StoreRoot {
     fetched: HashMap<String, Option<PathBuf>>,
     /// Fetches in flight, keyed by url.
     fetching: HashSet<String>,
+    /// Disk usage for the settings page, measured on open and after a
+    /// clear, never per frame.
+    cache_sizes: (u64, u64),
     /// Sandbox metadata read from the remote for apps that are not
     /// installed (reviewed channel), fetched on page open and cached
     /// for the session.
@@ -314,6 +317,7 @@ impl StoreRoot {
             flathub_loading: true,
             fetched: HashMap::new(),
             fetching: HashSet::new(),
+            cache_sizes: (0, 0),
             remote_metadata: HashMap::new(),
             remote_sizes: HashMap::new(),
             remote_fetching: HashSet::new(),
@@ -495,7 +499,7 @@ impl StoreRoot {
     /// category, in display order. Returns indices (not clones) so
     /// renders stay cheap.
     fn filtered(&self) -> Vec<usize> {
-        let needle = self.search.to_lowercase();
+        let needle = self.search.as_str();
         let settings = self.settings.get();
         let mut out = self
             .apps
@@ -519,9 +523,9 @@ impl StoreRoot {
             })
             .filter(|(_, app)| {
                 needle.is_empty()
-                    || app.name.to_lowercase().contains(&needle)
-                    || app.summary.to_lowercase().contains(&needle)
-                    || app.app_id.to_lowercase().contains(&needle)
+                    || ci_contains(&app.name, needle)
+                    || ci_contains(&app.summary, needle)
+                    || ci_contains(&app.app_id, needle)
             })
             .map(|(ix, _)| ix)
             .collect::<Vec<_>>();
@@ -616,7 +620,7 @@ impl StoreRoot {
                         urls.push(url.clone());
                     }
                 }
-                urls.extend(app.screenshots.iter().take(4).cloned());
+                urls.extend(app.screenshots.iter().take(6).cloned());
                 urls
             })
             .unwrap_or_default();
@@ -703,14 +707,11 @@ impl StoreRoot {
     /// that fetch already happened and the pin has not moved.
     fn apply_orchard_apps(&mut self, incoming: Vec<StoreApp>, cx: &mut Context<Self>) {
         let before = orchard_fingerprint(
-            &self
-                .apps
+            self.apps
                 .iter()
-                .filter(|app| app.source == Source::Publisher)
-                .cloned()
-                .collect::<Vec<_>>(),
+                .filter(|app| app.source == Source::Publisher),
         );
-        let after = orchard_fingerprint(&incoming);
+        let after = orchard_fingerprint(incoming.iter());
         if before == after {
             return;
         }
@@ -1485,6 +1486,7 @@ impl StoreRoot {
         // keyboard-first: the catalog relay input is the page's text
         // surface from the first keystroke
         self.relay_target = Some(RelayTarget::Events);
+        self.refresh_cache_sizes();
         cx.notify();
     }
 
@@ -1716,9 +1718,14 @@ impl StoreRoot {
     fn clear_image_cache(&mut self, cx: &mut Context<Self>) {
         self.fetched.clear();
         self.fetching.clear();
-        cx.background_executor()
-            .spawn(async move { crate::cache::clear_images() })
-            .detach();
+        cx.spawn(async move |this, cx| {
+            crate::cache::clear_images();
+            let _ = this.update(cx, |this, cx| {
+                this.refresh_cache_sizes();
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -1727,17 +1734,35 @@ impl StoreRoot {
     /// threads re-subscribe and re-deliver. The Orchard channel
     /// refills from the relays within seconds.
     fn clear_event_cache(&mut self, cx: &mut Context<Self>) {
-        cx.background_executor()
-            .spawn(async move {
-                let agent = ureq::AgentBuilder::new()
-                    .timeout(std::time::Duration::from_secs(5))
-                    .build();
-                let _ = agent
-                    .post(&format!("http://127.0.0.1:{INDEXD_PORT}/v1/cache"))
-                    .call();
-            })
-            .detach();
+        cx.spawn(async move |this, cx| {
+            let agent = ureq::AgentBuilder::new()
+                .timeout(std::time::Duration::from_secs(5))
+                .build();
+            let _ = agent
+                .post(&format!("http://127.0.0.1:{INDEXD_PORT}/v1/cache"))
+                .call();
+            // the writer's next tick (3s) does the actual emptying;
+            // one extra beat keeps the reading honest
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(4))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.refresh_cache_sizes();
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
+    }
+
+    /// The settings page's disk-usage lines. Measured once per open
+    /// (and after a clear), not per frame: the walk stats every cache
+    /// file, and the page repaints on every scroll and hover.
+    fn refresh_cache_sizes(&mut self) {
+        self.cache_sizes = (
+            crate::cache::image_cache_bytes(),
+            crate::cache::event_cache_bytes(),
+        );
     }
 
 
@@ -4062,11 +4087,20 @@ impl StoreRoot {
         font: gpui::Font,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let reviews = self
+        // collapsed, the header only aggregates, and the aggregate can
+        // borrow the map; the owned copy is for the expanded list,
+        // whose row closures move content out. A collapsed section
+        // therefore costs no content clones per frame.
+        let expanded = self.reviews_expanded;
+        let borrowed: &[orchard_core::Review] = self
             .reviews
             .get(app_id)
-            .cloned()
-            .unwrap_or_default();
+            .map_or(&[], Vec::as_slice);
+        let reviews = if expanded {
+            self.reviews.get(app_id).cloned().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
 
         // header: same shape as the other section headers, so the text
         // lines up; the score formats with one decimal, no float junk
@@ -4084,14 +4118,14 @@ impl StoreRoot {
             circle_average,
             circle2,
         } = reviews_aggregate(
-            &reviews,
+            borrowed,
             publisher,
             &self.first_seen,
             now,
             &self.follows,
             &circle2_set,
         );
-        let label = if reviews.is_empty() {
+        let label = if borrowed.is_empty() {
             "No reviews yet".to_string()
         } else {
             let score = average
@@ -6049,8 +6083,7 @@ impl StoreRoot {
         let env_social = std::env::var("ORCHARD_SOCIAL_RELAYS")
             .ok()
             .filter(|value| !value.trim().is_empty());
-        let image_bytes = crate::cache::image_cache_bytes();
-        let event_bytes = crate::cache::event_cache_bytes();
+        let (image_bytes, event_bytes) = self.cache_sizes;
         // with one source hidden there is one channel, so the startup
         // choices collapse the same way the channel menu does
         let both_visible = settings.flathub_source && settings.orchard_source;
@@ -6366,8 +6399,9 @@ impl StoreRoot {
 /// Flathub channel: parse the local AppStream for the system install.
 /// Session-stability fingerprint of the publisher rows: any change in
 /// identity, version, pin, or listing text should re-render; anything
-/// else is an idle refresh.
-fn orchard_fingerprint(rows: &[StoreApp]) -> String {
+/// else is an idle refresh. Borrowing, not cloning: this runs every
+/// refresh tick, and the rows' strings are the payload.
+fn orchard_fingerprint<'a>(rows: impl IntoIterator<Item = &'a StoreApp>) -> String {
     use std::fmt::Write as _;
     let mut fingerprint = String::new();
     for app in rows {
@@ -6454,6 +6488,47 @@ fn save_continuity(file: &orchard_core::ContinuityFile) {
 }
 
 /// Human byte count, flatpak-style SI units: `9.8 MB`, `1.2 GB`.
+/// ASCII-case-insensitive containment, allocation-free: the needle is
+/// folded once, the haystack scanned byte-wise (safe on UTF-8:
+/// multi-byte sequences are left intact, so an ASCII byte only ever
+/// matches at a character boundary). A non-ASCII needle falls back to
+/// the allocating Unicode fold.
+fn ci_contains(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if !needle.is_ascii() {
+        return haystack
+            .to_lowercase()
+            .contains(&needle.to_lowercase());
+    }
+    let needle: Vec<u8> = needle
+        .bytes()
+        .map(|byte| byte.to_ascii_lowercase())
+        .collect();
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .any(|window| {
+            window
+                .iter()
+                .zip(needle.iter())
+                .all(|(byte, want)| byte.to_ascii_lowercase() == *want)
+        })
+}
+
+/// ASCII-case-insensitive name order: no allocation per comparison,
+/// unlike to_lowercase, which the sort comparator ran twice per pair.
+/// Non-ASCII falls back to the Unicode fold.
+fn ci_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    if !a.is_ascii() || !b.is_ascii() {
+        return a.to_lowercase().cmp(&b.to_lowercase());
+    }
+    a.bytes()
+        .map(|byte| byte.to_ascii_lowercase())
+        .cmp(b.bytes().map(|byte| byte.to_ascii_lowercase()))
+}
+
 /// The list's date order: rank on the newest release date that has
 /// actually arrived. A future-dated release never lifts an app toward
 /// the top (an upstream can pre-list one, so a raw sort rewards the
@@ -6468,16 +6543,15 @@ fn date_order(a: &StoreApp, b: &StoreApp, today: &str) -> std::cmp::Ordering {
         let date = app.release_date.as_deref()?;
         (date <= today).then_some(date)
     }
-    let name = |app: &StoreApp| app.name.to_lowercase();
     match (rank(b, today), rank(a, today)) {
         (Some(x), Some(y)) => x
             .cmp(y)
-            .then_with(|| name(a).cmp(&name(b))),
+            .then_with(|| ci_cmp(&a.name, &b.name)),
         // b dated, a undated: a sinks (undated apps sort last)
         (Some(_), None) => std::cmp::Ordering::Greater,
         // a dated, b undated: a first
         (None, Some(_)) => std::cmp::Ordering::Less,
-        (None, None) => name(a).cmp(&name(b)),
+        (None, None) => ci_cmp(&a.name, &b.name),
     }
 }
 
@@ -6523,10 +6597,7 @@ impl ListSort {
 fn list_sort(a: &StoreApp, b: &StoreApp, sort: ListSort, today: &str) -> std::cmp::Ordering {
     match sort {
         ListSort::Updated => date_order(a, b, today),
-        ListSort::Name => a
-            .name
-            .to_lowercase()
-            .cmp(&b.name.to_lowercase())
+        ListSort::Name => ci_cmp(&a.name, &b.name)
             .then_with(|| a.app_id.cmp(&b.app_id)),
     }
 }
@@ -7420,6 +7491,29 @@ mod tests {
         let names: Vec<&str> = rows.iter().map(|&i| apps[i].name.as_str()).collect();
         // only apps claiming this exact name, the newer release first
         assert_eq!(names, vec!["Beta", "Alpha"]);
+    }
+
+    #[test]
+    fn ci_contains_matches_case_insensitively() {
+        assert!(ci_contains("Orchard VPN", "vpn"));
+        assert!(ci_contains("Orchard VPN", "ORCHARD"));
+        assert!(!ci_contains("Orchard VPN", "proton"));
+        assert!(ci_contains("anything", ""));
+        // an ASCII needle matches past multi-byte characters
+        assert!(ci_contains("Änderungen", "nder"));
+        // a non-ASCII needle takes the Unicode fold
+        assert!(ci_contains("Änderungen", "änderungen"));
+        assert!(!ci_contains("Änderungen", "änderunx"));
+    }
+
+    #[test]
+    fn ci_cmp_orders_names_case_insensitively() {
+        assert_eq!(ci_cmp("alpha", "Beta"), std::cmp::Ordering::Less);
+        assert_eq!(ci_cmp("beta", "ALPHA"), std::cmp::Ordering::Greater);
+        assert_eq!(ci_cmp("same", "same"), std::cmp::Ordering::Equal);
+        // a non-ASCII name takes the Unicode fold, which is byte
+        // order, not locale collation: ä sorts past z
+        assert_eq!(ci_cmp("Änder", "Zulu"), std::cmp::Ordering::Greater);
     }
 
     #[test]

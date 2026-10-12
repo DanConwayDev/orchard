@@ -627,6 +627,28 @@ opening items because they need the push, the signing secret, and a tag.
       waits and appends "orchard exited: N" to the smoke log, so the
       next death self-identifies (0 clean, 137 SIGKILL, 143 SIGTERM,
       139 segfault) instead of requiring a hypothesis.
+- [x] The feed is bounded and the reconnect is a delta, from the
+      resource audit (three passes, findings verified before
+      fixing). The REQ carries `since` anchored on the feed's newest
+      event once a session has seen the relay's EOSE, so a
+      reconnect re-delivers recent history instead of everything,
+      and an interrupted first sync heals because an un-backfilled
+      session never filters. The cache writer's idle tick costs one
+      change-flag check, not a full-feed serialization under the
+      lock; when something changed it trims to what the catalog can
+      show (foreign releases and their assets, reviews of unlisted
+      apps, profiles nobody reads; a short version tail stays so a
+      newest-release-without-asset walk still finds one) and swaps
+      the file atomically (tmp plus rename), so a crash mid-write
+      costs nothing. The settings lock recovers on poison like the
+      rest. The disk image cache evicts oldest-first under a cap,
+      the pairing QR is one overwritten file, the settings page
+      measures its usage lines on open instead of per frame, and
+      the hot paths stop allocating per comparison or per row: the
+      search filter and sort comparator fold ASCII case without
+      building strings, the refresh fingerprint borrows instead of
+      deep-cloning every publisher row, and a collapsed reviews
+      section borrows its aggregate instead of cloning the list.
 - [x] Client relay configuration, as a full settings page: Sources (channel
       visibility switches, the channel the store opens on), Relays (the event
       and social sets, editable rows with add, remove, and a reset to the

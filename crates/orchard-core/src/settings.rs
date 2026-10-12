@@ -90,7 +90,12 @@ impl SettingsHandle {
 
     /// A snapshot of the current settings.
     pub fn get(&self) -> Settings {
-        self.inner.read().expect("settings lock poisoned").clone()
+        // poison recovery, house rule: a panicked reader must not take
+        // settings (and with it the supervisor's tick) down forever
+        self.inner
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     /// Apply an edit and persist it. The file write is atomic (tmp

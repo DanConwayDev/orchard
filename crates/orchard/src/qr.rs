@@ -65,12 +65,10 @@ pub fn write_qr_png(text: &str, dir: &std::path::Path) -> Result<PathBuf> {
 
     let png = encode_png(&raw, stride as u32, stride as u32);
     std::fs::create_dir_all(dir)?;
-    let path = dir.join(format!(
-        "connect-qr-{}.png",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_nanos()
-    ));
+    // one file, overwritten per attempt: a unique name per pairing
+    // would accumulate in the cache dir forever, and nothing reads a
+    // past attempt's QR
+    let path = dir.join("connect-qr.png");
     std::fs::write(&path, png)?;
     Ok(path)
 }
