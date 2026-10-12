@@ -63,6 +63,16 @@ Revisit when gpui ships a tree without xattr 0.2.x.
   in those trees from this project, even for a fix that looks like it
   belongs there.
 
+## Local services
+
+The dev relay (`orchard-relay`, podman, `ws://127.0.0.1:8008`) runs the
+kind-restricted operator config from `relay/config.toml` with dev
+values: foreign kinds are rejected at admission, and `limit_scrapers`
+must stay false or the client's kind-based subscriptions get refused.
+The config was applied with `podman cp` plus restart and lives in the
+container layer, as does its database: both survive `podman restart`,
+neither survives `podman rm`.
+
 ## Docs
 
 `DESIGN.md` is the architecture record: locked decisions, the Nostr

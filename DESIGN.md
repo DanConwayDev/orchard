@@ -381,7 +381,10 @@ to flow. The model is a small, public, versioned **rendezvous set**
 lists at least one of them, every client defaults to all of them, and discovery is
 the overlap. The relays are mailboxes, not trust roots: events are signed, so which
 relay an event came from affects availability, never integrity. The dev loop keeps
-the demo relay by `ORCHARD_RELAYS` in run.sh. Flathub comparison: Flathub's central
+the demo relay by `ORCHARD_RELAYS` in run.sh. Orchard also operates its own public
+relay as a kind-restricted nostr-rs-relay (admissions accept exactly the six event
+kinds; `relay/` is the operator kit, verified against 0.10.0), and it joins the
+rendezvous set in addition to the third-party pair, never instead. Flathub comparison: Flathub's central
 repo is one rendezvous point with a gatekeeper; Orchard's is a list with none.
 Pointer-following (NIP-65 kind 10002, "my events live over here") is the future
 edge for self-hosting publishers, fetched by indexd on demand; not part of this
@@ -688,7 +691,13 @@ opening items because they need the push, the signing secret, and a tag.
   circle and no history can still be flooded with noise, which the
   composition line discloses but nothing prevents; intent is unreadable
   and only permissions are enforceable. Relay-side friction (item 7) is
-  operator policy at the relays, parked until after dogfooding.
+  operator policy at the relays, and the operator seat now exists:
+  `relay/` carries a kind-restricted relay config (test-verified against
+  nostr-rs-relay 0.10.0: foreign kinds rejected at admission, Orchard
+  reads and publishes pass), so junk in foreign kinds never lands.
+  Junk reviews (30065) stay possible by design; their friction (per-key
+  limits, the nauthz admission hook) is parked until dogfooding shows
+  a need.
 
 **Resolved 2026-10-11:** event kinds reconciled with Zapstore's `zsp` reference
 implementation (NIP-82 draft: 32267/30063/3063, see "Nostr protocol"); license settled

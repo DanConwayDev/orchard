@@ -89,6 +89,9 @@ real publish. The local dry run must override both:
 - `demo/`: a demo app tree and manifest for the local fixture.
 - `self/`: Orchard publishing itself (manifest, app tree, assemble
   script), and its CI workflow.
+- `relay/`: the operator kit for running a kind-restricted Orchard
+  relay (config verified against nostr-rs-relay 0.10.0, verification
+  probe, deployment notes).
 - `assets/`: the Orchard icon (listing and launcher rasters).
 
 ## Docs

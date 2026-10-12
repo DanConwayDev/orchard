@@ -1,0 +1,61 @@
+# Orchard relay: operator configuration for nostr-rs-relay 0.10.0.
+#
+# A kind-restricted relay: admissions accept exactly the Orchard event
+# set, and everything else is rejected at the door. That trims storage,
+# bandwidth, and abuse surface to what an Orchard client can actually
+# read. The allowlist and the limit_scrapers=false line are
+# test-verified against 0.10.0; see README.md for the verification
+# recipe (NIP-11 identity, one blocked foreign kind, one admitted
+# Orchard kind, one kind-based subscription).
+
+[info]
+# EDIT before going public: these advertise in the NIP-11 document
+# (curl -s https://<host>/ with Accept: application/nostr+json).
+relay_url = "wss://orchard.example.com/"
+name = "orchard"
+description = "Orchard app-store relay: listings, releases, assets, reviews, migrations, profiles."
+#pubkey = "<32-byte hex of the operator's admin key>"
+#contact = "mailto:operator@example.com"
+
+[options]
+# Reject events stamped more than 30 minutes into the future
+# (NIP-22). Clock-skewed publishers get 30 minutes of slack.
+reject_future_seconds = 1800
+
+[limits]
+# The Orchard event set (the NIP-82 draft kinds plus profiles):
+#   0      profile (publisher and reviewer names)
+#   3063   asset
+#   30063  release
+#   30065  review
+#   30066  migration
+#   32267  listing
+event_kind_allowlist = [0, 3063, 30063, 30065, 30066, 32267]
+
+# Whole-relay write rate: events per second, averaged over a minute.
+# The upstream config recommends a cap for any public relay. Reads are
+# not affected by this setting.
+messages_per_sec = 5
+
+# Maximum EVENT message size. Orchard events are a few KB; 128 KB is
+# the upstream default and generous headroom.
+max_event_bytes = 131072
+
+# New subscriptions per client, averaged over a minute. Orchard
+# clients open a handful of kind-filtered subscriptions per session;
+# 10 is comfortable headroom.
+subscriptions_per_min = 10
+
+# LOAD-BEARING: Orchard clients subscribe with kind-based REQs (no
+# author filter), which limit_scrapers=true exists specifically to
+# reject. An Orchard relay must keep this false, and must keep it
+# false across upstream config-template updates.
+limit_scrapers = false
+
+[database]
+# Where the SQLite files live. If omitted, the default is "." (the
+# relay's working directory). Adopting this config onto a running
+# relay whose database is stored elsewhere, without setting this (or
+# launching with --db, which overrides the config), makes the
+# restarted relay come up pointing at a fresh empty directory.
+#data_directory = "/var/lib/orchard-relay"
