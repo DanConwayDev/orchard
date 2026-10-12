@@ -3377,8 +3377,12 @@ impl StoreRoot {
                                 .flex()
                                 .items_center()
                                 .gap_2()
-                                .child(if outdated {
-                                    if key_changed {
+                                // no "Installed" badge: the actions
+                                // (Open, Remove) already say it, and
+                                // the Installed page says it again;
+                                // only something to do earns a badge
+                                .when(outdated, |slot| {
+                                    slot.child(if key_changed {
                                         badge(
                                             "Update from a new publisher key",
                                             ui::risk_color(orchard_core::Risk::Medium),
@@ -3388,9 +3392,7 @@ impl StoreRoot {
                                             "Update available",
                                             ui::risk_color(orchard_core::Risk::Medium),
                                         )
-                                    }
-                                } else {
-                                    badge("Installed", ui::risk_color(orchard_core::Risk::Low))
+                                    })
                                 })
                                 .child(ui::small_button(
                                     format!("row-open-{action_id}-{}", row_publisher.as_deref().unwrap_or("")),
