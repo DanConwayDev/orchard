@@ -119,6 +119,43 @@ of them: if it is down, new clients still bootstrap through the others.
 Publishers' manifests and clients' defaults list all of them, and
 discovery is the overlap.
 
+## Sizing
+
+Measured on the dev relay (same binary, same config shape): about
+27 MB resident memory, 0.03% CPU, and a database in the hundreds of KB.
+The relay's cost scales with event count (apps, reviews), not client
+count beyond bandwidth, and the database stays small by construction:
+even ten thousand apps at three events each is on the order of 100 MB.
+
+| Resource | Floor | Recommended |
+|----------|-------|-------------|
+| vCPU     | 1     | 2           |
+| RAM      | 1 GB  | 2 GB        |
+| Disk     | 20 GB SSD | 40 GB SSD |
+| Transfer | 1 TB/mo   | 2-5 TB/mo  |
+
+The headroom is for failure modes, not steady-state load:
+
+- **First sync is the bandwidth spike.** A fresh client has no `since`,
+  so it pulls every event in the six kinds (10-100 MB with a real
+  catalog). Steady-state sessions are KB-scale because they are
+  since-gated. Social clients who find the relay through its NIP-11
+  document get empty answers for everything foreign and are throttled
+  by `subscriptions_per_min`.
+- **Reconnect storms.** When the relay restarts, every client's retry
+  backoff fires within seconds; the burst is TLS handshakes against
+  the proxy, which two cores absorb.
+- **Disk-full is the slow failure.** Logs, backups, and retention
+  experiments all want headroom; the relay's failure mode is silence,
+  and a full disk is one of its causes.
+
+Cheap insurance: 512 MB to 1 GB of swap and `Restart=always` in the
+service unit, so an OOM kill self-heals instead of being discovered in
+the morning. Bare binary under systemd or a container both work; SSD
+over spinning disk for the WAL. Back up `nostr.db` plus its WAL on a
+timer, and run `allowlist-probe.py` from a different machine on a
+schedule; its exit code is the alert.
+
 ## Operating notes
 
 - **A sick nostr-rs-relay fails silent.** The known failure mode (seen
