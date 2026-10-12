@@ -6,7 +6,7 @@
 #     --registry localhost:5000/hello
 
 [app]
-id = "com.orchard.Hello"
+id = "rocks.orchard.Hello"
 name = "Orchard Hello"
 summary = "Demo app published through Orchard"
 description = "The Orchard demo: a shell script packaged as a flatpak by orchard-publish, pushed to the publisher's registry, and announced as NIP-82 events. The client verifies the pinned digest before install."
