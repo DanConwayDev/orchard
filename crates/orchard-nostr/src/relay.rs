@@ -24,7 +24,11 @@ use crate::Feed;
 /// discovery is the overlap, and the relays themselves are mailboxes,
 /// not trust roots. Pointer-following (NIP-65) for self-hosting
 /// publishers is a future edge, not part of this floor.
-pub const RENDEZVOUS_RELAYS: &[&str] = &["wss://relay.primal.net", "wss://nos.lol"];
+pub const RENDEZVOUS_RELAYS: &[&str] = &[
+    "wss://relay.primal.net",
+    "wss://nos.lol",
+    "wss://relay.orchard.rocks",
+];
 
 /// Parse an `ORCHARD_RELAYS`-style comma list into URLs, trimming and
 /// dropping empties. No fallback: the caller decides the default.

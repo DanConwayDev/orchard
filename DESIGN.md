@@ -380,8 +380,9 @@ public in its settings after the first push.
 **Relay topology: the rendezvous set (decided).** Nostr relays do not gossip to
 each other, so a publisher and a reader must share at least one relay for anything
 to flow. The model is a small, public, versioned **rendezvous set**
-(`RENDEZVOUS_RELAYS` in orchard-nostr, currently `wss://relay.primal.net` and
-`wss://nos.lol`, the same pair the social reads use): every publisher's manifest
+(`RENDEZVOUS_RELAYS` in orchard-nostr, currently `wss://relay.primal.net`,
+`wss://nos.lol`, and the Orchard-operated `wss://relay.orchard.rocks`, the same
+set the social reads use): every publisher's manifest
 lists at least one of them, every client defaults to all of them, and discovery is
 the overlap. The relays are mailboxes, not trust roots: events are signed, so which
 relay an event came from affects availability, never integrity. The dev loop keeps

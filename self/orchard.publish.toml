@@ -29,5 +29,5 @@ notes = "First self-hosted release: Orchard installing and updating Orchard thro
 tree = "tree"
 
 [publish]
-relays = ["wss://relay.primal.net", "wss://nos.lol"]
+relays = ["wss://relay.primal.net", "wss://nos.lol", "wss://relay.orchard.rocks"]
 tag = "latest"

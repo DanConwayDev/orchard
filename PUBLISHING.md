@@ -103,7 +103,7 @@ notes = "What changed in 1.2.0."        # the release's changelog
 tree = "tree"                           # path to the app tree, relative to this file
 
 [publish]
-relays = ["wss://relay.primal.net", "wss://nos.lol"]   # where the events go
+relays = ["wss://relay.primal.net", "wss://nos.lol", "wss://relay.orchard.rocks"]   # where the events go
 tag = "latest"                          # OCI tag for the manifest push
 author-name = "Your Name"               # optional; signs a Nostr profile (kind 0)
 nip05 = "you@yourdomain.example"        # optional; the verified-address claim
