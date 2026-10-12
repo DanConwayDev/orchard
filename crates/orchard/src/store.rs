@@ -1345,10 +1345,11 @@ impl StoreRoot {
         self.review_posting = true;
         self.review_error = None;
         let app_id = app_id.to_string();
+        let relays = review_relays(&self.settings);
         cx.spawn(async move |this, cx| {
             let posted = cx
                 .background_executor()
-                .spawn(async move { post_review(&reviewer, &app_id, rating, content) })
+                .spawn(async move { post_review(&reviewer, &app_id, rating, content, &relays) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.review_posting = false;
@@ -1517,6 +1518,7 @@ impl StoreRoot {
         let from_reviews = self.signin_for_review;
         let mut reviewer = pending;
         reviewer.name = name.clone();
+        let relays = review_relays(&self.settings);
         cx.spawn(async move |this, cx| {
             let done = cx
                 .background_executor()
@@ -1540,6 +1542,7 @@ impl StoreRoot {
                                         orchard_nostr::KIND_PROFILE as u16,
                                         Vec::new(),
                                         &merged,
+                                        &relays,
                                     ) {
                                         return Err(anyhow::anyhow!(
                                             "profile publish failed: {err:#}"
@@ -7883,18 +7886,36 @@ fn fetch_proof_keys(url: &str) -> Option<Vec<String>> {
 }
 
 /// Sign and send one review event through the signer, then publish it
-/// to the review relays. Blocking: runs on the background pool.
-fn post_review(reviewer: &Reviewer, app_id: &str, rating: f32, content: String) -> anyhow::Result<()> {
+/// to the given relays. Blocking: runs on the background pool.
+fn post_review(
+    reviewer: &Reviewer,
+    app_id: &str,
+    rating: f32,
+    content: String,
+    relays: &[String],
+) -> anyhow::Result<()> {
     let mut tags: Vec<Vec<String>> = vec![vec!["d".into(), app_id.to_string()]];
     tags.push(vec!["rating".into(), format!("{rating:.1}")]);
-    send_signed(reviewer, orchard_nostr::KIND_REVIEW as u16, tags, &content)?;
+    send_signed(
+        reviewer,
+        orchard_nostr::KIND_REVIEW as u16,
+        tags,
+        &content,
+        relays,
+    )?;
     Ok(())
 }
 
-/// Relays to post reviews to: the same list the embedded indexd reads
-/// from (ORCHARD_RELAYS or the rendezvous set).
-fn review_relays() -> Vec<String> {
-    orchard_nostr::relay::relay_urls(std::env::var("ORCHARD_RELAYS").ok().as_deref())
+/// Relays to post reviews to: resolved the way the embedded indexd
+/// resolves its set (ORCHARD_RELAYS, else the settings list with the
+/// required relay pinned in, else the rendezvous set), so a review
+/// lands where the catalog is actually reading.
+fn review_relays(settings: &orchard_core::SettingsHandle) -> Vec<String> {
+    orchard_indexd::resolve_set(
+        &settings.get().event_relays,
+        std::env::var("ORCHARD_RELAYS").ok().as_deref(),
+        &orchard_nostr::relay::relay_urls(None),
+    )
 }
 
 /// Social relays to read the signed-in identity's own contact list
@@ -8048,12 +8069,13 @@ fn save_reviewer(reviewer: &Reviewer) -> anyhow::Result<()> {
 }
 
 /// Sign one event through the signer (NIP-46 `sign_event`) and publish
-/// it to the review relays. Blocking: runs on the background pool.
+/// it to the given relays. Blocking: runs on the background pool.
 fn send_signed(
     reviewer: &Reviewer,
     kind: u16,
     tags: Vec<Vec<String>>,
     content: &str,
+    relays: &[String],
 ) -> anyhow::Result<()> {
     let unsigned = serde_json::json!({
         "pubkey": reviewer.signer_pubkey,
@@ -8071,7 +8093,7 @@ fn send_signed(
         &reviewer.signer_pubkey.parse()?,
         &unsigned,
     )?;
-    for url in review_relays() {
+    for url in relays {
         orchard_nostr::relay::send(&url, std::slice::from_ref(&event))?;
     }
     Ok(())
