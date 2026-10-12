@@ -237,6 +237,7 @@ pub struct StoreRoot {
     channel_menu: Option<gpui::Point<gpui::Pixels>>,
     /// The account dropdown is open, anchored at the click point.
     account_menu: Option<gpui::Point<gpui::Pixels>>,
+    about_menu: Option<gpui::Point<gpui::Pixels>>,
     /// Compose mode: keystrokes go to the review draft, not the search
     /// box or the page's type-to-close. Entered by clicking the compose
     /// box or pressing r on a page; left by Escape or a successful post.
@@ -355,6 +356,7 @@ impl StoreRoot {
             signin_for_review: false,
             channel_menu: None,
             account_menu: None,
+            about_menu: None,
             composing: false,
             review_draft: (None, String::new()),
             review_cursor: 0,
@@ -1470,6 +1472,7 @@ impl StoreRoot {
     /// list and the detail page alike; Escape backs out.
     fn open_settings(&mut self, cx: &mut Context<Self>) {
         self.account_menu = None;
+        self.about_menu = None;
         self.channel_menu = None;
         self.sort_menu = None;
         self.collection_view = None;
@@ -2096,11 +2099,13 @@ impl StoreRoot {
         // Escape; a click away closes it through the overlay -----
         if self.channel_menu.is_some()
             || self.account_menu.is_some()
+            || self.about_menu.is_some()
             || self.sort_menu.is_some()
         {
             if key == "escape" {
                 self.channel_menu = None;
                 self.account_menu = None;
+                self.about_menu = None;
                 self.sort_menu = None;
                 cx.notify();
             }
@@ -2709,6 +2714,7 @@ impl StoreRoot {
                             let open = this.sort_menu.is_some();
                             this.channel_menu = None;
                             this.account_menu = None;
+                            this.about_menu = None;
                             this.sort_menu = if open { None } else { Some(event.position) };
                             cx.stop_propagation();
                             cx.notify();
@@ -5235,7 +5241,32 @@ impl Render for StoreRoot {
                     .border_b_1()
                     .border_color(ui::divider())
                     .bg(ui::panel())
-                    .child(ui::icon("icons/orchard.svg", 22., ui::accent()))
+                    // the mark: an About popover trigger, not a dead
+                    // decoration (version, license, source)
+                    .child(
+                        div()
+                            .id("about-trigger")
+                            .flex_none()
+                            .px_1()
+                            .py_0p5()
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .hover(|style| style.bg(ui::surface()))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, event: &MouseDownEvent, _w, cx| {
+                                    let open = this.about_menu.is_some();
+                                    this.channel_menu = None;
+                                    this.account_menu = None;
+                                    this.sort_menu = None;
+                                    this.about_menu =
+                                        if open { None } else { Some(event.position) };
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                }),
+                            )
+                            .child(ui::icon("icons/orchard.svg", 22., ui::accent())),
+                    )
                     // the search, centered on the window width: an
                     // absolute layer spanning the bar, content centered
                     .child(
@@ -5388,6 +5419,24 @@ impl Render for StoreRoot {
                     // edge; the absolute layer above centers the search
                     .child(div().flex_1())
                     .child(self.render_channel_trigger(filter, cx))
+                    // signed out, settings needs a home: the gear (the
+                    // signed-in menu carries it; never both at once)
+                    .children((self.reviewer.is_none()).then(|| {
+                        div()
+                            .id("settings-trigger")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .hover(|style| style.bg(ui::surface()))
+                            .tooltip(|_window, cx| {
+                                cx.new(|_| TextTooltip("Settings".into())).into()
+                            })
+                            .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
+                                this.open_settings(cx);
+                            }))
+                            .child(ui::icon("icons/gear.svg", 15., ui::text_dim()))
+                    }))
                     .child(self.render_account_trigger(cx)),
             )
             // body: settings, the full app page, or browse (category
@@ -5482,6 +5531,7 @@ impl StoreRoot {
     /// sign-in modal) showing?
     fn any_layer_open(&self) -> bool {
         self.channel_menu.is_some() || self.account_menu.is_some() || self.sort_menu.is_some()
+            || self.about_menu.is_some()
             || self.signin_modal
     }
 
@@ -5505,6 +5555,9 @@ impl StoreRoot {
         if self.account_menu.is_some() {
             layers = layers.child(self.render_account_menu(cx));
         }
+        if self.about_menu.is_some() {
+            layers = layers.child(self.render_about_menu(cx));
+        }
         if self.signin_modal {
             layers = layers.child(self.render_signin_modal(font, cx));
         }
@@ -5518,6 +5571,7 @@ impl StoreRoot {
     fn render_menu_overlays(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         if self.channel_menu.is_none()
             && self.account_menu.is_none()
+            && self.about_menu.is_none()
             && self.sort_menu.is_none()
         {
             return None;
@@ -5532,6 +5586,7 @@ impl StoreRoot {
                     cx.listener(|this, _e: &MouseDownEvent, _w, cx| {
                         this.channel_menu = None;
                         this.account_menu = None;
+                        this.about_menu = None;
                         this.sort_menu = None;
                         cx.notify();
                     }),
@@ -6366,6 +6421,7 @@ impl StoreRoot {
                 cx.listener(|this, event: &MouseDownEvent, _w, cx| {
                     let open = this.channel_menu.is_some();
                     this.account_menu = None;
+                    this.about_menu = None;
                     this.channel_menu = if open { None } else { Some(event.position) };
                     cx.stop_propagation();
                     cx.notify();
@@ -6373,6 +6429,71 @@ impl StoreRoot {
             )
             .child(filter.label().to_string())
             .child(ui::icon("icons/chevron_down.svg", 11., ui::text_dim()))
+            .into_any_element()
+    }
+
+    /// The About popover: the mark's click target. Version, license,
+    /// and the source link, the "what is this app" answer a logo
+    /// click is really asking for.
+    fn render_about_menu(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let anchor = self.about_menu.unwrap_or_default();
+        div()
+            .absolute()
+            .left(anchor.x.max(px(8.)))
+            .top(anchor.y + px(6.))
+            .w(px(230.))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .rounded_sm()
+            .border_1()
+            .border_color(ui::divider())
+            .bg(ui::panel())
+            .p_3()
+            .on_mouse_down(
+                MouseButton::Left,
+                |_e: &MouseDownEvent, _w, cx: &mut gpui::App| cx.stop_propagation(),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(ui::icon("icons/orchard.svg", 26., ui::accent()))
+                    .child(
+                        div()
+                            .text_size(px(ui::TEXT_SIZE_EMPHASIS))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(ui::text())
+                            .child("Orchard"),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(px(ui::TEXT_SIZE))
+                    .text_color(ui::text_dim())
+                    .child(format!("Version {}", env!("CARGO_PKG_VERSION"))),
+            )
+            .child(
+                div()
+                    .text_size(px(ui::TEXT_SIZE))
+                    .text_color(ui::text_dim())
+                    .child("MIT license"),
+            )
+            .child(
+                div()
+                    .id("about-repo")
+                    .mt_1()
+                    .cursor_pointer()
+                    .text_size(px(ui::TEXT_SIZE))
+                    .text_color(ui::accent())
+                    .hover(|style| style.underline())
+                    .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
+                        this.about_menu = None;
+                        cx.open_url("https://github.com/Letdown2491/orchard");
+                    }))
+                    .child("Source repository"),
+            )
             .into_any_element()
     }
 
@@ -6410,6 +6531,7 @@ impl StoreRoot {
                         cx.listener(|this, event: &MouseDownEvent, _w, cx| {
                             let open = this.account_menu.is_some();
                             this.channel_menu = None;
+                            this.about_menu = None;
                             this.account_menu = if open {
                                 None
                             } else {
@@ -6423,10 +6545,22 @@ impl StoreRoot {
                     .child(ui::icon("icons/chevron_down.svg", 11., ui::text_dim()))
                     .into_any_element()
             }
-            None => button("btn-sign-in-header", None, "Sign in", Tone::Quiet)
+            None => div()
+                .id("account-sign-in")
+                .flex()
+                .items_center()
+                .px_2()
+                .py_1()
+                .rounded_sm()
+                .cursor_pointer()
+                .hover(|style| style.bg(ui::surface()))
+                .tooltip(|_window, cx| cx.new(|_| TextTooltip("Sign in".into())).into())
                 .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
                     this.open_signin_modal(false, cx);
                 }))
+                // the ghost avatar: the same slot the signed-in
+                // avatar fills, so identity has one home in the bar
+                .child(ui::icon("icons/person.svg", 15., ui::text_dim()))
                 .into_any_element(),
         }
     }
