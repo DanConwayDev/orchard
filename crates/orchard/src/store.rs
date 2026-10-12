@@ -6490,6 +6490,7 @@ impl StoreRoot {
                     |_e: &MouseDownEvent, _w, cx: &mut gpui::App| cx.stop_propagation(),
                 ).child(
                     div()
+                        .relative()
                         .w(px(260.))
                         .flex()
                         .flex_col()
@@ -6500,6 +6501,26 @@ impl StoreRoot {
                         .border_color(ui::divider())
                         .bg(ui::panel())
                         .p_4()
+                        .child(
+                            div()
+                                .id("about-modal-close")
+                                .absolute()
+                                .top_2()
+                                .right_2()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .w(px(22.))
+                                .h(px(22.))
+                                .rounded_sm()
+                                .cursor_pointer()
+                                .hover(|style| style.bg(ui::surface()))
+                                .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
+                                    this.about_modal = false;
+                                    cx.notify();
+                                }))
+                                .child(ui::icon("icons/close.svg", 12., ui::text_dim())),
+                        )
                         .children(crate::cache::orchard_mark().map(|path| {
                             gpui::img(path).w(px(40.)).h(px(40.))
                         }))
