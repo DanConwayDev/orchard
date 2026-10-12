@@ -4756,6 +4756,29 @@ impl StoreRoot {
     /// The sign-in modal body: the pairing code while it waits, the
     /// optional name question once a signer answered. The chrome
     /// (backdrop, centering) is around it in render_signin_modal.
+    /// The corner X both sign-in phases carry: the same exit the
+    /// backdrop and Escape take, visible instead of learned.
+    fn signin_close(&self, cx: &Context<Self>) -> gpui::Stateful<gpui::Div> {
+        div()
+            .id("signin-modal-close")
+            .absolute()
+            .top_2()
+            .right_2()
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(22.))
+            .h(px(22.))
+            .rounded_sm()
+            .cursor_pointer()
+            .hover(|style| style.bg(ui::surface()))
+            .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
+                this.close_signin();
+                cx.notify();
+            }))
+            .child(ui::icon("icons/close.svg", 12., ui::text_dim()))
+    }
+
     fn render_signin_modal(&mut self, font: gpui::Font, cx: &mut Context<Self>) -> gpui::AnyElement {
         let body = if self.pending_reviewer.is_some() {
             self.render_name_phase(font, cx)
@@ -4817,6 +4840,7 @@ impl StoreRoot {
         let uri_for_click = uri.clone();
         let uri_for_qr_click = uri.clone();
         let mut panel = div()
+            .relative()
             .w(px(440.))
             .flex()
             .flex_col()
@@ -4826,6 +4850,7 @@ impl StoreRoot {
             .border_color(ui::divider())
             .bg(ui::panel())
             .p_4()
+            .child(self.signin_close(cx))
             .child(
                 div()
                     .text_size(px(ui::TEXT_SIZE_EMPHASIS))
@@ -4907,6 +4932,7 @@ impl StoreRoot {
             font,
         );
         div()
+            .relative()
             .w(px(440.))
             .flex()
             .flex_col()
@@ -4916,6 +4942,7 @@ impl StoreRoot {
             .border_color(ui::divider())
             .bg(ui::panel())
             .p_4()
+            .child(self.signin_close(cx))
             .child(
                 div()
                     .text_size(px(ui::TEXT_SIZE_EMPHASIS))
