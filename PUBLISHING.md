@@ -46,11 +46,11 @@ produces everything Orchard needs:
 
 That leaves a build directory whose interesting parts are:
 
-- `build-dir/files/` — the installed app (bin, lib, share)
-- `build-dir/export/` — the desktop file and AppStream metadata
+- `build-dir/files/`: the installed app (bin, lib, share)
+- `build-dir/export/`: the desktop file and AppStream metadata
   `flatpak-builder` extracts from the build; it stays there after
   `build-export`, so nothing needs re-deriving
-- `build-dir/metadata` — the sandbox ini (`[Application]`, `[Context]`,
+- `build-dir/metadata`: the sandbox ini (`[Application]`, `[Context]`,
   `[Session Bus]`) the build declared
 
 Assemble Orchard's tree from exactly those three; skip `var/` (builder
