@@ -178,7 +178,6 @@ fn run() -> Result<()> {
             license: None,
             repository: args.repository.clone(),
             homepage: args.homepage.clone(),
-            developer: None,
         },
     )?;
 

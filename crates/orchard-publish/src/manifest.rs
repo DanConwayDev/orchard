@@ -32,10 +32,6 @@ pub struct AppMeta {
     pub repository: Option<String>,
     /// The project's homepage, published as the `h` tag.
     pub homepage: Option<String>,
-    /// Optional developer claim, published as the `developer` tag:
-    /// the name your project writes under. A claim any listing can
-    /// make, so the store treats it as navigation, never identity.
-    pub developer: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
