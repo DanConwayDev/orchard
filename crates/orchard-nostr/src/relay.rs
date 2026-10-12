@@ -229,7 +229,16 @@ fn handle_frame(text: &str, feed: &Arc<Mutex<Feed>>) -> Result<(bool, bool)> {
 /// Publish signed events to one relay and wait for every OK. A rejection
 /// or notice is a hard error: a relay that silently drops events would
 /// strand the release.
-pub fn send(relay_url: &str, events: &[Event]) -> Result<()> {    let (mut socket, _response) = tungstenite::connect(relay_url)?;
+/// How long `send` waits for the relay's OK per event before giving
+/// up: a sick relay does not error, it hangs (the quanta panic of
+/// 2026-10-11 left this dev relay silently swallowing every verified
+/// event for hours), and a publish that waits forever is a publish
+/// that never reports why.
+const SEND_TIMEOUT: Duration = Duration::from_secs(30);
+
+pub fn send(relay_url: &str, events: &[Event]) -> Result<()> {
+    let (mut socket, _response) = tungstenite::connect(relay_url)?;
+    crate::connect::set_read_timeout(&mut socket, SEND_TIMEOUT);
     for event in events {
         socket.send(Message::text(
             serde_json::json!(["EVENT", event]).to_string(),
@@ -237,7 +246,11 @@ pub fn send(relay_url: &str, events: &[Event]) -> Result<()> {    let (mut socke
     }
     let mut confirmed = 0;
     while confirmed < events.len() {
-        let reply = socket.read()?;
+        let reply = socket.read().map_err(|err| {
+            // a read timeout is the relay going quiet mid-verification:
+            // name the failure instead of hanging the publish
+            anyhow::anyhow!("{relay_url}: no OK within {}s ({err}); relay may be stalled", SEND_TIMEOUT.as_secs())
+        })?;
         let Message::Text(text) = reply else {
             continue;
         };
@@ -545,5 +558,31 @@ mod tests {
         absorb_newest(&mut newest, &stale, Kind::ContactList, &requested);
         assert_eq!(newest[&pk].created_at.as_secs(), 200);
         assert_eq!(requested.len(), 1);
+    }
+
+    /// A relay that accepts the connection and never answers must
+    /// fail the send within the timeout, not hang the publish. Bound
+    /// by a socket connect to a closed port, which errors at once;
+    /// the 30s ceiling only binds against a black-hole address, so
+    /// this test asserts the error path exists and is named.
+    #[test]
+    fn send_to_a_dead_relay_errors_instead_of_hanging() {
+        use crate::events::Listing;
+        use nostr::prelude::Keys;
+        let keys = Keys::generate();
+        let listing = signed(
+            &keys,
+            crate::KIND_APP,
+            "A listing.",
+            vec![("d", "com.example.Hello"), ("f", "linux-x86_64")],
+        );
+        // port 1 on the loopback: nothing listens, connect refuses
+        let started = std::time::Instant::now();
+        let result = send("ws://127.0.0.1:1", std::slice::from_ref(&listing));
+        assert!(result.is_err(), "a dead relay must error");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "the failure must be prompt, not a timeout-length hang"
+        );
     }
 }
