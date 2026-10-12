@@ -579,6 +579,17 @@ opening items because they need the push, the signing secret, and a tag.
       is aggregation, not curation: a spam key's page shows its
       fifty cards, and the composition line stays the flood
       disclosure.
+- [x] The developer page, the same card grid over a different
+      subject: the AppStream `<developer_name>` claim (and the newer
+      `<developer><name>` shape, both parsed; the parser previously
+      skipped `<developer>` wholesale). The name is a claim anyone
+      can make, not an identity, so the header wears no trust
+      furniture: the label alone, "n apps on Flathub", no avatar, no
+      checks, and the entry wording is "Developed by" on the app
+      page (shown only when no publisher key owns the row). Grouping
+      by it is navigation, matching how a reader thinks of
+      Flathub's developer pages; the honest alternative, grouping by
+      repository URL, stays available if the claim proves too noisy.
 - [x] Background-thread hardening, from the one unexplained client
       death (a relay SIGKILL-restart race with a cache clear in
       flight; no log trace, relaunch fixed it). Three defenses: the

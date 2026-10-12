@@ -28,6 +28,10 @@ pub struct AppstreamApp {
     pub release_date: Option<String>,
     /// `<url type="homepage">`, if any.
     pub homepage: Option<String>,
+    /// The developer's display string (`<developer_name>` or the
+    /// newer `<developer><name>`). A claim, not an identity: the
+    /// client groups by it for navigation only.
+    pub developer: Option<String>,
     pub license: Option<String>,
     /// Resolved path of a cached icon on disk (type="cached", width >= 64).
     pub icon_path: Option<PathBuf>,
@@ -182,6 +186,26 @@ pub fn load(path: &Path, icons_root: &Path) -> Result<Vec<AppstreamApp>> {
                                     }
                                     consumed = true;
                                 }
+                                b"developer_name" if depth == comp_depth + 1 => {
+                                    c.developer_name = leaf_text(
+                                        &mut reader, &mut buf, e,
+                                    )?
+                                    .map(String::into_boxed_str);
+                                    consumed = true;
+                                }
+                                b"developer" if depth == comp_depth + 1 => {
+                                    // the newer spec shape: the display
+                                    // name rides a child <name> element
+                                    if c.developer_name.is_none() {
+                                        c.developer_name = first_child_leaf(
+                                            &mut reader, &mut buf, b"name",
+                                        )?
+                                        .map(String::into_boxed_str);
+                                    } else {
+                                        consume_element(&mut reader, &mut buf)?;
+                                    }
+                                    consumed = true;
+                                }
                                 b"url" if depth == comp_depth + 1 => {
                                     // only direct `<url type="…">` children
                                     // count; anything nested is noise
@@ -267,6 +291,44 @@ fn leaf_text(
         return Ok(None);
     }
     consume_element(reader, buf)
+}
+
+/// Consume a balanced element subtree (the caller has taken its Start)
+/// and return the leaf text of its first direct child named `wanted`:
+/// the `<developer><name>` shape, where the developer's display name
+/// rides one level down.
+fn first_child_leaf(
+    reader: &mut quick_xml::Reader<impl BufRead>,
+    buf: &mut Vec<u8>,
+    wanted: &[u8],
+) -> Result<Option<String>> {
+    let mut depth = 0usize;
+    let mut found = None;
+    loop {
+        buf.clear();
+        // into_owned detaches the event from `buf` so leaf_text can
+        // reuse it.
+        let event = reader.read_event_into(buf)?.into_owned();
+        match event {
+            Event::Start(e) => {
+                if depth == 0 && found.is_none() && e.name().as_ref() == wanted {
+                    found = leaf_text(reader, buf, &e)?;
+                } else {
+                    depth += 1;
+                }
+            }
+            Event::End(_) => {
+                if depth == 0 {
+                    // the element's own End, consumed: the caller
+                    // counts this subtree as eaten
+                    return Ok(found);
+                }
+                depth -= 1;
+            }
+            Event::Eof => return Ok(found),
+            _ => {}
+        }
+    }
 }
 
 /// Consume events through the matching End tag and return the element's
@@ -554,6 +616,10 @@ struct Component {
     /// The stored release date is in the future (an upstream
     /// pre-listed release); a past-dated one may still replace it.
     release_date_future: bool,
+    /// `<developer_name>` or the newer `<developer><name>`: the
+    /// developer's display string. A claim, not an identity (no key
+    /// backs it); the client uses it for navigation only.
+    developer_name: Option<Box<str>>,
     homepage: Option<Box<str>>,
     categories: Vec<String>,
     cached_icon_name: Option<String>,
@@ -606,6 +672,7 @@ impl Component {
         if self.description.is_none() {
             self.description = self.description_fallback.take();
         }
+        let developer = self.developer_name.take().map(String::from);
         let icon_path = self
             .cached_icon_name
             .take()
@@ -638,6 +705,7 @@ impl Component {
             version: self.version.take().map(String::from),
             release_date: self.release_date.take().map(String::from),
             homepage: self.homepage.take().map(String::from),
+            developer,
             license: self.license.take().map(String::from),
             icon_path,
             icon_url: self.icon_url.take(),
@@ -750,6 +818,7 @@ mod tests {
     <id>com.example.Minimal</id>
     <name>Minimal</name>
     <summary>Just the basics</summary>
+    <developer_name>Minimal Team</developer_name>
   </component>
   <component type="desktop-application">
     <id>com.example.Quoted</id>
@@ -806,6 +875,8 @@ mod tests {
         // and the developer name must not clobber the app name.
         assert_eq!(full.id, "com.example.Full");
         assert_eq!(full.name, "Full App");
+        // The developer rides the newer <developer><name> shape here.
+        assert_eq!(full.developer.as_deref(), Some("Example Team"));
         // Source screenshot first, then thumbnails widest first.
         assert_eq!(
             full.screenshots,
@@ -822,6 +893,8 @@ mod tests {
         assert!(minimal.version.is_none());
         assert!(minimal.release_date.is_none());
         assert!(minimal.homepage.is_none());
+        // the classic <developer_name> shape
+        assert_eq!(minimal.developer.as_deref(), Some("Minimal Team"));
 
         // Text starting with an entity reference must not be lost
         // (quick-xml emits the reference as a separate event), and

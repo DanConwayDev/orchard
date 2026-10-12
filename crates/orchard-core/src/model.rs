@@ -236,6 +236,9 @@ pub struct StoreApp {
     pub release_date: Option<String>,
     /// Project homepage URL (reviewed channel or the listing's `h` tag).
     pub homepage: Option<String>,
+    /// The developer's display string from AppStream (reviewed
+    /// channel). A claim, not an identity: navigation only.
+    pub developer: Option<String>,
     /// Project source repository URL (publisher channel, `repository` tag).
     pub repository: Option<String>,
     pub license: Option<String>,
@@ -271,6 +274,7 @@ impl StoreApp {
             version: app.version.clone(),
             release_date: app.release_date.clone(),
             homepage: app.homepage.clone(),
+            developer: app.developer.clone(),
             repository: None,
             license: app.license.clone(),
             source: Source::Reviewed,
@@ -301,6 +305,7 @@ impl StoreApp {
             release_date: (app.published_at > 0)
                 .then(|| crate::appstream::iso_date(app.published_at)),
             homepage: app.homepage.clone(),
+            developer: None,
             repository: app.repository.clone(),
             license: None,
             source: Source::Publisher,

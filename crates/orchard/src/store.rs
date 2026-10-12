@@ -271,11 +271,11 @@ pub struct StoreRoot {
     shot_handle: ScrollHandle,
     /// Scroll handle for the detail page (reset on app switch).
     page_scroll: ScrollHandle,
-    /// The open publisher page: the pubkey whose page shows. The app
-    /// page underneath stays mounted; Escape pops back to it.
-    publisher_view: Option<String>,
-    /// The publisher page's scroll.
-    publisher_scroll: ScrollHandle,
+    /// The open collection page: the subject whose page shows. The
+    /// app page underneath stays mounted; Escape pops back to it.
+    collection_view: Option<CollectionPage>,
+    /// The collection page's scroll.
+    collection_scroll: ScrollHandle,
     /// The enlarged screenshot (its url), over a dimmed page.
     lightbox: Option<String>,
     /// Scroll handle for the virtualized list (keyboard reveal).
@@ -365,8 +365,8 @@ impl StoreRoot {
             search_layout: None,
             shot_handle: ScrollHandle::new(),
             page_scroll: ScrollHandle::new(),
-            publisher_view: None,
-            publisher_scroll: ScrollHandle::new(),
+            collection_view: None,
+            collection_scroll: ScrollHandle::new(),
             lightbox: None,
             list_handle: UniformListScrollHandle::new(),
         };
@@ -579,12 +579,11 @@ impl StoreRoot {
         cx.notify();
     }
 
-    /// Open the publisher page: everything one key publishes. The
-    /// key is the identity, not the display name. The app page (if
-    /// any) stays mounted underneath; Escape returns to it.
-    fn open_publisher(&mut self, key: &str, cx: &mut Context<Self>) {
-        self.publisher_view = Some(key.to_string());
-        self.publisher_scroll.set_offset(Point::new(px(0.), px(0.)));
+    /// Open a collection page. The app page (if any) stays mounted
+    /// underneath; Escape returns to it.
+    fn open_collection(&mut self, page: CollectionPage, cx: &mut Context<Self>) {
+        self.collection_view = Some(page);
+        self.collection_scroll.set_offset(Point::new(px(0.), px(0.)));
         cx.notify();
     }
 
@@ -1472,7 +1471,7 @@ impl StoreRoot {
         self.account_menu = None;
         self.channel_menu = None;
         self.sort_menu = None;
-        self.publisher_view = None;
+        self.collection_view = None;
         self.close_signin();
         if self.page_open {
             self.close_page(cx);
@@ -2281,10 +2280,10 @@ impl StoreRoot {
                 self.confirm_update = None;
                 if self.lightbox.is_some() {
                     self.lightbox = None;
-                } else if self.publisher_view.is_some() {
+                } else if self.collection_view.is_some() {
                     // one level back: the app page underneath (if any)
                     // is still mounted
-                    self.publisher_view = None;
+                    self.collection_view = None;
                 } else if self.page_open {
                     self.close_page(cx);
                 } else if self.anchor.is_some() {
@@ -2353,14 +2352,14 @@ impl StoreRoot {
             }
             "space" => {
                 // typing means back to the list, from either level
-                self.publisher_view = None;
+                self.collection_view = None;
                 if self.page_open {
                     self.close_page(cx);
                 }
                 self.insert_text(" ");
             }
             other if other.chars().count() == 1 && !ctrl => {
-                self.publisher_view = None;
+                self.collection_view = None;
                 if self.page_open {
                     self.close_page(cx);
                 }
@@ -3197,10 +3196,32 @@ impl StoreRoot {
                         .cursor_pointer()
                         .hover(|style| style.text_color(ui::accent()))
                         .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
-                            this.open_publisher(&key, cx);
+                            this.open_collection(CollectionPage::Publisher(key.clone()), cx);
                         }))
                         .child(label)
                 }))
+                // the reviewed channel's developer claim: navigation,
+                // not identity, so the wording says "developed by" and
+                // only shows when no publisher key owns the row
+                .children(app.developer.as_ref().filter(|_| app.publisher.is_none()).map(
+                    |developer| {
+                        let name = developer.clone();
+                        let label = format!("Developed by {name}.");
+                        div()
+                            .id("developed-by")
+                            .flex()
+                            .gap_1()
+                            .items_center()
+                            .text_size(px(ui::TEXT_SIZE))
+                            .text_color(ui::text())
+                            .cursor_pointer()
+                            .hover(|style| style.text_color(ui::accent()))
+                            .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
+                                this.open_collection(CollectionPage::Developer(name.clone()), cx);
+                            }))
+                            .child(label)
+                    },
+                ))
                 // continuity: this app id was published by another key
                 // before this client ever saw this one; a signed
                 // handover from that key reads calmer than an
@@ -3787,6 +3808,17 @@ fn is_publisher_review(review: &orchard_core::Review, publisher: Option<&str>) -
     publisher == Some(review.pubkey.as_str())
 }
 
+/// The collection page's subject. Both variants share the card
+/// grid; they differ in what the header may claim: a Nostr key is
+/// an identity (the proof and continuity facts attach to it), while
+/// an AppStream developer name is a claim anyone can make, so the
+/// developer header wears no trust furniture.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CollectionPage {
+    Publisher(String),
+    Developer(String),
+}
+
 /// The publisher page's rows: every listing one key publishes, in
 /// the same arrived-only recency rank the lists use. A page is
 /// aggregation, not curation: a key with fifty apps shows fifty
@@ -3796,6 +3828,19 @@ fn publisher_rows(apps: &[StoreApp], key: &str, today: &str) -> Vec<usize> {
         .iter()
         .enumerate()
         .filter(|(_, app)| app.publisher.as_deref() == Some(key))
+        .map(|(index, _)| index)
+        .collect();
+    rows.sort_by(|&a, &b| date_order(&apps[a], &apps[b], today));
+    rows
+}
+
+/// The developer page's rows: every reviewed app whose AppStream
+/// claims this developer name. The name is navigation, not identity.
+fn developer_rows(apps: &[StoreApp], developer: &str, today: &str) -> Vec<usize> {
+    let mut rows: Vec<usize> = apps
+        .iter()
+        .enumerate()
+        .filter(|(_, app)| app.developer.as_deref() == Some(developer))
         .map(|(index, _)| index)
         .collect();
     rows.sort_by(|&a, &b| date_order(&apps[a], &apps[b], today));
@@ -4303,37 +4348,56 @@ impl StoreRoot {
             .into_any_element()
     }
 
-    /// The publisher page: everything one key publishes, as a card
-    /// grid. The key is the identity; the header carries what the
-    /// client knows about it, the cards carry its apps in the same
-    /// recency rank the lists use. Opened from an app page's
-    /// "Published by" row, which stays mounted underneath.
-    fn render_publisher(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let Some(key) = self.publisher_view.clone() else {
+    /// The collection page: one subject's apps as a card grid. The
+    /// cards carry its apps in the same recency rank the lists use.
+    /// Opened from an app page's "Published by" (a key) or
+    /// "Developed by" (an AppStream claim) row, which stays mounted
+    /// underneath.
+    fn render_collection(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let Some(page) = self.collection_view.clone() else {
             return div().into_any_element();
         };
         let today = orchard_core::appstream::today_iso();
-        let rows = publisher_rows(&self.apps, &key, &today);
+        let rows = match &page {
+            CollectionPage::Publisher(key) => publisher_rows(&self.apps, key, &today),
+            CollectionPage::Developer(label) => developer_rows(&self.apps, label, &today),
+        };
+        let count_line = match &page {
+            CollectionPage::Publisher(_) => {
+                format!("{} app{} on Orchard", rows.len(), if rows.len() == 1 { "" } else { "s" })
+            }
+            CollectionPage::Developer(_) => {
+                format!("{} app{} on Flathub", rows.len(), if rows.len() == 1 { "" } else { "s" })
+            }
+        };
 
-        // the header identity: profile name over the truncated npub,
-        // the address check when the domain backed the claim
-        let profile = self.profiles.get(&key);
-        let name = profile
-            .and_then(|p| p.name.clone())
-            .unwrap_or_else(|| short_npub(&key));
-        let nip05_note = self.verified_nip05(&key).and_then(|claim| {
-            split_nip05(&claim)
-                .map(|(local, domain)| format!("{domain} lists {local} as this key"))
-        });
-        let picture = profile.and_then(|p| p.picture.clone());
-        self.ensure_fetched(
-            picture.iter().cloned().collect::<Vec<String>>(),
-            cx,
-        );
-        let avatar_path = picture
-            .as_deref()
-            .and_then(|url| self.fetched.get(url))
-            .and_then(|f| f.as_deref());
+        // the header per subject: a publisher key is an identity, so
+        // the profile name, the address check, and the avatar all
+        // attach to it. A developer name is a claim anyone can make:
+        // the label alone, no trust furniture.
+        let (name, nip05_note, avatar_path) = match &page {
+            CollectionPage::Publisher(key) => {
+                let profile = self.profiles.get(key);
+                let name = profile
+                    .and_then(|p| p.name.clone())
+                    .unwrap_or_else(|| short_npub(key));
+                let nip05_note = self.verified_nip05(key).and_then(|claim| {
+                    split_nip05(&claim)
+                        .map(|(local, domain)| format!("{domain} lists {local} as this key"))
+                });
+                let picture = profile.and_then(|p| p.picture.clone());
+                self.ensure_fetched(
+                    picture.iter().cloned().collect::<Vec<String>>(),
+                    cx,
+                );
+                let avatar_path = picture
+                    .as_deref()
+                    .and_then(|url| self.fetched.get(url))
+                    .and_then(|f| f.as_deref());
+                (name, nip05_note, avatar_path)
+            }
+            CollectionPage::Developer(label) => (label.clone(), None, None),
+        };
 
         // the cards: cloned strings first, the builder borrows after
         struct Card {
@@ -4390,7 +4454,7 @@ impl StoreRoot {
                         cx.listener(move |this, _e: &ClickEvent, _w, cx| {
                             // the page is about THIS row of the twin pair
                             this.selected_publisher = publisher.clone();
-                            this.publisher_view = None;
+                            this.collection_view = None;
                             this.open_page(&app_id, cx);
                         })
                     })
@@ -4457,7 +4521,7 @@ impl StoreRoot {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .track_scroll(&self.publisher_scroll)
+                    .track_scroll(&self.collection_scroll)
                     .child(
                         div()
                             .flex()
@@ -4479,7 +4543,7 @@ impl StoreRoot {
                                     .text_color(ui::accent())
                                     .hover(|style| style.text_color(ui::text()))
                                     .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
-                                        this.publisher_view = None;
+                                        this.collection_view = None;
                                         cx.notify();
                                     }))
                                     .child(ui::icon("icons/arrow_left.svg", 13., ui::accent()))
@@ -4536,11 +4600,7 @@ impl StoreRoot {
                                                 div()
                                                     .text_size(px(ui::TEXT_SIZE))
                                                     .text_color(ui::text_dim())
-                                                    .child(format!(
-                                                        "{} app{} on Orchard",
-                                                        cards.len(),
-                                                        if cards.len() == 1 { "" } else { "s" }
-                                                    )),
+                                                    .child(count_line),
                                             ),
                                     ),
                             )
@@ -5205,8 +5265,8 @@ impl Render for StoreRoot {
             // chips + virtualized list)
             .child(if self.settings_open {
                 self.render_settings(window.text_style().font(), cx)
-            } else if self.publisher_view.is_some() {
-                self.render_publisher(cx)
+            } else if self.collection_view.is_some() {
+                self.render_collection(cx)
             } else if page_open {
                 match selected {
                     Some(app) => self.render_page(app, window.text_style().font(), cx).into_any_element(),
@@ -7286,6 +7346,22 @@ mod tests {
         let rows = publisher_rows(&apps, "k", "2026-10-11");
         let names: Vec<&str> = rows.iter().map(|&i| apps[i].name.as_str()).collect();
         // only this key's apps, the newer release first
+        assert_eq!(names, vec!["Beta", "Alpha"]);
+    }
+
+    #[test]
+    fn developer_rows_group_the_appstream_claim() {
+        let mut first = dated_app("Alpha", Some("2026-01-01"));
+        first.developer = Some("Team".into());
+        let mut second = dated_app("Beta", Some("2026-03-01"));
+        second.developer = Some("Team".into());
+        let mut other = dated_app("Gamma", Some("2026-02-01"));
+        other.developer = Some("Other Team".into());
+        let apps = vec![first, second, other];
+
+        let rows = developer_rows(&apps, "Team", "2026-10-11");
+        let names: Vec<&str> = rows.iter().map(|&i| apps[i].name.as_str()).collect();
+        // only apps claiming this exact name, the newer release first
         assert_eq!(names, vec!["Beta", "Alpha"]);
     }
 
