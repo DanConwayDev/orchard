@@ -13,7 +13,7 @@
 # (curl -s https://<host>/ with Accept: application/nostr+json).
 relay_url = "wss://orchard.example.com/"
 name = "orchard"
-description = "Orchard app-store relay: listings, releases, assets, reviews, migrations, profiles."
+description = "Relay for Orchard, a permissionless Flatpak app store: signed app listings, releases, assets, reviews, and key migrations. Admissions are restricted to Orchard event kinds; there is no social feed here."
 #pubkey = "<32-byte hex of the operator's admin key>"
 #contact = "mailto:operator@example.com"
 
