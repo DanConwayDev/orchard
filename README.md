@@ -30,8 +30,9 @@ client, not a gatekeeper.
   GNOME Software and Discover.
 - **Settings apply live.** Channel visibility, relay sets, update
   cadence, and privacy toggles live on a settings page (the account
-  menu); edits persist to `~/.config/orchard/settings.json` and take
-  effect immediately, no restart.
+  menu; a gear on the toolbar when signed out); edits persist to
+  `~/.config/orchard/settings.json` and take effect immediately, no
+  restart.
 
 ## Status
 

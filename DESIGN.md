@@ -21,6 +21,8 @@ client, not a gatekeeper.**
 | Language / UI | Rust end-to-end; GPUI `0.2` from crates.io |
 | Bootstrap | Client-first MVP; distribute Orchard itself as a `.flatpak` bundle + `orchard://` links |
 | Build | Podman container on the atomic host (see "Build environment") |
+| Trust grouping | Flathub listings group by the developer claim (navigation); Orchard listings group by publisher key only: the publisher page is "everything by this team". Orchard listings carry no developer claim |
+| Trust scoring | No reputation scores and no WoT-as-a-service (DVM) integration: trust renders as facts qualified by the personal graph, never as computed judgments |
 
 ## What we take from each project
 
@@ -311,12 +313,14 @@ review rows plus a circle-only aggregate; distance 2 later via indexd crawling
 reviewer kind 3s.
 
 **M6, header slice (built).** The top bar is the mark (a single-color orchard tree,
-the wordmark dropped), the search box centered across the full window width (an
-absolute layer spanning the bar), and two controls on the right: the channel
-dropdown (All / Flathub / Orchard / Installed replace the chip row; it stays
-visible on app pages) and the account control ("Sign in" when signed out; a person
-icon when signed in, the profile picture once avatars are fetched; the name still
-shows in the session menu). Dropdowns are window-level layers, split by paint
+the wordmark dropped; a click opens the About modal), the search box centered
+across the full window width (an absolute layer spanning the bar), and two
+controls on the right: the channel dropdown (All / Flathub / Orchard / Installed
+replace the chip row; it stays visible on app pages) and the account control
+(signed out: a ghost person glyph opening the sign-in modal directly plus a gear
+for Settings, since there is no session menu to hold it; signed in: the profile
+picture once avatars are fetched, opening the session menu that carries Settings;
+never a gear and a menu at once). Dropdowns are window-level layers, split by paint
 order: the click-away overlay paints BEHIND the content (its close handler runs
 after every content handler in the bubble chain) and the panel paints after
 everything, anchored at the click point, swallowing the mouse down so the
@@ -571,8 +575,9 @@ opening items because they need the push, the signing secret, and a tag.
 - [x] The publisher page: everything one key publishes, as a card
       grid. The key is the identity, not the display name; the header
       carries the avatar, the profile name (truncated npub fallback),
-      the NIP-05 check when the domain backed the claim, and a quiet
-      "n apps on Orchard". The cards are Flathub-style: icon, name,
+      the NIP-05 check when the domain backed the claim, the
+      truncated npub as its own line (a click copies the full key),
+      and a quiet "n apps on Orchard". The cards are Flathub-style: icon, name,
       one-line summary, the honest date note ("updated" only once
       true), the repo check; the same arrived-only recency rank the
       lists use, no new ordering. Entry is the app page's "Published
@@ -593,7 +598,13 @@ opening items because they need the push, the signing secret, and a tag.
       skipped `<developer>` wholesale). The name is a claim anyone
       can make, not an identity, so the header wears no trust
       furniture: the label alone, "n apps on Flathub", no avatar, no
-      checks, and the entry wording is "Developed by" on the app
+      checks, and one line saying what the page is ("A developer
+      name is a claim any listing can make; the publisher's key is
+      the identity"). Orchard listings make no developer claim at
+      all: the publisher's page is their "everything by this team",
+      key-based and unspoofable, so a stranger cannot claim a
+      trusted team's name onto a page its readers reach from a
+      trusted app. The entry wording is "Developed by" on the app
       page (shown only when no publisher key owns the row). Grouping
       by it is navigation, matching how a reader thinks of
       Flathub's developer pages; the honest alternative, grouping by
@@ -652,6 +663,9 @@ opening items because they need the push, the signing secret, and a tag.
       building strings, the refresh fingerprint borrows instead of
       deep-cloning every publisher row, and a collapsed reviews
       section borrows its aggregate instead of cloning the list.
+      The toolbar mark is one embedded PNG (the real raster from
+      `assets/`) written beside the QR once and exempt from the
+      eviction cap, so a full cache never blanks the identity.
 - [x] Client relay configuration, as a full settings page: Sources (channel
       visibility switches, the channel the store opens on), Relays (the event
       and social sets, editable rows with add, remove, and a reset to the
@@ -672,6 +686,26 @@ opening items because they need the push, the signing secret, and a tag.
       relay threads so everything re-delivers. Trust-relevant behavior is
       deliberately absent from settings: digest verification, signature
       checks, and the two-press install confirm are not configurable, ever.
+- [x] Chrome exits and the About modal. The mark's click is the About
+      surface (the mark at 40px, the version, the MIT license, the
+      source repository link), a centered modal over a dimmed
+      backdrop, the shape the desktop trains with Help, About. Both
+      modals carry a corner X in the icon set's stroke style: the
+      exit is visible instead of learned, beside click-away and
+      Escape. The key handler reads modal above menu (an open modal
+      swallows everything but Escape; a click away closes it through
+      the backdrop), and no menu and modal can coexist since every
+      trigger closes the others. The settings page carries the back
+      row the other full pages have; Escape kept its job, but a page
+      should not hide its exit behind a key.
+- [x] The publisher header carries the key. The truncated npub sits
+      under the profile name and a click copies the full npub: the
+      pairing URI already copied itself on click, and the identifier
+      a key-migration check needs verbatim did not. The line reads
+      "Copied." for a beat, then reverts; the revert timer clears
+      only while the copy is still that key, so racing two
+      publishers leaves the second's word up instead of killing it
+      early. Plain color, accent hover, accent while copied.
 
 ## Risks / open questions
 
