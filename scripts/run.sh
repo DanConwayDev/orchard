@@ -10,4 +10,10 @@ export LD_LIBRARY_PATH="$PWD/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 # in your environment to exercise the shipped default (the public
 # rendezvous set) instead.
 export ORCHARD_RELAYS="${ORCHARD_RELAYS:-ws://127.0.0.1:8008}"
-exec ./target/release/orchard "$@"
+# exec would lose it: the exit status is the only forensic trace of
+# a silent death. 0 is a clean exit (an in-code path to hunt), 137
+# SIGKILL, 143 SIGTERM (relaunch housekeeping), 139 a segfault.
+status=0
+./target/release/orchard "$@" || status=$?
+echo "orchard exited: $status" >&2
+exit "$status"

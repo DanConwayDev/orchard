@@ -612,6 +612,21 @@ opening items because they need the push, the signing secret, and a tag.
       stays unexplained (no panic profile, no OOM, no trace); the
       hardening converts every plausible mechanism from a silent
       death into a logged, self-healing event.
+- [x] The death investigated after the fact, with the journal as the
+      witness: no kernel OOM kill, no systemd-oomd action (oomd logs
+      every kill; the box's entries are only service restarts), no
+      segfault or general-protection fault in the kernel log, and no
+      `process::exit` or `abort` anywhere in the client. Core dumps
+      are disabled system-wide (`core_pattern` pipes to
+      `/bin/false`), so their absence proves nothing. What survives
+      is an external signal: the observed facts (silent vanish, log
+      simply stops) fit SIGTERM from the session's own relaunch
+      housekeeping exactly as well as the assumed SIGKILL, and the
+      relay-restart timing was coincidence, not cause. The loop is
+      now closed mechanically: run.sh no longer execs the binary, it
+      waits and appends "orchard exited: N" to the smoke log, so the
+      next death self-identifies (0 clean, 137 SIGKILL, 143 SIGTERM,
+      139 segfault) instead of requiring a hypothesis.
 - [x] Client relay configuration, as a full settings page: Sources (channel
       visibility switches, the channel the store opens on), Relays (the event
       and social sets, editable rows with add, remove, and a reset to the
