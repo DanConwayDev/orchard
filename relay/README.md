@@ -156,6 +156,30 @@ over spinning disk for the WAL. Back up `nostr.db` plus its WAL on a
 timer, and run `allowlist-probe.py` from a different machine on a
 schedule; its exit code is the alert.
 
+### Below the floor: a 0.25 vCPU / 256 MB / 5 GB box
+
+The relay itself is measured at 27 MB resident, so a very small box
+works, with adjustments:
+
+- **Swap is mandatory** (512 MB) plus `Restart=always`. There is no
+  headroom at this size without it.
+- **Shrink the queue knobs** in `[limits]`: `broadcast_buffer` 1024
+  (default 16384) and `event_persist_buffer` 512 (default 4096). Deep
+  event queues buy nothing at the capped write rate and are the one
+  place the relay can balloon memory under burst.
+- **Run one process, not two.** Either terminate TLS in front (a CDN
+  that proxies `wss://` to the origin over plain ws) so the box runs
+  nothing but the relay, or terminate locally with nginx (lighter than
+  Caddy's Go runtime) and prefer the bare binary under systemd over a
+  container.
+- **Disk discipline**: cap the journal, and send backups off-box;
+  5 GB has no room for local copies, and local copies are not backups
+  anyway.
+
+Move up when steady RSS passes about 70% of RAM, disk passes about
+60%, or first syncs visibly slow: those are the signs the ecosystem
+outgrew the box.
+
 ## Operating notes
 
 - **A sick nostr-rs-relay fails silent.** The known failure mode (seen
