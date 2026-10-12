@@ -250,13 +250,20 @@ registrar credential it effectively is.
 ## Rotating keys
 
 Rotation is a statement from your OLD key (kind 30066), not a server
-account change. The sequence:
+account change. The `migrate` tool ships in the repo
+(`crates/orchard-nostr/examples/migrate.rs`; build it with
+`./scripts/build.sh build --release --package orchard-nostr --example
+migrate`, the binary lands in `target/release/examples/`). The
+sequence:
 
 1. Generate the successor key and set it up as the new `ORCHARD_NSEC`.
 2. From the old key, sign the migration naming the successor:
 
-       migrate --nsec <old-key> com.example.App <successor-pubkey-or-npub>
+       migrate --nsec <old-key> --relay wss://relay.primal.net com.example.App <successor-pubkey-or-npub>
 
+   The relay flag matters: a migration only reaches clients through
+   the relays your readers use, and the tool's default relay is the
+   local dev one. Repeat per relay if your listing's relays differ.
 3. Publish the next release with the new key. Once the successor's own
    listing exists, the old row steps aside and clients show one listing,
    now owned by the new key.
@@ -276,10 +283,28 @@ else in the system can be forced to accept it again. Guidance:
 
 ## Media
 
-Icons and screenshots are plain URLs in the listing (`icon`, `image`
-tags). Host them wherever you host the rest of your project: your site,
-your forge, any blob server. Orchard runs no media service and proxies no
-bytes; the client fetches them directly into a local cache.
+Icons are plain URLs in the listing (the `icon` tag). Host them wherever
+you host the rest of your project: your site, your forge, any blob
+server. Orchard runs no media service and proxies no bytes; the client
+fetches them directly into a local cache.
+
+Icons: a PNG URL the listing's `icon` tag names. The list, the page
+header, and the installed app's launcher each resolve icons
+independently, so host one image that reads at 40 to 128 pixels; 512
+square PNG is the safe choice. (The launcher icon is separate: it rides
+inside the artifact's `export/share/icons/hicolor/...`, not the
+listing.)
+
+Screenshots: the listing does not carry them yet. A publisher app's
+page shows no screenshot strip today; reviewed (Flathub) apps get
+theirs from AppStream. Plan the `image` tag for a future release.
+
+### PNG, not SVG
+
+The listing icon must be a raster (PNG) URL. Fetched icons land in the
+client's disk cache under content-hash names with no file extension,
+and an SVG behind such a name does not render. Ship the SVG in your
+repository for reuse, point the listing at the PNG.
 
 ## A good release, checklist
 
@@ -288,10 +313,28 @@ bytes; the client fetches them directly into a local cache.
 - [ ] `platforms` lists every arch this tag actually builds.
 - [ ] `metadata` ini matches the sandbox the app really needs; the page
       shows it verbatim.
+- [ ] Icon is a PNG URL (see Media above) that resolves publicly.
 - [ ] Dry run first: `--skip-relays --registry localhost:5000/...` against
-      a throwaway registry, then the real run.
+      a throwaway registry, then the real run. (Orchard's own dry run:
+      the demo registry at `https://localhost:5000/orchard` and the dev
+      relay `ws://127.0.0.1:8008`, per DESIGN.md's local loop.)
 - [ ] Run with `--prove` (and a `GITHUB_TOKEN` with `contents: write`)
       so the repository link verifies in clients.
 - [ ] Profile published once (`author-name`, `nip05`) and only re-signed
       when it changes.
 - [ ] Tag pushed: `v*` is the publish switch; branch pushes publish nothing.
+
+## After the first publish
+
+Two settings-only steps, both easy to miss:
+
+- **ghcr packages are private by default.** Flip yours public in the
+  package's settings, or clients cannot pull the artifact.
+- **The proof file only resolves from a public repo.** A private
+  repository's raw URL does not serve `orchard.txt`, so the client
+  honestly shows unverified until the repo is public.
+
+Then verify from the outside, the way a client would:
+
+    curl https://raw.githubusercontent.com/<you>/<repo>/HEAD/orchard.txt
+    curl -s https://<relay>/ | grep 32267   # or any Nostr query tool

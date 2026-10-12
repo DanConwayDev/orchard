@@ -38,8 +38,9 @@ client, not a gatekeeper.
 Early, pre-release MVP. The full loop works end to end against local
 infrastructure: publish, discover, verify, install, update, review.
 Multi-arch (x86_64 and aarch64) is built and the first public release
-lands with the `v0.1.0` tag. `DESIGN.md` is the architecture record with
-the milestone history.
+lands with the `v0.1.0` tag (tag and push it; CI does the rest, then
+flip the ghcr package public). `DESIGN.md` is the architecture record
+with the milestone history.
 
 ## Try it (Fedora atomic host, x86_64)
 
@@ -48,11 +49,32 @@ The host has no toolchain; everything builds in a container via
 
     ./scripts/build.sh check
     ./scripts/build.sh build --release
-    ./target/release/orchard
+    ./scripts/run.sh
+
+(Run through `run.sh`, not the binary directly: it sets the library
+path the GPUI shell needs and pins the dev relay.)
 
 Out of the box the client browses and installs the real Flathub catalog.
 The Orchard channel lights up when a relay and a publisher exist; see
-`PUBLISHING.md` to become one.
+`PUBLISHING.md` to become one. The first public release lands with the
+`v0.1.0` tag; until then the Orchard channel is a development fixture
+(DESIGN.md describes the local loop).
+
+## Self-publishing
+
+Orchard publishes itself. `self/orchard.publish.toml` is the manifest,
+`self/tree/` is the app tree (its `assemble.sh` drops the built binary
+into `files/bin`; the metadata, desktop file, and launcher icon are
+committed beside it), and `self-publish.yml` is the workflow that ties
+it together. The dry run is the same manifest against the local
+registry and relay; the real run is the version tag, and nothing else.
+
+**Never run orchard-publish on `self/orchard.publish.toml` bare**: the
+manifest's relay list is the public rendezvous set, so a bare run is a
+real publish. The local dry run must override both:
+
+    ORCHARD_NSEC=<key> ./target/release/orchard-publish self/orchard.publish.toml \
+      --registry https://localhost:5000/orchard --relays ws://127.0.0.1:8008
 
 ## Layout
 
@@ -65,7 +87,9 @@ The Orchard channel lights up when a relay and a publisher exist; see
 - `crates/orchard`: the GPUI client.
 - `crates/orchard-publish`: the publisher CLI (`PUBLISHING.md`).
 - `demo/`: a demo app tree and manifest for the local fixture.
-- `self/`: Orchard publishing itself, and its CI workflow.
+- `self/`: Orchard publishing itself (manifest, app tree, assemble
+  script), and its CI workflow.
+- `assets/`: the Orchard icon (listing and launcher rasters).
 
 ## Docs
 
