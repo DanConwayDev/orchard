@@ -2954,9 +2954,7 @@ impl StoreRoot {
                 .justify_center()
                 .gap_2()
                 .bg(ui::inset())
-                // the sprout: nothing planted yet, in the mark's own
-                // vocabulary; the magnifier belongs to search states
-                .child(ui::icon("icons/sprout.svg", 20., ui::text_dim()))
+                .child(ui::icon("icons/search.svg", 20., ui::text_dim()))
                 .child(
                     div()
                         .text_size(px(ui::TEXT_SIZE_EMPHASIS))
