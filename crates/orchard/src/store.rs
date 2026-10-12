@@ -271,6 +271,11 @@ pub struct StoreRoot {
     shot_handle: ScrollHandle,
     /// Scroll handle for the detail page (reset on app switch).
     page_scroll: ScrollHandle,
+    /// The open publisher page: the pubkey whose page shows. The app
+    /// page underneath stays mounted; Escape pops back to it.
+    publisher_view: Option<String>,
+    /// The publisher page's scroll.
+    publisher_scroll: ScrollHandle,
     /// The enlarged screenshot (its url), over a dimmed page.
     lightbox: Option<String>,
     /// Scroll handle for the virtualized list (keyboard reveal).
@@ -360,6 +365,8 @@ impl StoreRoot {
             search_layout: None,
             shot_handle: ScrollHandle::new(),
             page_scroll: ScrollHandle::new(),
+            publisher_view: None,
+            publisher_scroll: ScrollHandle::new(),
             lightbox: None,
             list_handle: UniformListScrollHandle::new(),
         };
@@ -572,10 +579,18 @@ impl StoreRoot {
         cx.notify();
     }
 
+    /// Open the publisher page: everything one key publishes. The
+    /// key is the identity, not the display name. The app page (if
+    /// any) stays mounted underneath; Escape returns to it.
+    fn open_publisher(&mut self, key: &str, cx: &mut Context<Self>) {
+        self.publisher_view = Some(key.to_string());
+        self.publisher_scroll.set_offset(Point::new(px(0.), px(0.)));
+        cx.notify();
+    }
+
     /// Open the detail page for an app and queue its remote images
     /// (icon fallback and screenshots) for the disk cache.
-    fn open_page(&mut self, app_id: &str, cx: &mut Context<Self>) {
-        let is_new = self.selected.as_deref() != Some(app_id);
+    fn open_page(&mut self, app_id: &str, cx: &mut Context<Self>) {        let is_new = self.selected.as_deref() != Some(app_id);
         self.selected = Some(app_id.to_string());
         if is_new {
             // the strip's horizontal scroll and the page's vertical
@@ -1457,6 +1472,7 @@ impl StoreRoot {
         self.account_menu = None;
         self.channel_menu = None;
         self.sort_menu = None;
+        self.publisher_view = None;
         self.close_signin();
         if self.page_open {
             self.close_page(cx);
@@ -2265,6 +2281,10 @@ impl StoreRoot {
                 self.confirm_update = None;
                 if self.lightbox.is_some() {
                     self.lightbox = None;
+                } else if self.publisher_view.is_some() {
+                    // one level back: the app page underneath (if any)
+                    // is still mounted
+                    self.publisher_view = None;
                 } else if self.page_open {
                     self.close_page(cx);
                 } else if self.anchor.is_some() {
@@ -2332,13 +2352,15 @@ impl StoreRoot {
                 }
             }
             "space" => {
+                // typing means back to the list, from either level
+                self.publisher_view = None;
                 if self.page_open {
-                    // typing means back to the list
                     self.close_page(cx);
                 }
                 self.insert_text(" ");
             }
             other if other.chars().count() == 1 && !ctrl => {
+                self.publisher_view = None;
                 if self.page_open {
                     self.close_page(cx);
                 }
@@ -3153,7 +3175,8 @@ impl StoreRoot {
                     // claim checked out, else the profile name, else
                     // the truncated npub. The verified check earlier in
                     // this row is about signatures; the address earns
-                    // its place by being one.
+                    // its place by being one. The row clicks through to
+                    // the publisher page: everything this key publishes.
                     let label = match self.verified_nip05(pubkey) {
                         Some(claim) => format!("Published by {claim}."),
                         None => {
@@ -3163,12 +3186,19 @@ impl StoreRoot {
                             }
                         }
                     };
+                    let key = pubkey.clone();
                     div()
+                        .id("published-by")
                         .flex()
                         .gap_1()
                         .items_center()
                         .text_size(px(ui::TEXT_SIZE))
                         .text_color(ui::text())
+                        .cursor_pointer()
+                        .hover(|style| style.text_color(ui::accent()))
+                        .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
+                            this.open_publisher(&key, cx);
+                        }))
                         .child(label)
                 }))
                 // continuity: this app id was published by another key
@@ -3757,12 +3787,26 @@ fn is_publisher_review(review: &orchard_core::Review, publisher: Option<&str>) -
     publisher == Some(review.pubkey.as_str())
 }
 
+/// The publisher page's rows: every listing one key publishes, in
+/// the same arrived-only recency rank the lists use. A page is
+/// aggregation, not curation: a key with fifty apps shows fifty
+/// cards.
+fn publisher_rows(apps: &[StoreApp], key: &str, today: &str) -> Vec<usize> {
+    let mut rows: Vec<usize> = apps
+        .iter()
+        .enumerate()
+        .filter(|(_, app)| app.publisher.as_deref() == Some(key))
+        .map(|(index, _)| index)
+        .collect();
+    rows.sort_by(|&a, &b| date_order(&apps[a], &apps[b], today));
+    rows
+}
+
 /// The catalog's composition line: quiet facts about the current
 /// view, never a judgment. Rows, distinct publishers, verified
 /// listings, rows from followed publishers. A flood reads as
 /// composition, not as rank.
-fn composition_line(rows: usize, publishers: usize, verified: usize, circle: usize) -> String {
-    let plural = |n: usize| if n == 1 { "" } else { "s" };
+fn composition_line(rows: usize, publishers: usize, verified: usize, circle: usize) -> String {    let plural = |n: usize| if n == 1 { "" } else { "s" };
     let mut head = format!("{} app{}", rows, plural(rows));
     if publishers > 0 {
         head.push_str(&format!(" from {} publisher{}", publishers, plural(publishers)));
@@ -4256,6 +4300,253 @@ impl StoreRoot {
                 cx.notify();
             }))
             .child(label.to_string())
+            .into_any_element()
+    }
+
+    /// The publisher page: everything one key publishes, as a card
+    /// grid. The key is the identity; the header carries what the
+    /// client knows about it, the cards carry its apps in the same
+    /// recency rank the lists use. Opened from an app page's
+    /// "Published by" row, which stays mounted underneath.
+    fn render_publisher(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let Some(key) = self.publisher_view.clone() else {
+            return div().into_any_element();
+        };
+        let today = orchard_core::appstream::today_iso();
+        let rows = publisher_rows(&self.apps, &key, &today);
+
+        // the header identity: profile name over the truncated npub,
+        // the address check when the domain backed the claim
+        let profile = self.profiles.get(&key);
+        let name = profile
+            .and_then(|p| p.name.clone())
+            .unwrap_or_else(|| short_npub(&key));
+        let nip05_note = self.verified_nip05(&key).and_then(|claim| {
+            split_nip05(&claim)
+                .map(|(local, domain)| format!("{domain} lists {local} as this key"))
+        });
+        let picture = profile.and_then(|p| p.picture.clone());
+        self.ensure_fetched(
+            picture.iter().cloned().collect::<Vec<String>>(),
+            cx,
+        );
+        let avatar_path = picture
+            .as_deref()
+            .and_then(|url| self.fetched.get(url))
+            .and_then(|f| f.as_deref());
+
+        // the cards: cloned strings first, the builder borrows after
+        struct Card {
+            app_id: String,
+            publisher: Option<String>,
+            name: String,
+            summary: String,
+            icon_path: Option<std::path::PathBuf>,
+            date_note: Option<String>,
+            repo_ok: bool,
+        }
+        let cards: Vec<Card> = rows
+            .iter()
+            .map(|&i| {
+                let app = &self.apps[i];
+                Card {
+                    app_id: app.app_id.clone(),
+                    publisher: app.publisher.clone(),
+                    name: app.name.clone(),
+                    summary: app.summary.clone(),
+                    icon_path: app.icon_path.clone(),
+                    date_note: app.release_date.as_deref().map(|date| {
+                        // the claim reads as "updated" only once true
+                        if date > today.as_str() {
+                            format!("dated {date}")
+                        } else {
+                            format!("updated {date}")
+                        }
+                    }),
+                    repo_ok: self.row_verified(app),
+                }
+            })
+            .collect();
+
+        let mut grid = div().flex().flex_wrap().gap_3();
+        for (index, card) in cards.iter().enumerate() {
+            grid = grid.child(
+                div()
+                    .id(SharedString::from(format!("pub-card-{index}")))
+                    .w(px(264.))
+                    .flex()
+                    .flex_col()
+                    .gap_1p5()
+                    .p_3()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(ui::divider_soft())
+                    .bg(ui::panel())
+                    .cursor_pointer()
+                    .hover(|style| style.bg(ui::surface()))
+                    .on_click({
+                        let app_id = card.app_id.clone();
+                        let publisher = card.publisher.clone();
+                        cx.listener(move |this, _e: &ClickEvent, _w, cx| {
+                            // the page is about THIS row of the twin pair
+                            this.selected_publisher = publisher.clone();
+                            this.publisher_view = None;
+                            this.open_page(&app_id, cx);
+                        })
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .items_start()
+                            .gap_2p5()
+                            .child(app_icon(
+                                card.icon_path.as_deref(),
+                                &card.name,
+                                44.,
+                            ))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_0p5()
+                                    .child(
+                                        div()
+                                            .text_size(px(ui::TEXT_SIZE_EMPHASIS))
+                                            .font_weight(gpui::FontWeight::MEDIUM)
+                                            .text_color(ui::text())
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .child(card.name.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(ui::TEXT_SIZE))
+                                            .text_color(ui::text_dim())
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .child(card.summary.clone()),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .text_size(px(ui::TEXT_SIZE_LABEL))
+                            .text_color(ui::text_dim())
+                            .children(card.date_note.clone().map(|note| div().child(note)))
+                            .children(card.repo_ok.then(|| {
+                                ui::icon("icons/check.svg", 12., ui::accent())
+                            })),
+                    ),
+            );
+        }
+
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .bg(ui::panel())
+            .child(
+                div()
+                    .id("publisher-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.publisher_scroll)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_4()
+                            .px_8()
+                            .py_4()
+                            .max_w(px(920.))
+                            .mx_auto()
+                            // back affordance, matching the app page
+                            .child(
+                                div()
+                                    .id("publisher-back")
+                                    .flex()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .cursor_pointer()
+                                    .text_size(px(ui::TEXT_SIZE))
+                                    .text_color(ui::accent())
+                                    .hover(|style| style.text_color(ui::text()))
+                                    .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
+                                        this.publisher_view = None;
+                                        cx.notify();
+                                    }))
+                                    .child(ui::icon("icons/arrow_left.svg", 13., ui::accent()))
+                                    .child(if self.page_open {
+                                        "Back to the app"
+                                    } else {
+                                        "All apps"
+                                    }),
+                            )
+                            .child(
+                                // identity header
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_4()
+                                    .child(avatar(avatar_path, 48., ui::text_dim()))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_1()
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_2()
+                                                    .text_size(px(ui::TEXT_SIZE_EMPHASIS + 2.))
+                                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                                    .text_color(ui::text())
+                                                    .child(name)
+                                                    .children(nip05_note.map(|note| {
+                                                        div()
+                                                            .id("publisher-nip05")
+                                                            .flex_none()
+                                                            .hover(|style| {
+                                                                style.bg(
+                                                                    gpui::transparent_black(),
+                                                                )
+                                                            })
+                                                            .tooltip(move |_window, cx| {
+                                                                cx.new(|_| {
+                                                                    TextTooltip(note.clone().into())
+                                                                })
+                                                                    .into()
+                                                            })
+                                                            .child(ui::icon(
+                                                                "icons/check.svg",
+                                                                13.,
+                                                                ui::accent(),
+                                                            ))
+                                                    })),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(ui::TEXT_SIZE))
+                                                    .text_color(ui::text_dim())
+                                                    .child(format!(
+                                                        "{} app{} on Orchard",
+                                                        cards.len(),
+                                                        if cards.len() == 1 { "" } else { "s" }
+                                                    )),
+                                            ),
+                                    ),
+                            )
+                            .child(grid),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -4914,6 +5205,8 @@ impl Render for StoreRoot {
             // chips + virtualized list)
             .child(if self.settings_open {
                 self.render_settings(window.text_style().font(), cx)
+            } else if self.publisher_view.is_some() {
+                self.render_publisher(cx)
             } else if page_open {
                 match selected {
                     Some(app) => self.render_page(app, window.text_style().font(), cx).into_any_element(),
@@ -6978,6 +7271,22 @@ mod tests {
         );
         // a Flathub-only view has no publisher keys to count
         assert_eq!(composition_line(2, 0, 0, 0), "2 apps");
+    }
+
+    #[test]
+    fn publisher_rows_gather_one_keys_listings_in_recency_order() {
+        let mut first = dated_app("Alpha", Some("2026-01-01"));
+        first.publisher = Some("k".into());
+        let mut second = dated_app("Beta", Some("2026-03-01"));
+        second.publisher = Some("k".into());
+        let mut other = dated_app("Gamma", Some("2026-02-01"));
+        other.publisher = Some("other".into());
+        let apps = vec![first, second, other];
+
+        let rows = publisher_rows(&apps, "k", "2026-10-11");
+        let names: Vec<&str> = rows.iter().map(|&i| apps[i].name.as_str()).collect();
+        // only this key's apps, the newer release first
+        assert_eq!(names, vec!["Beta", "Alpha"]);
     }
 
     #[test]

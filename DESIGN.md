@@ -565,6 +565,20 @@ opening items because they need the push, the signing secret, and a tag.
       on the visited subset implies the rest are something less. In
       All and Installed its presence is real information, so it
       shows. The page's digest pin chip is unaffected.
+- [x] The publisher page: everything one key publishes, as a card
+      grid. The key is the identity, not the display name; the header
+      carries the avatar, the profile name (truncated npub fallback),
+      the NIP-05 check when the domain backed the claim, and a quiet
+      "n apps on Orchard". The cards are Flathub-style: icon, name,
+      one-line summary, the honest date note ("updated" only once
+      true), the repo check; the same arrived-only recency rank the
+      lists use, no new ordering. Entry is the app page's "Published
+      by" row (click); the app page stays mounted underneath, so
+      Escape (or the back row) returns to it; typing exits to the
+      search list from either level, matching the page rule. A page
+      is aggregation, not curation: a spam key's page shows its
+      fifty cards, and the composition line stays the flood
+      disclosure.
 - [x] Background-thread hardening, from the one unexplained client
       death (a relay SIGKILL-restart race with a cache clear in
       flight; no log trace, relaunch fixed it). Three defenses: the
