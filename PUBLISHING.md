@@ -34,6 +34,45 @@ from the artifact itself when the page opens, so what the permissions
 viewer shows is exactly what install will grant. There is no
 declared-versus-actual gap because there is only one source: the artifact.
 
+## From a flatpak manifest to an app tree
+
+Orchard never runs `flatpak-builder`; the artifact is built from the
+*finished* tree. If your app already builds with a flatpak manifest
+(`com.example.App.yml`, modules, SDK), one `flatpak-builder` run
+produces everything Orchard needs:
+
+    flatpak-builder --force-clean --user --install-deps-from=flathub \
+      build-dir com.example.App.yml
+
+That leaves a build directory whose interesting parts are:
+
+- `build-dir/files/` — the installed app (bin, lib, share)
+- `build-dir/export/` — the desktop file and AppStream metadata
+  `flatpak-builder` extracts from the build; it stays there after
+  `build-export`, so nothing needs re-deriving
+- `build-dir/metadata` — the sandbox ini (`[Application]`, `[Context]`,
+  `[Session Bus]`) the build declared
+
+Assemble Orchard's tree from exactly those three; skip `var/` (builder
+scratch, empty but shippable-looking):
+
+    mkdir -p tree
+    cp -r build-dir/files tree/files
+    cp -r build-dir/export tree/export
+    cp build-dir/metadata tree/metadata
+
+`metadata` is the sandbox ini `[Application]` plus `[Context]` and
+`[Session Bus]`: what the build declared is what the artifact carries,
+and what the client's permissions viewer shows. Check it by hand once;
+a module that quietly needed more sandbox than you intended is visible
+here before your users find out.
+
+The rest is the ordinary publish: point the manifest's
+`[artifact].tree` at that directory and run `orchard-publish`. CI does
+the same two steps (build, assemble) before the push-and-sign step;
+Orchard's own `self/assemble.sh` is the minimal example (a prebuilt
+binary into `files/bin`, everything else committed).
+
 ## The manifest
 
 A TOML file next to your tree. Everything the publisher owns that is not
