@@ -3258,27 +3258,27 @@ impl StoreRoot {
         } else {
             None
         };
+        // the developer claim is navigation on both channels, not
+        // identity: a name anyone can assert, so it clicks through to
+        // the developer page and carries no checks
+        let developer_claim = app.developer.clone().map(|name| {
+            let label = format!("Developed by {name}.");
+            div()
+                .id("developed-by")
+                .flex()
+                .gap_1()
+                .items_center()
+                .text_size(px(ui::TEXT_SIZE))
+                .text_color(ui::text())
+                .cursor_pointer()
+                .hover(|style| style.text_color(ui::accent()))
+                .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
+                    this.open_collection(CollectionPage::Developer(name.clone()), cx);
+                }))
+                .child(label)
+        });
         let provenance = match app.source {
             Source::Reviewed => {
-                // the developer claim is navigation, not identity: a
-                // name anyone can assert, so it clicks through to the
-                // developer page and carries no checks
-                let developer = app.developer.clone().map(|name| {
-                    let label = format!("Developed by {name}.");
-                    div()
-                        .id("developed-by")
-                        .flex()
-                        .gap_1()
-                        .items_center()
-                        .text_size(px(ui::TEXT_SIZE))
-                        .text_color(ui::text())
-                        .cursor_pointer()
-                        .hover(|style| style.text_color(ui::accent()))
-                        .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
-                            this.open_collection(CollectionPage::Developer(name.clone()), cx);
-                        }))
-                        .child(label)
-                });
                 div()
                 .flex()
                 .flex_wrap()
@@ -3291,7 +3291,7 @@ impl StoreRoot {
                         .text_color(ui::text())
                         .child("Moderator-reviewed listing; installs from your flathub remote."),
                 )
-                .children(developer)
+                .children(developer_claim)
                 .into_any_element()
             }
             Source::Publisher => div()
@@ -3348,6 +3348,7 @@ impl StoreRoot {
                         }))
                         .child(label)
                 }))
+                .children(developer_claim)
                 // continuity: this app id was published by another key
                 // before this client ever saw this one; a signed
                 // handover from that key reads calmer than an
@@ -4531,10 +4532,21 @@ impl StoreRoot {
         // the cards' remote icons ride the same shared cache as the
         // list rows: a publisher app's icon exists only as a URL, and
         // this page wore initials because nothing here asked for the
-        // fetch
-        let card_icon_urls: Vec<String> = rows
+        // fetch. On a developer page the cards also wear their
+        // publisher's picture, fetched the same way.
+        let is_developer_page = matches!(&page, CollectionPage::Developer(_));
+        let mut card_icon_urls: Vec<String> = rows
             .iter()
             .filter_map(|&i| self.apps[i].icon_url.clone())
+            .collect();
+        if is_developer_page {
+            card_icon_urls.extend(rows.iter().filter_map(|&i| {
+                let key = self.apps[i].publisher.as_deref()?;
+                self.profiles.get(key)?.picture.clone()
+            }));
+        }
+        let card_icon_urls: Vec<String> = card_icon_urls
+            .into_iter()
             .filter(|url| self.fetched.get(url).is_none())
             .collect();
         self.ensure_fetched(card_icon_urls, cx);
@@ -4579,14 +4591,38 @@ impl StoreRoot {
             icon_path: Option<std::path::PathBuf>,
             date_note: Option<String>,
             repo_ok: bool,
+            /// The attribution chip on a developer page: the key
+            /// behind an Orchard listing, its display, its picture.
+            /// The claim groups; the chip attributes.
+            publisher_chip: Option<(String, String, Option<std::path::PathBuf>)>,
         }
         let cards: Vec<Card> = rows
             .iter()
             .map(|&i| {
                 let app = &self.apps[i];
+                let publisher_chip = if is_developer_page {
+                    app.publisher.clone().map(|key| {
+                        let profile = self.profiles.get(&key);
+                        let display = profile
+                            .and_then(|p| p.name.clone())
+                            .unwrap_or_else(|| short_npub(&key));
+                        let avatar_path = profile.and_then(|p| p.picture.clone()).and_then(
+                            |url| {
+                                self.fetched
+                                    .get(&url)?
+                                    .as_deref()
+                                    .map(std::path::PathBuf::from)
+                            },
+                        );
+                        (key, display, avatar_path)
+                    })
+                } else {
+                    None
+                };
                 Card {
                     app_id: app.app_id.clone(),
                     publisher: app.publisher.clone(),
+                    publisher_chip,
                     name: app.name.clone(),
                     summary: app.summary.clone(),
                     // the cached AppStream PNG, else the fetched
@@ -4681,7 +4717,32 @@ impl StoreRoot {
                             .children(card.repo_ok.then(|| {
                                 ui::icon("icons/check.svg", 12., ui::accent())
                             })),
-                    ),
+                    )
+                    .children(card.publisher_chip.as_ref().map(
+                        |(key, display, avatar_path)| {
+                            let key = key.clone();
+                            div()
+                                .id(SharedString::from(format!("card-publisher-{index}")))
+                                .flex()
+                                .items_center()
+                                .gap_1p5()
+                                .cursor_pointer()
+                                .text_size(px(ui::TEXT_SIZE_SMALL))
+                                .text_color(ui::text_dim())
+                                .hover(|style| style.text_color(ui::text()))
+                                .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
+                                    this.open_collection(
+                                        CollectionPage::Publisher(key.clone()),
+                                        cx,
+                                    );
+                                    // the chip is not the card: the
+                                    // click stops here
+                                    cx.stop_propagation();
+                                }))
+                                .child(avatar(avatar_path.as_deref(), 14., ui::text_dim()))
+                                .child(display.clone())
+                        },
+                    )),
             );
         }
 
@@ -6802,7 +6863,7 @@ fn orchard_fingerprint<'a>(rows: impl IntoIterator<Item = &'a StoreApp>) -> Stri
     for app in rows {
         let _ = writeln!(
             fingerprint,
-            "{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}",
+            "{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}",
             app.app_id,
             app.publisher.as_deref().unwrap_or(""),
             app.version.as_deref().unwrap_or(""),
@@ -6810,6 +6871,7 @@ fn orchard_fingerprint<'a>(rows: impl IntoIterator<Item = &'a StoreApp>) -> Stri
             app.name,
             app.summary,
             app.successor_to.as_deref().unwrap_or(""),
+            app.developer.as_deref().unwrap_or(""),
         );
     }
     fingerprint
@@ -7707,6 +7769,7 @@ mod tests {
             name: name.into(),
             summary: "A demo app".into(),
             description: None,
+            developer: None,
             icon_url: None,
             categories: Vec::new(),
             publisher: Publisher {
@@ -7821,6 +7884,7 @@ mod tests {
             name: "Hello".into(),
             summary: "A demo app".into(),
             description: None,
+            developer: None,
             icon_url: None,
             categories: Vec::new(),
             publisher: Publisher {

@@ -65,6 +65,10 @@ pub struct Listing {
     pub app_id: AppId,
     pub name: String,
     pub summary: String,
+    /// The AppStream-style developer claim, when the listing makes
+    /// one: navigation, not identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub developer: Option<String>,
     pub description: Option<String>,
     pub icon_url: Option<String>,
     pub publisher: Publisher,
@@ -200,6 +204,11 @@ pub struct CatalogApp {
     /// The project's homepage, the listing's `h` tag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub homepage: Option<String>,
+    /// The AppStream-style developer claim, the listing's `developer`
+    /// tag: a name anyone can assert, so it is navigation, never
+    /// identity. Absent when the listing makes no claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub developer: Option<String>,
     /// Flatpak metadata ini, for the permissions viewer.
     #[serde(default)]
     pub metadata: Option<String>,
@@ -305,7 +314,9 @@ impl StoreApp {
             release_date: (app.published_at > 0)
                 .then(|| crate::appstream::iso_date(app.published_at)),
             homepage: app.homepage.clone(),
-            developer: None,
+            // the publisher's own claim, the listing's developer tag:
+            // navigation, not identity
+            developer: app.developer.clone(),
             repository: app.repository.clone(),
             license: None,
             source: Source::Publisher,

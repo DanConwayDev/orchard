@@ -21,6 +21,9 @@ pub struct Listing {
     pub repository: Option<String>,
     /// The project's homepage, the `h` tag.
     pub homepage: Option<String>,
+    /// The AppStream-style developer claim, the `developer` tag: a
+    /// name anyone can assert, so it is navigation, never identity.
+    pub developer: Option<String>,
 }
 
 /// One asset (kind 3063): the artifact pin.
@@ -81,7 +84,8 @@ pub fn sign_listing(keys: &Keys, listing: &Listing) -> Result<Event> {
         .tag_maybe(optional_tag("icon", &listing.icon))
         .tag_maybe(optional_tag("license", &listing.license))
         .tag_maybe(optional_tag("repository", &listing.repository))
-        .tag_maybe(optional_tag("h", &listing.homepage));
+        .tag_maybe(optional_tag("h", &listing.homepage))
+        .tag_maybe(optional_tag("developer", &listing.developer));
     let builder = listing
         .categories
         .iter()
@@ -170,6 +174,7 @@ mod tests {
                 license: Some("MIT".into()),
                 repository: None,
                 homepage: None,
+                developer: Some("Team".into()),
             },
         )
         .unwrap();
@@ -208,6 +213,7 @@ mod tests {
         assert_eq!(app.name, "Hello");
         assert_eq!(app.categories, ["Utilities"]);
         assert_eq!(app.description.as_deref(), Some("Long description."));
+        assert_eq!(app.developer.as_deref(), Some("Team"));
     }
 
     /// Reviews: one per identity per app (replaceable), rating

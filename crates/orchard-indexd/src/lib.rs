@@ -790,6 +790,7 @@ mod tests {
                 name: "Orchard Hello".into(),
                 summary: "Demo app".into(),
                 description: None,
+                developer: None,
                 icon_url: None,
                 categories: Vec::new(),
                 publisher: orchard_core::Publisher {

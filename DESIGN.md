@@ -109,7 +109,7 @@ matching the draft NIP keeps Zapstore publishers readable on Orchard day one.
 | Event | Kind | `d` tag | Tags | Content |
 |---|---|---|---|---|
 | Publisher profile | 0 | (none) | standard NIP-01 | name, nip05, about |
-| App listing | 32267 | `<app-id>` | `name`, `summary`, `icon`, `image` (screenshots), `t` (categories), `f` (platform, one per claimed arch), `license`, `repository`, `h` | full description |
+| App listing | 32267 | `<app-id>` | `name`, `summary`, `icon`, `image` (screenshots), `t` (categories), `f` (platform, one per claimed arch), `license`, `repository`, `h`, `developer` | full description |
 | Release | 30063 | `<app-id>@<version>@<platform>` | `i` (app id), `version`, `f` (platform), `c` (channel: stable/beta), `e` (asset refs) | changelog |
 | Asset | 3063 | (none) | `i`, `x` (sha256), `version`, `url`, `m`, `size`, `f` (platform), **`oci`**, **`runtime`** | (none) |
 | Review | 30065 | `<app-id>` | rating, text (Orchard-draft until NIP-82 grows one; M6) | review text |

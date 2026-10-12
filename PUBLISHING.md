@@ -90,6 +90,10 @@ license = "MIT"                         # optional
 repository = "https://github.com/you/app"   # source, shown as a link; a github
                                             # repo can host your proof (--prove)
 homepage = "https://you.example"        # optional; omit if the repo is the page
+developer = "Your Team"                 # optional; groups your listing on the
+                                        # developer page beside your Flathub apps
+                                        # (a claim, not identity: cards still show
+                                        # the key that publishes them)
 
 [release]
 version = "1.2.0"                       # or ORCHARD_PUBLISH_VERSION in CI
