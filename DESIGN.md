@@ -380,11 +380,16 @@ public in its settings after the first push.
 **Relay topology: the rendezvous set (decided).** Nostr relays do not gossip to
 each other, so a publisher and a reader must share at least one relay for anything
 to flow. The model is a small, public, versioned **rendezvous set**
-(`RENDEZVOUS_RELAYS` in orchard-nostr, currently `wss://relay.primal.net`,
-`wss://nos.lol`, and the Orchard-operated `wss://relay.orchard.rocks`, the same
-set the social reads use): every publisher's manifest
-lists at least one of them, every client defaults to all of them, and discovery is
-the overlap. The relays are mailboxes, not trust roots: events are signed, so which
+(`RENDEZVOUS_RELAYS` in orchard-nostr, led by the Orchard-operated
+`wss://relay.orchard.rocks` and backed by the third-party pair
+`wss://relay.primal.net` and `wss://nos.lol`, the same set the social reads use):
+every publisher's manifest must include the Orchard relay and may carry the
+third-party pair beside it, every client defaults to all of them, and discovery is
+the overlap. The requirement is enforced, not hoped for: orchard-publish refuses a
+manifest publish whose relay list omits `wss://relay.orchard.rocks` (`--relays`
+bypasses for local tests), because the third-party relays can refuse or drop
+Orchard events at any time and the required copy of the catalog lives on
+infrastructure the project operates. The relays are mailboxes, not trust roots: events are signed, so which
 relay an event came from affects availability, never integrity. The dev loop keeps
 the demo relay by `ORCHARD_RELAYS` in run.sh. Orchard also operates its own public
 relay as a kind-restricted nostr-rs-relay (admissions accept exactly the six event

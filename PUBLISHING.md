@@ -103,7 +103,7 @@ notes = "What changed in 1.2.0."        # the release's changelog
 tree = "tree"                           # path to the app tree, relative to this file
 
 [publish]
-relays = ["wss://relay.primal.net", "wss://nos.lol", "wss://relay.orchard.rocks"]   # where the events go
+relays = ["wss://relay.orchard.rocks", "wss://relay.primal.net", "wss://nos.lol"]   # where the events go
 tag = "latest"                          # OCI tag for the manifest push
 author-name = "Your Name"               # optional; signs a Nostr profile (kind 0)
 nip05 = "you@yourdomain.example"        # optional; the verified-address claim
@@ -117,6 +117,14 @@ Field notes:
   arch here is a missing button on someone's machine.
 - `runtime` is written once; the arch segment is rewritten per build leg
   (`.../x86_64/25.08` becomes `.../aarch64/25.08` on the arm runner).
+- `relays` must include `wss://relay.orchard.rocks`, the rendezvous relay
+  the project operates, listed first. The third-party relays are
+  redundancy and can refuse or drop Orchard events at any time, so a
+  publish that never lands on the required relay has no copy on
+  infrastructure the project controls. `orchard-publish` refuses such a
+  manifest before building anything; `--relays` bypasses the check for
+  local tests, and a manifest with no `[publish]` section sends to the
+  dev relay.
 - The nip05 claim is verified by your domain's
   `/.well-known/nostr.json` naming your key. Until that record exists the
   client shows your profile name or a truncated key; a claim without the
@@ -145,7 +153,7 @@ carried one affects availability only.
 | Flag | Meaning |
 |---|---|
 | `--registry host/repo` | push target; without it the artifact stays a local OCI layout |
-| `--relays url,url` | override the manifest's relay list for this run |
+| `--relays url,url` | override the manifest's relay list for this run; also bypasses the required-relay check |
 | `--nsec <key>` | signing key (hex or nsec); `ORCHARD_NSEC` env also works |
 | `--arch linux-aarch64` | build and sign for this arch (CI matrix legs) |
 | `--out dir` | local layout directory (default `target/publish/<app-id>`) |

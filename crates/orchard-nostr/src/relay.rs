@@ -18,16 +18,26 @@ use tungstenite::Message;
 
 use crate::Feed;
 
+/// The relay the project operates, and the one every publish must
+/// reach: first in the rendezvous set. The third-party relays are
+/// redundancy; they can refuse or drop Orchard events at any time, so
+/// the catalog's canonical copy always lands on infrastructure the
+/// project controls. `orchard-publish` refuses a manifest-driven
+/// publish whose relay list omits this relay; `--relays` bypasses the
+/// check for local tests.
+pub const REQUIRED_RELAY: &str = "wss://relay.orchard.rocks";
+
 /// The rendezvous relay set: where publishers announce catalog events
-/// and where clients read them from. Small and public on purpose. The
-/// client's default list and every publisher's manifest overlap here;
-/// discovery is the overlap, and the relays themselves are mailboxes,
-/// not trust roots. Pointer-following (NIP-65) for self-hosting
-/// publishers is a future edge, not part of this floor.
+/// and where clients read them from. Small and public on purpose, led
+/// by [`REQUIRED_RELAY`]. The client's default list and every
+/// publisher's manifest overlap here; discovery is the overlap, and
+/// the relays themselves are mailboxes, not trust roots.
+/// Pointer-following (NIP-65) for self-hosting publishers is a future
+/// edge, not part of this floor.
 pub const RENDEZVOUS_RELAYS: &[&str] = &[
+    REQUIRED_RELAY,
     "wss://relay.primal.net",
     "wss://nos.lol",
-    "wss://relay.orchard.rocks",
 ];
 
 /// Parse an `ORCHARD_RELAYS`-style comma list into URLs, trimming and
@@ -446,6 +456,13 @@ mod tests {
             RENDEZVOUS_RELAYS.iter().map(|url| url.to_string()).collect::<Vec<_>>()
         );
         assert_eq!(relay_urls(Some("  ")).len(), RENDEZVOUS_RELAYS.len());
+    }
+
+    /// The required relay leads the set: the invariant the publish
+    /// check and the docs both lean on.
+    #[test]
+    fn required_relay_leads_the_rendezvous_set() {
+        assert_eq!(RENDEZVOUS_RELAYS.first(), Some(&REQUIRED_RELAY));
     }
 
     /// A signed stand-in event with full tag control.

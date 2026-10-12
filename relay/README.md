@@ -119,6 +119,13 @@ of them: if it is down, new clients still bootstrap through the others.
 Publishers' manifests and clients' defaults list all of them, and
 discovery is the overlap.
 
+The Orchard relay is the set's required member: every publisher's
+manifest must include it, listed first, and `orchard-publish` refuses a
+manifest publish that omits it (`--relays` bypasses the check for local
+tests). The third-party relays are redundancy, not a guarantee: they
+can refuse or drop Orchard events at any time, so the one copy the
+project controls is the one every publish must make.
+
 Joining the rendezvous set is a versioned change, so it ships in a tag:
 deploy and verify the relay (probe above), then add the `wss://` URL to
 `RENDEZVOUS_RELAYS` in `crates/orchard-nostr/src/relay.rs` and to

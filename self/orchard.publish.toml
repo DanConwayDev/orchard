@@ -29,5 +29,7 @@ notes = "First self-hosted release: Orchard installing and updating Orchard thro
 tree = "tree"
 
 [publish]
-relays = ["wss://relay.primal.net", "wss://nos.lol", "wss://relay.orchard.rocks"]
+# relay.orchard.rocks is the required relay (see PUBLISHING.md):
+# orchard-publish refuses a manifest publish without it
+relays = ["wss://relay.orchard.rocks", "wss://relay.primal.net", "wss://nos.lol"]
 tag = "latest"

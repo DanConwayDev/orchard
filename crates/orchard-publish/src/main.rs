@@ -103,6 +103,24 @@ fn parse_args() -> Result<Args> {
 fn run() -> Result<()> {
     let args = parse_args()?;
     let mut manifest = manifest::load(&args.manifest_path)?;
+    // The required relay is publish policy, checked before any build or
+    // push: a manifest-driven send must reach the relay the project
+    // operates, because the third-party relays can refuse or drop
+    // Orchard events at any time. Three paths are exempt:
+    // --skip-relays publishes nothing, --relays is the documented
+    // local-test override, and a manifest with no [publish] section
+    // targets the dev relay.
+    if !args.skip_relays
+        && args.relays.is_none()
+        && let Some(publish) = manifest.publish.as_ref().filter(|p| !p.relays.is_empty())
+        && !publish.relays.iter().any(|url| url == relay::REQUIRED_RELAY)
+    {
+        bail!(
+            "[publish] relays must include {}, the required rendezvous relay; \
+             --relays bypasses this check for local tests",
+            relay::REQUIRED_RELAY
+        );
+    }
     // CI derives the version from the pushed tag; the manifest's
     // version is the local default.
     if let Ok(from_env) = std::env::var("ORCHARD_PUBLISH_VERSION")
