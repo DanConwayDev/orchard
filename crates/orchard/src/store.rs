@@ -3051,38 +3051,6 @@ impl StoreRoot {
     /// actionable empty state otherwise.
     fn render_browse(&self, cx: &mut Context<Self>) -> AnyElement {
         let rows = self.filtered();
-        // the composition line: what this view is made of, quiet
-        // facts only, between the chips and the rows. Computed before
-        // the list closure moves the rows.
-        let composition = (!rows.is_empty()).then(|| {
-            let mut publishers = std::collections::HashSet::new();
-            let mut verified = 0;
-            let mut circle = 0;
-            for &i in &rows {
-                let app = &self.apps[i];
-                if let Some(key) = app.publisher.as_deref() {
-                    publishers.insert(key);
-                    if self.follows.contains(key) {
-                        circle += 1;
-                    }
-                }
-                if self.row_verified(app) {
-                    verified += 1;
-                }
-            }
-            div()
-                .px_4()
-                .py_1()
-                .bg(ui::inset())
-                .text_size(px(ui::TEXT_SIZE_LABEL))
-                .text_color(ui::text_dim())
-                .child(composition_line(
-                    rows.len(),
-                    publishers.len(),
-                    verified,
-                    circle,
-                ))
-        });
         let body: AnyElement = if !rows.is_empty() {
             let view = cx.entity();
             uniform_list("app-list", rows.len(), move |range, window, cx| {
@@ -3154,7 +3122,6 @@ impl StoreRoot {
             .flex()
             .flex_col()
             .child(self.render_category_bar(cx))
-            .children(composition)
             .child(body)
             .into_any_element()
     }
@@ -3172,7 +3139,7 @@ impl StoreRoot {
             .border_b_1()
             .border_color(ui::divider())
             .bg(ui::panel())
-            .child(self.category_chip("All categories", None, cx))
+            .child(self.category_chip("All", None, cx))
             .children(self.category_counts().into_iter().map(|(name, _)| {
                 self.category_chip(name, Some(name.to_string()), cx)
             }))
@@ -4493,25 +4460,6 @@ fn developer_rows(apps: &[StoreApp], developer: &str, today: &str) -> Vec<usize>
         .collect();
     rows.sort_by(|&a, &b| date_order(&apps[a], &apps[b], today));
     rows
-}
-
-/// The catalog's composition line: quiet facts about the current
-/// view, never a judgment. Rows, distinct publishers, verified
-/// listings, rows from followed publishers. A flood reads as
-/// composition, not as rank.
-fn composition_line(rows: usize, publishers: usize, verified: usize, circle: usize) -> String {    let plural = |n: usize| if n == 1 { "" } else { "s" };
-    let mut head = format!("{} app{}", rows, plural(rows));
-    if publishers > 0 {
-        head.push_str(&format!(" from {} publisher{}", publishers, plural(publishers)));
-    }
-    let mut parts = vec![head];
-    if verified > 0 {
-        parts.push(format!("{} verified", verified));
-    }
-    if circle > 0 {
-        parts.push(format!("{} in your circle", circle));
-    }
-    parts.join(" · ")
 }
 
 /// The review display rows. Everyone is one recency list, newest
@@ -5896,6 +5844,13 @@ impl Render for StoreRoot {
         let total = self.apps.len();
         let installed_count = self.installed.len();
         let search_focused = self.focus_handle.is_focused(window);
+        // the count by the mark: the view's rows while a list is on
+        // screen (live under search, chips, and lenses), the catalog
+        // total when no list is (pages, settings, collections)
+        let browsing = !self.settings_open
+            && self.collection_view.is_none()
+            && !(page_open && selected.is_some());
+        let count = if browsing { self.filtered().len() } else { total };
 
         div()
             .key_context("StoreRoot")
@@ -5926,12 +5881,15 @@ impl Render for StoreRoot {
                     .border_b_1()
                     .border_color(ui::divider())
                     .bg(ui::panel())
-                    // the mark: an About popover trigger, not a dead
-                    // decoration (version, license, source)
+                    // the mark: home, back to the All apps list, with
+                    // the view's count riding along as its label
                     .child(
                         div()
                             .id("mark-home")
                             .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
                             .px_1()
                             .py_0p5()
                             .rounded_sm()
@@ -5963,7 +5921,16 @@ impl Render for StoreRoot {
                             })
                             .children(crate::cache::orchard_mark().map(|path| {
                                 gpui::img(path).w(px(22.)).h(px(22.))
-                            })),
+                            }))
+                            .child(
+                                div()
+                                    .text_size(px(ui::TEXT_SIZE_SMALL))
+                                    .text_color(ui::text_dim())
+                                    .child(format!(
+                                        "{count} app{}",
+                                        if count == 1 { "" } else { "s" }
+                                    )),
+                            ),
                     )
                     // the search, centered on the window width: an
                     // absolute layer spanning the bar, content centered
@@ -8850,18 +8817,6 @@ mod tests {
         // so does a listing edit
         app.summary = "Edited summary".into();
         assert_ne!(same, orchard_fingerprint(std::slice::from_ref(&app)));
-    }
-
-    #[test]
-    fn composition_line_states_quiet_facts() {
-        assert_eq!(composition_line(0, 0, 0, 0), "0 apps");
-        assert_eq!(composition_line(1, 1, 0, 0), "1 app from 1 publisher");
-        assert_eq!(
-            composition_line(12, 3, 2, 1),
-            "12 apps from 3 publishers · 2 verified · 1 in your circle"
-        );
-        // a Flathub-only view has no publisher keys to count
-        assert_eq!(composition_line(2, 0, 0, 0), "2 apps");
     }
 
     #[test]

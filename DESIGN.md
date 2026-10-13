@@ -673,6 +673,16 @@ opening items because they need the push, the signing secret, and a tag.
       empty view shows nothing. A flood reads as composition ("48
       apps from 3 publishers"), not as rank: the client states what
       is here and leaves the judging to the person reading.
+      Retired in v0.1.2: a whole strip for counts read as clutter
+      over a footer that already said "N apps", and the two stacked
+      agreements on the All view felt like duplication. What
+      survived is the view's row count, now riding next to the mark
+      in the top bar as its home label: live under search, chips,
+      and lenses; the catalog total when no list is on screen. The
+      footer stays the world's line ("N apps · M installed"), so the
+      two counts agree only when the view is the world. The other
+      composition facts (publishers, verified, circle) live on the
+      rows and pages themselves.
 - [x] The row's digest badge is a shield now, quiet like the repo
       check, with the words on hover ("Artifact matches the signed
       digest") and the full chip on the page. It means this client has
