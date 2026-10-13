@@ -22,6 +22,11 @@ installs.
    beyond its config labels.
 3. **A Nostr key.** The publisher identity. Its public key is your name on
    Orchard: it signs every release, reviews attach to it, clients pin it.
+4. **The `orchard-publish` CLI.** Not on crates.io: build it from the
+   [orchard repo](https://github.com/Letdown2491/orchard) with
+   `./scripts/build.sh build --release`. The script needs podman (the
+   build runs in a pinned container, so no host toolchain) and drops the
+   binary at `target/release/orchard-publish`.
 
 ## The app tree and sandbox permissions
 
@@ -33,6 +38,13 @@ Sandbox permissions are never published in events. The client reads them
 from the artifact itself when the page opens, so what the permissions
 viewer shows is exactly what install will grant. There is no
 declared-versus-actual gap because there is only one source: the artifact.
+
+One build constraint before the first push: `files/` runs against the
+runtime's glibc, and glibc only goes backwards. Freedesktop 25.08
+carries 2.42 (the Fedora 43 set), so a binary built on a newer toolchain
+dies inside the sandbox with `GLIBC_2.4x not found`. Build on the Fedora
+version the runtime targets, or older; the repo's own build container
+pins Fedora 43 for exactly this reason.
 
 ## From a flatpak manifest to an app tree
 
@@ -112,6 +124,12 @@ nip05 = "you@yourdomain.example"        # optional; the verified-address claim
 
 Field notes:
 
+- `categories` must use the client's exact chip spellings: Games,
+  Utilities, Audio & Video, Development, Network, Office, Graphics,
+  Science, Education, System. AppStream's canonical names (`Utility`,
+  `AudioVideo`, `Game`) fold to these only for Flathub's metadata; a
+  listing event carries categories verbatim, and the client matches by
+  exact string. An unrecognized category still lists, but only under All.
 - `platforms` is the listing's coverage claim and must name every arch any
   CI leg builds. Each leg publishes an identical listing, so a missing
   arch here is a missing button on someone's machine.
