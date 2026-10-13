@@ -1,0 +1,22 @@
+{
+ "version": 1,
+ "apps": [
+  {
+   "app_id": "rocks.orchard.Hello",
+   "name": "Orchard Hello",
+   "summary": "Demo app published through Orchard",
+   "description": "The Orchard demo: a shell script packaged as a flatpak, distributed as a digest-pinned OCI artifact. Installing it exercises the full Orchard path: catalog, digest verification, and flatpak's direct OCI install.",
+   "publisher": {
+    "pubkey": "0000000000000000000000000000000000000000000000000000000000000000",
+    "nip05": null
+   },
+   "version": "1.0.0",
+   "flatpak_ref": "app/rocks.orchard.Hello/x86_64/stable",
+   "location": "oci:/var/home/martin/Documents/orchard/demo/oci-hello",
+   "digest": "sha256:e2e0ffbb88a75c19e6ceba4baa389a708e0dd310f1e991d3476832ece2ea520c",
+   "metadata": "[Application]\nname=rocks.orchard.Hello\nruntime=org.freedesktop.Platform/x86_64/25.08\ncommand=hello-orchard\n\n[Context]\nsockets=x11;wayland;\nfilesystems=home;\n",
+   "notes": "First Orchard release. Grants: wayland, x11, full home access.",
+   "published_at": 0
+  }
+ ]
+}

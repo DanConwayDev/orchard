@@ -7661,22 +7661,33 @@ fn no_build_note(app: &StoreApp) -> String {
 }
 
 fn load_flathub() -> Vec<StoreApp> {
+    let mut saw_file = false;
     for path in
         orchard_core::appstream::appstream_paths(FLATHUB_REMOTE, &orchard_core::host_ref_arch())
     {
         if !path.exists() {
             continue;
         }
+        saw_file = true;
         let icons_root = path
             .parent()
             .map(|active| active.join("icons"))
             .unwrap_or_default();
-        if let Ok(apps) = orchard_core::appstream::load(&path, &icons_root) {
-            return apps
-                .iter()
-                .map(StoreApp::from_appstream)
-                .collect();
+        match orchard_core::appstream::load(&path, &icons_root) {
+            Ok(apps) => {
+                eprintln!("flathub catalog: {} apps from {}", apps.len(), path.display());
+                return apps
+                    .iter()
+                    .map(StoreApp::from_appstream)
+                    .collect();
+            }
+            // An empty Flathub channel is indistinguishable from a
+            // broken one unless the failure reaches the log; say so.
+            Err(err) => eprintln!("flathub catalog: {}: {err:#}", path.display()),
         }
+    }
+    if !saw_file {
+        eprintln!("flathub catalog: no appstream file for the flathub remote on this machine");
     }
     Vec::new()
 }

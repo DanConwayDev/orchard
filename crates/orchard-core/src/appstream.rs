@@ -763,6 +763,29 @@ pub fn canonicalize_categories(raw: &[String]) -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// Live probe: parse the machine's real flathub appstream and
+    /// report the count, or panic with the parser's actual error.
+    /// The client swallows load failures into an empty catalog, so
+    /// this is the only place the real error is visible.
+    #[test]
+    #[ignore]
+    fn parses_the_live_flathub_appstream() {
+        for path in appstream_paths("flathub", &crate::host_ref_arch()) {
+            if !path.exists() {
+                continue;
+            }
+            let icons_root = path
+                .parent()
+                .map(|active| active.join("icons"))
+                .unwrap_or_default();
+            let apps = load(&path, &icons_root)
+                .unwrap_or_else(|e| panic!("live appstream parse failed: {e:#}"));
+            println!("live flathub apps: {}", apps.len());
+            return;
+        }
+        panic!("no flathub appstream file found on this machine");
+    }
+
     #[test]
     fn canonical_categories_fold_and_dedup() {
         let raw: Vec<String> = ["ArcadeGame", "Game", "Widget", "Utility", "Player"]

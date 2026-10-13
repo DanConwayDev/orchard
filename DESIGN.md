@@ -373,11 +373,14 @@ on the next launch. Distance 2 comes later via indexd crawling reviewer kind 3s.
 
 **M6, self-distribution slice (built).** Orchard publishes itself the same way every
 publisher does, run on our own artifact. The app tree (`self/tree`: flatpak metadata
-advertising the real sandbox, `sockets=x11;wayland; shared=network; filesystems=home;`,
-a desktop file, the mark as the icon) plus the built binary via `self/assemble.sh`
-becomes the OCI artifact through the ordinary `orchard-publish` path; the manifest in
-`self/orchard.publish.toml` carries version `0.1.0` locally and takes
-`ORCHARD_PUBLISH_VERSION` from the pushed tag in CI. The publish relays are
+advertising the real sandbox, `sockets=x11;wayland; shared=network;
+filesystems=home;/var/lib/flatpak:ro; talk=org.freedesktop.Flatpak;`: the appstream
+read-only so the Flathub channel parses in the sandbox, the talk-name so install and
+open drive the host's flatpak from inside it; a desktop file, the mark as the icon)
+plus the built binary via `self/assemble.sh` becomes the OCI artifact through the
+ordinary `orchard-publish` path; the manifest in `self/orchard.publish.toml` carries
+the release version locally and takes `ORCHARD_PUBLISH_VERSION` from the pushed tag
+in CI. The publish relays are
 versioned policy in the manifest (the public relays, so other clients see the
 listing; `--relays` exists for local tests to keep test events off them), and the
 workflow's only secret is the signing key. The dry run pushed to the demo

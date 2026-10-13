@@ -6,4 +6,5 @@ command=orchard
 [Context]
 sockets=x11;wayland;
 shared=network;
-filesystems=home;
+filesystems=home;/var/lib/flatpak:ro;
+talk=org.freedesktop.Flatpak;
