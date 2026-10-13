@@ -631,7 +631,27 @@ pub async fn serve(
         }),
         relays_reset: Some(relays_reset),
     };
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    // A restart races the previous instance's dying listener for the
+    // port, and losing that race used to cost the whole session: the
+    // client degrades to its file fallback for as long as it runs.
+    // Retry while the old socket drains; only a real collision (a
+    // foreign process holding the port) surfaces as an error.
+    let mut bound = None;
+    for attempt in 0..50 {
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => {
+                bound = Some(listener);
+                break;
+            }
+            Err(err)
+                if err.kind() == std::io::ErrorKind::AddrInUse && attempt < 49 =>
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
+    let listener = bound.expect("the last retry returned the error instead");
     axum::serve(listener, router(state)).await?;
     Ok(())
 }
