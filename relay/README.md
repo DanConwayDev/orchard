@@ -88,9 +88,16 @@ Three checks, expected output in order:
 3. a kind-based subscription returns events (on a used relay) or EOSE,
    which proves `limit_scrapers` is false.
 
-The probe exits 0 only when all three pass. Check 2 leaves one inert
-event on the relay (a migration for a throwaway app id); clients trim
-migrations that reference nothing.
+The probe exits 0 only when all three pass. Check 2's event carries a
+NIP-40 expiration a few minutes out: the relay stops serving it once it
+expires and purges it on its own schedule, so probing leaves nothing
+behind. Probes run against 0.10.0 or older leave one inert event (a
+migration for a throwaway app id clients trim); if that residue must
+go, delete the rows from the relay's sqlite directly:
+
+    sqlite3 /path/to/nostr.db "DELETE FROM tag WHERE event_id IN \
+      (SELECT id FROM event WHERE kind=30066); \
+     DELETE FROM event WHERE kind=30066;"
 
 Also confirm the identity document:
 

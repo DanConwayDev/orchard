@@ -11,7 +11,9 @@
 #      relay")
 #   2. a validly signed kind 30066 (migration, throwaway app id) is
 #      admitted; it lands on the relay but is inert (clients trim
-#      migrations that reference nothing)
+#      migrations that reference nothing) and expires: the event
+#      carries a NIP-40 expiration tag a few minutes out, so the
+#      relay stops serving it and purges it without operator help
 #   3. a kind-based REQ (the exact shape limit_scrapers=true would
 #      reject) returns events or EOSE
 #
@@ -172,7 +174,13 @@ def main():
     ok &= reply[0] == "OK" and reply[2] is False
 
     print("== 2. kind 30066 (Orchard kind): expect OK true")
-    send(s, ["EVENT", make_event(30066, "", [["d", "com.probe.AllowlistTest"]], sk)])
+    # NIP-40 expiration a few minutes out: the admission proof serves
+    # its purpose and then the relay stops serving it, so probing a
+    # public relay leaves nothing behind (verified against 0.10.0)
+    expires = int(time.time()) + 300
+    send(s, ["EVENT", make_event(30066, "",
+                                 [["d", "com.probe.AllowlistTest"],
+                                  ["expiration", str(expires)]], sk)])
     reply = json.loads(recv(s, leftover))
     print("    " + json.dumps(reply)[:140])
     ok &= reply[0] == "OK" and reply[2] is True
