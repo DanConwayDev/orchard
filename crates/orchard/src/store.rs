@@ -155,6 +155,29 @@ enum RelayTarget {
     Social,
 }
 
+/// A consequential action awaiting its modal confirmation. The modal
+/// renders the subject, the sandbox facts, and the two buttons;
+/// `run_confirm` executes whichever variant the user confirmed.
+#[derive(Clone, Debug, PartialEq)]
+enum Confirm {
+    /// Install (or verify-and-install) a publisher app.
+    Install {
+        app_id: String,
+        publisher: Option<String>,
+    },
+    /// Update an installed app to the catalog's release.
+    Update {
+        app_id: String,
+        publisher: Option<String>,
+    },
+    /// Uninstall an installed app.
+    Remove { app_id: String },
+    /// Interrupt the running job.
+    Cancel { job_key: String },
+    /// Clear a settings cache: `images` or `events`.
+    Clear { target: &'static str },
+}
+
 /// What `flatpak list` reported for an installed app.
 #[derive(Debug, Clone)]
 /// An installed app, as `flatpak list` reports it.
@@ -183,24 +206,11 @@ pub struct StoreRoot {
     /// selection carries None (the first twin).
     selected_publisher: Option<String>,
     jobs: HashMap<String, Job>,
-    /// The app awaiting an install confirmation: its button reads
-    /// "Sure?" until the second press starts the job, or Escape, page
-    /// close, or another install dismisses it.
-    confirm_install: Option<String>,
-    /// The app awaiting a remove confirmation: its Remove reads
-    /// "Sure?" until the second press starts the job, or Escape,
-    /// a page close, or another action dismisses it. Mirrors
-    /// `confirm_install` and dies in the same places.
-    confirm_remove: Option<String>,
-    /// The app awaiting an update confirmation, the third arm of the
-    /// same idiom: starting any action disarms all of them.
-    confirm_update: Option<String>,
-    /// The running job's armed cancel: its pill reads "Cancel?" until
-    /// the second press cancels, or Escape or a page close disarms.
-    confirm_cancel: Option<String>,
-    /// The armed settings clear ("Sure?" on a Clear button): the
-    /// same two-press grammar, keyed by the button id.
-    confirm_clear: Option<String>,
+    /// The pending consequential action, confirmed through a modal:
+    /// the first press opens the dialog, the dialog's confirm runs
+    /// the action, and nothing writes before that yes. One at a
+    /// time; Escape, a click away, or a page close put it down.
+    confirm: Option<Confirm>,
     /// A quiet status-bar note that is not an error: the cancel
     /// receipt, the one-operation-at-a-time refusal. Cleared by the
     /// next job or a page close.
@@ -406,12 +416,7 @@ impl StoreRoot {
             selected: None,
             selected_publisher: None,
             jobs: HashMap::new(),
-            confirm_install: None,
-            confirm_remove: None,
-            confirm_update: None,
-            confirm_cancel: None,
-            confirm_clear: None,
-            job_note: None,
+            confirm: None,            job_note: None,
             error_at: None,
             note_at: None,
             verified: HashMap::new(),
@@ -1672,7 +1677,7 @@ impl StoreRoot {
         self.about_modal = false;
         self.channel_menu = None;
         self.sort_menu = None;
-        self.confirm_clear = None;
+        self.confirm = None;
         self.collection_view = None;
         self.close_signin();
         if self.page_open {
@@ -1693,7 +1698,7 @@ impl StoreRoot {
 
     fn close_settings(&mut self, cx: &mut Context<Self>) {
         self.settings_open = false;
-        self.confirm_clear = None;
+        self.confirm = None;
         self.relay_target = None;
         self.relay_draft.clear();
         self.relay_anchor = None;
@@ -2313,11 +2318,7 @@ impl StoreRoot {
     /// Every armed confirm disarms together: starting any action,
     /// closing a page, or Escape lets go of all of them at once.
     fn disarm_confirms(&mut self) {
-        self.confirm_install = None;
-        self.confirm_remove = None;
-        self.confirm_update = None;
-        self.confirm_cancel = None;
-        self.confirm_clear = None;
+        self.confirm = None;
     }
 
     /// The one-operation-at-a-time rule: flatpak serializes the
@@ -2349,7 +2350,6 @@ impl StoreRoot {
     /// flag into the quiet receipt; mid-verify, the flag alone
     /// suffices, the verify task checks it before installing.
     fn cancel_job(&mut self, app_id: &str, cx: &mut Context<Self>) {
-        self.confirm_cancel = None;
         let Some(job) = self.jobs.get_mut(app_id) else {
             return;
         };
@@ -2561,6 +2561,21 @@ impl StoreRoot {
         // ----- modals outrank menus: an open modal swallows
         // everything but Escape; a click away closes it through the
         // backdrop -----
+        if self.confirm.is_some() {
+            // the confirm modal owns the keyboard: Enter runs the
+            // pending action, Escape puts it down, nothing under it
+            // navigates
+            match key {
+                "enter" => {
+                    let confirm = self.confirm.take().unwrap();
+                    self.run_confirm(confirm, cx);
+                }
+                "escape" => self.confirm = None,
+                _ => {}
+            }
+            cx.notify();
+            return;
+        }
         if self.about_modal {
             if key == "escape" {
                 self.about_modal = false;
@@ -2789,10 +2804,11 @@ impl StoreRoot {
                 self.delete_text(false);
             }
             "escape" => {
-                // back out one level: lightbox, page, then selection,
-                // then text, then row selection
-                self.disarm_confirms();
-                if self.lightbox.is_some() {
+                // back out one level: confirm modal, lightbox, page,
+                // then selection, then text, then row selection
+                if self.confirm.is_some() {
+                    self.confirm = None;
+                } else if self.lightbox.is_some() {
                     self.lightbox = None;
                 } else if self.collection_view.is_some() {
                     // one level back: the app page underneath (if any)
@@ -3552,8 +3568,6 @@ impl StoreRoot {
                                 .is_some_and(|from| {
                                     Some(from) != row_publisher.as_deref()
                                 });
-                            let update_confirming = self.confirm_update.as_deref()
-                                == Some(action_id.as_str());
                             div()
                                 .flex()
                                 .items_center()
@@ -3595,7 +3609,7 @@ impl StoreRoot {
                                                 row_publisher.as_deref().unwrap_or("")
                                             ),
                                             Some("icons/update.svg"),
-                                            if update_confirming { "Sure?" } else { "Update" },
+                                            "Update",
                                             if key_changed { Tone::Warn } else { Tone::Quiet },
                                         )
                                         .on_click(cx.listener(
@@ -3603,13 +3617,11 @@ impl StoreRoot {
                                                 cx.stop_propagation();
                                                 this.selected_publisher =
                                                     update_publisher.clone();
-                                                if update_confirming {
-                                                    this.update(update_id.as_str(), cx);
-                                                } else {
-                                                    this.confirm_update =
-                                                        Some(update_id.clone());
-                                                    cx.notify();
-                                                }
+                                                this.confirm = Some(Confirm::Update {
+                                                    app_id: update_id.clone(),
+                                                    publisher: update_publisher.clone(),
+                                                });
+                                                cx.notify();
                                             },
                                         )),
                                     )
@@ -3626,10 +3638,8 @@ impl StoreRoot {
                                 .into_any_element()
                         }
                         None => {
-                            // two-press install: the first press arms
-                            // the button, the second starts the job
-                            let confirming = self.confirm_install.as_deref()
-                                == Some(action_id.as_str());
+                            // the press opens the confirm modal; the
+                            // modal's confirm starts the job
                             // no version badge: the raw string is a
                             // publisher-asserted free-text thing the
                             // card cannot compare, and the page's
@@ -3645,19 +3655,18 @@ impl StoreRoot {
                                             row_publisher.as_deref().unwrap_or("")
                                         ),
                                         Some("icons/plus.svg"),
-                                        if confirming { "Sure?" } else { "Install" },
+                                        "Install",
                                         Tone::Accent,
                                     )
                                     .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
                                         cx.stop_propagation();
                                         // the twin this row stands for
                                         this.selected_publisher = install_publisher.clone();
-                                        if confirming {
-                                            this.install(action_id.as_str(), cx);
-                                        } else {
-                                            this.confirm_install = Some(action_id.clone());
-                                            cx.notify();
-                                        }
+                                        this.confirm = Some(Confirm::Install {
+                                            app_id: action_id.clone(),
+                                            publisher: install_publisher.clone(),
+                                        });
+                                        cx.notify();
                                     })),
                                 )
                                 .into_any_element()
@@ -3885,6 +3894,116 @@ impl StoreRoot {
                 .into_any_element(),
         };
 
+        // the update's key differs from the deployed artifact's: the
+        // fact tones the update button amber and rides above the
+        // content as a banner, a fact not a verdict
+        let update_changed = self
+            .installed
+            .get(&app_id)
+            .is_some_and(|info| update_available(&app, info))
+            && self
+                .installed_from(app_id.as_str())
+                .is_some_and(|from| Some(from) != app.publisher.as_deref());
+
+        // the page action: the running job's pill, or the primary
+        // buttons, in the header's top right. The destructive Remove
+        // does not live here: it keeps a quiet corner of its own.
+        let page_actions = div()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .items_end()
+            .gap_2()
+            .child(match &job {
+                Some(state) => {
+                    // the running pill is the cancel surface: its
+                    // press opens the cancel modal
+                    ui::job_pill(
+                        format!("job-pill-{page_key}"),
+                        state.label(),
+                        state.progress.as_ref().and_then(|p| p.percent),
+                        (state.started.elapsed().as_millis() % 2400) as f32 / 2400.,
+                        false,
+                    )
+                    .on_click(cx.listener({
+                        let cancel_key = page_key.clone();
+                        move |this, _e: &ClickEvent, _w, cx| {
+                            cx.stop_propagation();
+                            this.confirm = Some(Confirm::Cancel {
+                                job_key: cancel_key.clone(),
+                            });
+                            cx.notify();
+                        }
+                    }))
+                    .into_any_element()
+                }
+                None => {
+                    let mut buttons: Vec<gpui::AnyElement> = Vec::new();
+                    if installed {
+                        let open_id = app_id.clone();
+                        buttons.push(
+                            button("btn-open", Some("icons/play.svg"), "Open", Tone::Accent)
+                                .on_click(cx.listener(
+                                    move |this, _e: &ClickEvent, _w, cx| {
+                                        this.open(open_id.as_str(), cx);
+                                    },
+                                ))
+                                .into_any_element(),
+                        );
+                        if self
+                            .installed
+                            .get(&app_id)
+                            .is_some_and(|info| update_available(&app, info))
+                        {
+                            let update_id = app_id.clone();
+                            let update_publisher = app.publisher.clone();
+                            buttons.push(
+                                button(
+                                    "btn-update",
+                                    Some("icons/update.svg"),
+                                    "Update",
+                                    if update_changed {
+                                        Tone::Warn
+                                    } else {
+                                        Tone::Quiet
+                                    },
+                                )
+                                .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
+                                    this.confirm = Some(Confirm::Update {
+                                        app_id: update_id.clone(),
+                                        publisher: update_publisher.clone(),
+                                    });
+                                    cx.notify();
+                                }))
+                                .into_any_element(),
+                            );
+                        }
+                    } else {
+                        let install_id = app_id.clone();
+                        let install_publisher = app.publisher.clone();
+                        // publisher flavor on the button until the
+                        // modal says the rest
+                        let label = if app.source == Source::Publisher {
+                            "Verify & install"
+                        } else {
+                            "Install"
+                        };
+                        buttons.push(
+                            button("btn-install", Some("icons/plus.svg"), label, Tone::Accent)
+                                .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
+                                    this.confirm = Some(Confirm::Install {
+                                        app_id: install_id.clone(),
+                                        publisher: install_publisher.clone(),
+                                    });
+                                    cx.notify();
+                                }))
+                                .into_any_element(),
+                        );
+                    }
+                    div().flex().items_center().gap_2().children(buttons).into_any_element()
+                }
+            });
+
         let mut content = div()
             .w_full()
             .min_w_0()
@@ -3913,7 +4032,8 @@ impl StoreRoot {
                     .child("All apps"),
             )
             .child(
-                // identity header
+                // identity header: icon, names, and the actions in
+                // the top right (the old bottom bar's primary slot)
                 div().flex().items_start().gap_4().child(header_icon).child(
                     div()
                         .flex_1()
@@ -3976,8 +4096,24 @@ impl StoreRoot {
                                 ),
                         )
                         .child(provenance),
-                ),
+                )
+                .child(page_actions),
             );
+
+        content = content.children(update_changed.then(|| {
+            div()
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .px_3()
+                .py_2()
+                .rounded_sm()
+                .bg(ui::tint(ui::warn()))
+                .text_size(px(ui::TEXT_SIZE))
+                .text_color(ui::risk_color(Risk::Medium))
+                .child(ui::icon("icons/shield.svg", 13., ui::risk_color(Risk::Medium)))
+                .child("This update is signed by a new publisher key.")
+        }));
 
         if !app.screenshots.is_empty() {
             content = content.child(
@@ -4034,22 +4170,6 @@ impl StoreRoot {
         }
 
         let has_sandbox = sandbox_metadata.is_some();
-        // the update's key differs from the deployed artifact's: the
-        // fact rides above the action bar, amber, a fact not a
-        // verdict
-        let update_changed = self
-            .installed
-            .get(&app_id)
-            .is_some_and(|info| update_available(&app, info))
-            && self
-                .installed_from(app_id.as_str())
-                .is_some_and(|from| Some(from) != app.publisher.as_deref());
-        // at a confirm, medium-and-high grants repeat here: quiet by
-        // default, loud exactly once
-        let risk_note = (self.confirm_install.as_deref() == Some(app_id.as_str())
-            || self.confirm_update.as_deref() == Some(app_id.as_str()))
-        .then(|| risk_echo(sandbox_metadata.as_deref()))
-        .flatten();
         // the repo-verified fact for the page's repository link
         let page_repo_ok = app.repository.as_deref().is_some_and(|url| {
             self.repo_verified(url, app.publisher.as_deref())
@@ -4145,6 +4265,30 @@ impl StoreRoot {
                 )
             });
 
+        // the destructive corner: quiet, at the page's foot, and
+        // never next to the primary action. Its press opens the
+        // confirm modal like every other consequential action.
+        content = content.when(installed && job.is_none(), |foot| {
+            foot.child(
+                div().flex().justify_end().child(
+                    ui::small_button(
+                        "page-remove",
+                        Some("icons/trash.svg"),
+                        "Remove",
+                        Tone::Danger,
+                    )
+                    .on_click(cx.listener({
+                        let remove_id = app_id.clone();
+                        move |this, _e: &ClickEvent, _w, cx| {
+                            this.confirm =
+                                Some(Confirm::Remove { app_id: remove_id.clone() });
+                            cx.notify();
+                        }
+                    })),
+                ),
+            )
+        });
+
         div()
             .flex_1()
             .min_h_0()
@@ -4159,173 +4303,6 @@ impl StoreRoot {
                     .overflow_y_scroll()
                     .track_scroll(&self.page_scroll)
                     .child(div().flex().justify_center().child(content)),
-            )
-            .child(
-                // action bar: pinned under the scrolling content
-                div().flex().items_center().gap_2().px_8().py_3().border_t_1()
-                    .border_color(ui::divider()).bg(ui::panel())
-                    .children(update_changed.then(|| {
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1p5()
-                            .text_size(px(ui::TEXT_SIZE))
-                            .text_color(ui::risk_color(Risk::Medium))
-                            .child(ui::icon(
-                                "icons/shield.svg",
-                                13.,
-                                ui::risk_color(Risk::Medium),
-                            ))
-                            .child("This update is signed by a new publisher key.")
-                    }))
-                    .children(risk_note.map(|(color, text)| {
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1p5()
-                            .text_size(px(ui::TEXT_SIZE))
-                            .text_color(color)
-                            .child(ui::icon("icons/shield.svg", 13., color))
-                            .child(text)
-                    }))
-                    .children(match job {
-                        Some(state) => {
-                            // the running pill is the cancel surface:
-                            // first press arms "Cancel?", the second
-                            // interrupts; the bar inside stays honest
-                            // either way
-                            let confirming =
-                                self.confirm_cancel.as_deref() == Some(page_key.as_str());
-                            let sweep = (state.started.elapsed().as_millis() % 2400) as f32
-                                / 2400.;
-                            let cancel_key = page_key.clone();
-                            vec![ui::job_pill(
-                                format!("job-pill-{page_key}"),
-                                if confirming { "Cancel?" } else { state.label() },
-                                state.progress.as_ref().and_then(|p| p.percent),
-                                sweep,
-                                confirming,
-                            )
-                            .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
-                                if confirming {
-                                    this.cancel_job(cancel_key.as_str(), cx);
-                                } else {
-                                    this.confirm_cancel = Some(cancel_key.clone());
-                                    cx.notify();
-                                }
-                            }))
-                            .into_any_element()]
-                        }
-                        None => {
-                            let mut buttons: Vec<gpui::AnyElement> = Vec::new();
-                            if installed {
-                                let open_id = app_id.clone();
-                                buttons.push(
-                                    button("btn-open", Some("icons/play.svg"), "Open", Tone::Accent)
-                                        .on_click(
-                                            cx.listener(move |this, _e: &ClickEvent, _w, cx| {
-                                                this.open(open_id.as_str(), cx);
-                                            }),
-                                        )
-                                        .into_any_element(),
-                                );
-                                if self
-                                    .installed
-                                    .get(&app_id)
-                                    .is_some_and(|info| update_available(&app, info))
-                                {
-                                    let update_id = app_id.clone();
-                                    let update_confirming = self.confirm_update.as_deref()
-                                        == Some(app_id.as_str());
-                                    buttons.push(
-                                        button(
-                                            "btn-update",
-                                            Some("icons/update.svg"),
-                                            if update_confirming { "Sure?" } else { "Update" },
-                                            if update_changed {
-                                                Tone::Warn
-                                            } else {
-                                                Tone::Quiet
-                                            },
-                                        )
-                                        .on_click(cx.listener(
-                                            move |this, _e: &ClickEvent, _w, cx| {
-                                                if update_confirming {
-                                                    this.update(update_id.as_str(), cx);
-                                                } else {
-                                                    this.confirm_update =
-                                                        Some(update_id.clone());
-                                                    cx.notify();
-                                                }
-                                            },
-                                        ))
-                                        .into_any_element(),
-                                    );
-                                }
-                                let remove_id = app_id.clone();
-                                // two-press: the destructive action
-                                // reads "Sure?" before it runs, same
-                                // as the row's Remove
-                                let remove_confirming = self.confirm_remove.as_deref()
-                                    == Some(app_id.as_str());
-                                buttons.push(
-                                    button(
-                                        "btn-remove",
-                                        Some("icons/trash.svg"),
-                                        if remove_confirming { "Sure?" } else { "Remove" },
-                                        Tone::Danger,
-                                    )
-                                    .on_click(cx.listener(
-                                        move |this, _e: &ClickEvent, _w, cx| {
-                                            if remove_confirming {
-                                                this.uninstall(remove_id.as_str(), cx);
-                                            } else {
-                                                this.confirm_remove = Some(remove_id.clone());
-                                                cx.notify();
-                                            }
-                                        },
-                                    ))
-                                    .into_any_element(),
-                                );
-                            } else if app.version.is_none() && app.source == Source::Publisher {
-                                // the honest note replaces an install
-                                // that cannot work
-                                buttons.push(
-                                    badge(&no_build_note(&app), ui::text_dim()).into_any_element(),
-                                );
-                            } else {
-                                let install_id = app_id.clone();
-                                // two-press install: same idiom as the
-                                // list rows; the label carries the
-                                // publisher flavor until armed
-                                let confirming = self.confirm_install.as_deref()
-                                    == Some(app_id.as_str());
-                                let label = if confirming {
-                                    "Sure?"
-                                } else if app.source == Source::Publisher {
-                                    "Verify & install"
-                                } else {
-                                    "Install"
-                                };
-                                buttons.push(
-                                    button("btn-install", Some("icons/plus.svg"), label, Tone::Accent)
-                                        .on_click(cx.listener(
-                                            move |this, _e: &ClickEvent, _w, cx| {
-                                                if confirming {
-                                                    this.install(install_id.as_str(), cx);
-                                                } else {
-                                                    this.confirm_install =
-                                                        Some(install_id.clone());
-                                                    cx.notify();
-                                                }
-                                            },
-                                        ))
-                                        .into_any_element(),
-                                );
-                            }
-                            buttons
-                        }
-                    }),
             )
             .into_any_element()
     }
@@ -4390,31 +4367,6 @@ fn elapsed_text(d: Duration) -> String {
     } else {
         format!("{}m{:02}s", s / 60, s % 60)
     }
-}
-
-/// The medium-and-high grants as one line for the confirm moment,
-/// with the worst risk present as the color: a low-risk app stays
-/// silent. Capped at three names, then a count.
-fn risk_echo(metadata: Option<&str>) -> Option<(gpui::Rgba, String)> {
-    let meta = metadata?;
-    let loud: Vec<String> = orchard_core::permissions::grants_from_metadata(meta)
-        .into_iter()
-        .filter(|grant| grant.risk != Risk::Low)
-        .map(|grant| match grant.risk {
-            Risk::High => format!("{} (high)", grant.summary),
-            _ => grant.summary,
-        })
-        .collect();
-    let worst = if loud
-        .iter()
-        .any(|line| line.contains("(high)")) { Risk::High } else { Risk::Medium };
-    let named = loud.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
-    let names = if loud.len() > 3 {
-        format!("{named} and {} more", loud.len() - 3)
-    } else {
-        named
-    };
-    (!loud.is_empty()).then(|| (ui::risk_color(worst), format!("This app asks for: {names}.")))
 }
 
 /// Fixed list row height: `uniform_list` needs uniform items, and a
@@ -6228,6 +6180,12 @@ impl Render for StoreRoot {
                         ),
                 )
             })
+            .when_some(self.confirm.clone(), |root, confirm| {
+                // the confirm modal: a dimmed overlay with the
+                // action's card; the backdrop click and Escape put
+                // it down, the confirm button (or Enter) runs it
+                root.child(self.render_confirm_modal(confirm, cx))
+            })
             // dropdown panels and the header sign-in panel paint after
             // everything (the lightbox included)
             .when(self.any_layer_open(), |root| {
@@ -6277,6 +6235,310 @@ impl StoreRoot {
             layers = layers.child(self.render_about_modal(cx));
         }
         layers.into_any_element()
+    }
+
+    /// The confirm modal: the pending action's card. What the user
+    /// is about to do, to what, signed by whom, asking for what:
+    /// the moment of consent carries the facts, for every action,
+    /// everywhere. Enter confirms, Escape or the backdrop puts it
+    /// down.
+    fn render_confirm_modal(
+        &mut self,
+        confirm: Confirm,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        // the subject row, cloned out of the catalog: twins
+        // disambiguated by publisher where one is named
+        let (app_id, publisher) = match &confirm {
+            Confirm::Install { app_id, publisher } | Confirm::Update { app_id, publisher } => {
+                (app_id.clone(), publisher.clone())
+            }
+            Confirm::Remove { app_id } => (app_id.clone(), None),
+            _ => (String::new(), None),
+        };
+        let app = self
+            .apps
+            .iter()
+            .find(|a| a.app_id == app_id && a.publisher.as_deref() == publisher.as_deref())
+            .or_else(|| self.apps.iter().find(|a| a.app_id == app_id))
+            .cloned();
+        let name = app
+            .as_ref()
+            .map(|a| a.name.clone())
+            .unwrap_or_else(|| app_id.clone());
+        let version = app.as_ref().and_then(|a| a.version.clone());
+
+        // the sandbox facts: the same metadata chain the page's
+        // permissions section reads, medium-and-high grants only
+        let metadata: Option<String> = app
+            .as_ref()
+            .and_then(|a| a.metadata.clone())
+            .or_else(|| {
+                self.installed
+                    .get(&app_id)
+                    .and_then(|info| info.metadata.clone())
+            })
+            .or_else(|| {
+                let key = app_key(&app_id, publisher.as_deref());
+                self.remote_metadata.get(&key).cloned()
+            });
+        let grant_rows: Vec<(gpui::Rgba, String)> = metadata
+            .as_deref()
+            .map(|meta| {
+                orchard_core::permissions::grants_from_metadata(meta)
+                    .into_iter()
+                    .filter(|grant| grant.risk != Risk::Low)
+                    .map(|grant| {
+                        let label = match grant.risk {
+                            Risk::High => format!("{} (high)", grant.summary),
+                            _ => grant.summary,
+                        };
+                        (ui::risk_color(grant.risk), label)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // the signer facts: who published this, and does the linked
+        // repository carry their key
+        let signer = publisher
+            .as_deref()
+            .map(|pubkey| match self.verified_nip05(pubkey) {
+                Some(claim) => claim,
+                None => self
+                    .profiles
+                    .get(pubkey)
+                    .and_then(|p| p.name.clone())
+                    .unwrap_or_else(|| short_npub(pubkey)),
+            });
+        let repo_line = app
+            .as_ref()
+            .and_then(|a| a.repository.clone())
+            .map(|repo| {
+                let ok = self.repo_verified(&repo, publisher.as_deref());
+                (
+                    if ok { ui::accent() } else { ui::text_dim() },
+                    if ok {
+                        "The linked repository carries this publisher's key."
+                    } else {
+                        "The linked repository is not verified yet."
+                    }
+                )
+            });
+
+        let (title, intro, dismiss, confirm_label, confirm_tone) = match &confirm {
+            Confirm::Install { .. } => (
+                format!("Install {}?", name),
+                version
+                    .clone()
+                    .map(|v| format!("Version {v} will be installed."))
+                    .unwrap_or_else(|| "The catalog release will be installed.".to_string()),
+                "Cancel",
+                "Install",
+                Tone::Accent,
+            ),
+            Confirm::Update { .. } => (
+                format!("Update {}?", name),
+                version
+                    .clone()
+                    .map(|v| format!("Version {v} will replace the installed build."))
+                    .unwrap_or_else(|| {
+                        "The catalog release will replace the installed build.".to_string()
+                    }),
+                "Cancel",
+                "Update",
+                Tone::Accent,
+            ),
+            Confirm::Remove { .. } => (
+                format!("Remove {}?", name),
+                "The app is uninstalled from this machine. Files it saved inside your home stay."
+                    .to_string(),
+                "Keep app",
+                "Remove",
+                Tone::Danger,
+            ),
+            Confirm::Cancel { .. } => (
+                format!("Stop the {}?", name.to_lowercase()),
+                "The operation stops where it is; nothing is left half-installed, and you can retry from the catalog.".to_string(),
+                "Keep going",
+                "Stop it",
+                Tone::Quiet,
+            ),
+            Confirm::Clear { target } => {
+                let what = if *target == "images" { "cached images" } else { "cached events" };
+                (
+                    format!("Clear {what}?"),
+                    "The cache is emptied; it refills as you browse.".to_string(),
+                    "Keep",
+                    "Clear",
+                    Tone::Danger,
+                )
+            }
+        };
+
+        let backdrop_confirm = confirm.clone();
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            // the dimmed click-away is a FIRST sibling; the card after
+            // it swallows the mouse down so the backdrop's close
+            // never sees the card's own clicks (the sign-in modal's
+            // grammar)
+            .child(
+                div()
+                    .id("confirm-backdrop")
+                    .absolute()
+                    .inset_0()
+                    .bg(gpui::rgba(0x000000B3))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _e: &MouseDownEvent, _w, cx| {
+                            this.confirm = None;
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    ),
+            )
+            .child(
+                div()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        |_e: &MouseDownEvent, _w, cx: &mut gpui::App| cx.stop_propagation(),
+                    )
+                    .child(
+                        div()
+                            .w(px(460.))
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(ui::divider())
+                            .bg(ui::panel())
+                            .p_4()
+                            .child(
+                                div()
+                                    .text_size(px(ui::TEXT_SIZE_EMPHASIS))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(ui::text())
+                                    .child(title),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(ui::TEXT_SIZE))
+                                    .text_color(ui::text())
+                                    .child(intro),
+                            )
+                            .children(signer.map(|who| {
+                                div()
+                                    .text_size(px(ui::TEXT_SIZE))
+                                    .text_color(ui::text_dim())
+                                    .child(format!("Published by {who}."))
+                            }))
+                            .children(repo_line.map(|(color, line)| {
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .text_size(px(ui::TEXT_SIZE))
+                                    .text_color(color)
+                                    .child(ui::icon("icons/git.svg", 12., color))
+                                    .child(line)
+                            }))
+                            .children(if metadata.is_none() {
+                                Some(
+                                    div()
+                                        .text_size(px(ui::TEXT_SIZE))
+                                        .text_color(ui::text_dim())
+                                        .child("The sandbox manifest is not available yet; the app's permissions are not known."),
+                                )
+                            } else if grant_rows.is_empty() {
+                                Some(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1p5()
+                                        .text_size(px(ui::TEXT_SIZE))
+                                        .text_color(ui::text_dim())
+                                        .child(ui::icon("icons/shield.svg", 12., ui::text_dim()))
+                                        .child("No special permissions."),
+                                )
+                            } else {
+                                // the real grant rows, the page's
+                                // permissions section in brief
+                                Some(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .children(grant_rows.iter().map(|(color, line)| {
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap_1p5()
+                                                .text_size(px(ui::TEXT_SIZE))
+                                                .text_color(*color)
+                                                .child(ui::icon("icons/shield.svg", 12., *color))
+                                                .child(line.clone())
+                                        })),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .flex()
+                                    .justify_end()
+                                    .gap_2()
+                                    .child(
+                                        ui::button("confirm-dismiss", None, dismiss, Tone::Quiet)
+                                            .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
+                                                this.confirm = None;
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .child(
+                                        ui::button(
+                                            "confirm-run",
+                                            None,
+                                            confirm_label,
+                                            confirm_tone,
+                                        )
+                                        .on_click(cx.listener({
+                                            let confirm = backdrop_confirm.clone();
+                                            move |this, _e: &ClickEvent, _w, cx| {
+                                                this.confirm = None;
+                                                this.run_confirm(confirm.clone(), cx);
+                                            }
+                                        })),
+                                    ),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// The modal's yes: execute the pending action. The actions put
+    /// the confirm down themselves; this only routes.
+    fn run_confirm(&mut self, confirm: Confirm, cx: &mut Context<Self>) {
+        match confirm {
+            Confirm::Install { app_id, publisher } => {
+                self.selected_publisher = publisher;
+                self.install(&app_id, cx);
+            }
+            Confirm::Update { app_id, publisher } => {
+                self.selected_publisher = publisher;
+                self.update(&app_id, cx);
+            }
+            Confirm::Remove { app_id } => self.uninstall(&app_id, cx),
+            Confirm::Cancel { job_key } => self.cancel_job(&job_key, cx),
+            Confirm::Clear { target } => match target {
+                "images" => self.clear_image_cache(cx),
+                "events" => self.clear_event_cache(cx),
+                _ => {}
+            },
+        }
     }
 
     /// The click-away overlay for the open dropdowns, painted behind
@@ -6416,9 +6678,7 @@ impl StoreRoot {
                             this.channel_menu = None;
                             // a pending install confirm does not
                             // survive a channel switch
-                            this.confirm_install = None;
-                            this.confirm_remove = None;
-                            this.confirm_update = None;
+                            this.confirm = None;
                             cx.notify();
                         }))
                         .child(f.label().to_string())
@@ -7098,9 +7358,9 @@ impl StoreRoot {
                     .child(self.settings_section(
                         "icons/trash.svg",
                         "Cached data",
-                        // both clears are destructive on the first
-                        // press, so they wear the two-press idiom
-                        // every other destructive button wears
+                        // both clears are destructive, so their
+                        // press opens the confirm modal like every
+                        // other consequential action
                         div()
                             .flex()
                             .flex_col()
@@ -7111,26 +7371,13 @@ impl StoreRoot {
                                 ui::small_button(
                                     "settings-clear-images",
                                     None,
-                                    if self.confirm_clear.as_deref()
-                                        == Some("settings-clear-images")
-                                    {
-                                        "Sure?"
-                                    } else {
-                                        "Clear"
-                                    },
+                                    "Clear",
                                     Tone::Danger,
                                 )
                                 .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
-                                    if this.confirm_clear.as_deref()
-                                        == Some("settings-clear-images")
-                                    {
-                                        this.confirm_clear = None;
-                                        this.clear_image_cache(cx);
-                                    } else {
-                                        this.confirm_clear =
-                                            Some("settings-clear-images".into());
-                                        cx.notify();
-                                    }
+                                    this.confirm =
+                                        Some(Confirm::Clear { target: "images" });
+                                    cx.notify();
                                 })),
                             ))
                             .child(self.settings_row(
@@ -7139,26 +7386,13 @@ impl StoreRoot {
                                 ui::small_button(
                                     "settings-clear-events",
                                     None,
-                                    if self.confirm_clear.as_deref()
-                                        == Some("settings-clear-events")
-                                    {
-                                        "Sure?"
-                                    } else {
-                                        "Clear"
-                                    },
+                                    "Clear",
                                     Tone::Danger,
                                 )
                                 .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
-                                    if this.confirm_clear.as_deref()
-                                        == Some("settings-clear-events")
-                                    {
-                                        this.confirm_clear = None;
-                                        this.clear_event_cache(cx);
-                                    } else {
-                                        this.confirm_clear =
-                                            Some("settings-clear-events".into());
-                                        cx.notify();
-                                    }
+                                    this.confirm =
+                                        Some(Confirm::Clear { target: "events" });
+                                    cx.notify();
                                 })),
                             ))
                             .into_any_element(),
@@ -8363,20 +8597,6 @@ mod tests {
             list_sort(&older, &newer, ListSort::Updated, "2026-10-11"),
             Ordering::Greater
         );
-    }
-
-    #[test]
-    fn risk_echo_speaks_only_when_it_matters() {
-        // windowing alone is low risk: the confirm stays silent
-        let quiet = "[Context]\nsockets=wayland\n";
-        assert_eq!(risk_echo(Some(quiet)), None);
-        // a home-directory grant is high risk: the line names it and
-        // wears the high color
-        let meta = "[Context]\nsockets=wayland\nfilesystems=home\n";
-        let (color, text) = risk_echo(Some(meta)).expect("high grant speaks");
-        assert_eq!(color, ui::risk_color(orchard_core::Risk::High));
-        assert!(text.starts_with("This app asks for: "));
-        assert!(text.contains("Home directory (read/write) (high)"));
     }
 
 

@@ -430,6 +430,25 @@ the first matrix leg to finish creates `orchard.txt` (201 Created), the second
 updates it (200), and treating 201 as failure failed an otherwise green aarch64
 leg after every real step had succeeded.
 
+**The confirm is a modal, and the action lives in the header (decided, v0.1.1).**
+The two-press "Sure?" arming died everywhere the same day it broke: on a
+Danger button the hover state flipped the fill to the solid risk color and the
+ink to an accent-derived one, so the armed label (and the baked glyph) could
+vanish under the cursor exactly when confirmation mattered. The replacement is
+one confirm modal for every consequential action: install, update, remove,
+stop-job, settings clears. The first press opens the card; nothing writes
+before its yes; Enter confirms, Escape or the backdrop puts it down. The card
+carries the facts the old bar scattered: the release's version, the publisher
+and repository-proof state, and the medium-and-high sandbox grants (or "No
+special permissions"), so a row-level install reviews the same facts the page
+shows. The details page loses its bottom action bar: Open, Update, and
+Verify-and-install sit in the identity header's top right (the job's progress
+pill takes the same slot while one runs; the key-change notice became an
+amber banner above the content), and Remove keeps a quiet corner at the
+page's foot, destructive but never next to the primary action. Risk buttons'
+hover brightens their tint instead of inverting it, so no label or glyph can
+disappear on hover anywhere.
+
 **Relay topology: the rendezvous set (decided).** Nostr relays do not gossip to
 each other, so a publisher and a reader must share at least one relay for anything
 to flow. The model is a small, public, versioned **rendezvous set**
@@ -771,7 +790,7 @@ opening items because they need the push, the signing secret, and a tag.
       the feed through a `POST /v1/cache` on indexd, which also cycles the
       relay threads so everything re-delivers. Trust-relevant behavior is
       deliberately absent from settings: digest verification, signature
-      checks, and the two-press install confirm are not configurable, ever.
+      checks, and the install confirm modal is not configurable, ever.
 - [x] Chrome exits and the About modal. The mark's click is the About
       surface (the mark at 40px, the version, the MIT license, the
       source repository link), a centered modal over a dimmed

@@ -88,6 +88,15 @@ fn main() {
     let settings = orchard_core::SettingsHandle::load_default();
     if let Some(catalog) = seed_catalog {
         start_indexd(catalog, settings.clone());
+        // the UI's first fetches (profiles, graph) fire within
+        // milliseconds; give the in-process server's bind a moment,
+        // or the client degrades for an hour over a lost race
+        for _ in 0..40 {
+            if std::net::TcpStream::connect(indexd_addr()).is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
     }
     let settings_for_root = settings.clone();
 

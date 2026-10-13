@@ -279,8 +279,16 @@ pub enum Tone {
 
 /// The whisper behind a colored label: keep the rgb bytes, swap in a
 /// ~13% alpha fill.
-fn tint(fg: Rgba) -> Rgba {
+pub fn tint(fg: Rgba) -> Rgba {
     rgba((u32::from(fg) & 0xFFFF_FF00) | 0x22)
+}
+
+/// The hover fill for a tinted risk button: the same hue held harder
+/// (~33% alpha). The label and glyph keep their rest ink, so nothing
+/// disappears under the cursor; the brightening alone is the
+/// affordance.
+fn tint_strong(fg: Rgba) -> Rgba {
+    rgba((u32::from(fg) & 0xFFFF_FF00) | 0x55)
 }
 
 /// A small tinted label: colored text on a whisper of the same color,
@@ -409,9 +417,8 @@ pub fn button(
             .text_color(danger())
             .hover(|style| {
                 style
-                    .bg(danger())
+                    .bg(tint_strong(danger()))
                     .border_color(danger())
-                    .text_color(accent_fg())
             })
             .child(label.to_string()),
         Tone::Warn => base
@@ -421,9 +428,8 @@ pub fn button(
             .text_color(warn())
             .hover(|style| {
                 style
-                    .bg(warn())
+                    .bg(tint_strong(warn()))
                     .border_color(warn())
-                    .text_color(accent_fg())
             })
             .child(label.to_string()),
     }
@@ -534,9 +540,8 @@ pub fn small_button(
             .text_color(danger())
             .hover(|style| {
                 style
-                    .bg(danger())
+                    .bg(tint_strong(danger()))
                     .border_color(danger())
-                    .text_color(accent_fg())
             })
             .child(label.to_string()),
         Tone::Warn => base
@@ -546,9 +551,8 @@ pub fn small_button(
             .text_color(warn())
             .hover(|style| {
                 style
-                    .bg(warn())
+                    .bg(tint_strong(warn()))
                     .border_color(warn())
-                    .text_color(accent_fg())
             })
             .child(label.to_string()),
     }
