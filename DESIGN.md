@@ -677,11 +677,12 @@ opening items because they need the push, the signing secret, and a tag.
       over a footer that already said "N apps", and the two stacked
       agreements on the All view felt like duplication. What
       survived is smaller still: the chosen category chip wears its
-      size ("Games · 214") in quiet ink beside the label, and says
-      nothing until chosen; All wears none, because the footer is
-      already the whole catalog's count. The other composition
-      facts (publishers, verified, circle) live on the rows and
-      pages themselves.
+      size ("Games · 214") in the same ink as its name, and says
+      nothing until chosen; All wears the catalog total the same
+      way, accepting the echo of the footer's count for the
+      consistency of every chip behaving alike. The other
+      composition facts (publishers, verified, circle) live on the
+      rows and pages themselves.
 - [x] The row's digest badge is a shield now, quiet like the repo
       check, with the words on hover ("Artifact matches the signed
       digest") and the full chip on the page. It means this client has

@@ -3139,7 +3139,7 @@ impl StoreRoot {
             .border_b_1()
             .border_color(ui::divider())
             .bg(ui::panel())
-            .child(self.category_chip("All", None, None, cx))
+            .child(self.category_chip("All", None, Some(self.apps.len()), cx))
             .children(self.category_counts().into_iter().map(|(name, count)| {
                 self.category_chip(name, Some(name.to_string()), Some(count), cx)
             }))
@@ -3188,10 +3188,15 @@ impl StoreRoot {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let active = self.category == value;
+        let id = SharedString::from(format!("cat-{label}"));
+        // the chosen chip wears its size in the same ink as its name:
+        // two weights in one pill read as two elements
+        let label = match (active, count) {
+            (true, Some(count)) => format!("{label} · {count}"),
+            _ => label.to_string(),
+        };
         div()
-            .id(SharedString::from(format!("cat-{label}")))
-            .flex()
-            .items_center()
+            .id(id)
             .px_2()
             .py_0p5()
             .rounded_sm()
@@ -3208,18 +3213,7 @@ impl StoreRoot {
                 this.category = value.clone();
                 cx.notify();
             }))
-            .child(label.to_string())
-            // the chosen category wears its size; unselected chips
-            // stay quiet, and All has no count of its own (the
-            // footer already speaks for the whole catalog)
-            .when(active, |chip| match count {
-                Some(count) => chip.child(
-                    div()
-                        .text_color(ui::fg_soft(ui::accent_fg()))
-                        .child(format!(" · {count}")),
-                ),
-                None => chip,
-            })
+            .child(label)
             .into_any_element()
     }
 
