@@ -5930,7 +5930,7 @@ impl Render for StoreRoot {
                     // decoration (version, license, source)
                     .child(
                         div()
-                            .id("about-trigger")
+                            .id("mark-home")
                             .flex_none()
                             .px_1()
                             .py_0p5()
@@ -5940,15 +5940,27 @@ impl Render for StoreRoot {
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, _event: &MouseDownEvent, _w, cx| {
-                                    let open = this.about_modal;
+                                    // the mark is home: out of every
+                                    // overlay, back to the All apps
+                                    // list, search and channel reset
                                     this.channel_menu = None;
                                     this.account_menu = None;
                                     this.sort_menu = None;
-                                    this.about_modal = !open;
+                                    this.about_modal = false;
+                                    this.settings_open = false;
+                                    this.collection_view = None;
+                                    this.selected = None;
+                                    this.selected_publisher = None;
+                                    this.search = String::new();
+                                    this.filter = Filter::All;
+                                    this.close_page(cx);
                                     cx.stop_propagation();
                                     cx.notify();
                                 }),
                             )
+                            .tooltip(|_window, cx| {
+                                cx.new(|_| TextTooltip("All apps".into())).into()
+                            })
                             .children(crate::cache::orchard_mark().map(|path| {
                                 gpui::img(path).w(px(22.)).h(px(22.))
                             })),
@@ -6152,10 +6164,44 @@ impl Render for StoreRoot {
                     .bg(ui::panel())
                     .text_size(px(ui::TEXT_SIZE_SMALL))
                     .text_color(ui::text_dim())
-                    .child(match self.flathub_loading {
-                        true => format!("{total} apps (loading Flathub…) · {installed_count} installed"),
-                        false => format!("{total} apps · {installed_count} installed"),
-                    })
+                    .child(
+                        // the About trigger: an info icon ahead of the
+                        // count, where a footer's fine print lives
+                        div()
+                            .id("about-trigger")
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .child(
+                                div()
+                                    .id("about-icon")
+                                    .flex_none()
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(ui::surface()))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(
+                                            |this, _event: &MouseDownEvent, _w, cx| {
+                                                this.channel_menu = None;
+                                                this.account_menu = None;
+                                                this.sort_menu = None;
+                                                this.about_modal = true;
+                                                cx.stop_propagation();
+                                                cx.notify();
+                                            },
+                                        ),
+                                    )
+                                    .tooltip(|_window, cx| {
+                                        cx.new(|_| TextTooltip("About Orchard".into()))
+                                            .into()
+                                    })
+                                    .child(ui::icon("icons/info.svg", 12., ui::text_dim())),
+                            )
+                            .child(match self.flathub_loading {
+                                true => format!("{total} apps (loading Flathub…) · {installed_count} installed"),
+                                false => format!("{total} apps · {installed_count} installed"),
+                            }),
+                    )
                     .child(div().flex_1())
                     // the running job, right-aligned: stage, percent,
                     // elapsed; logistics only, never a judgment

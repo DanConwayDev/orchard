@@ -449,6 +449,17 @@ page's foot, destructive but never next to the primary action. Risk buttons'
 hover brightens their tint instead of inverting it, so no label or glyph can
 disappear on hover anywhere.
 
+**The mark is home, and About lives in the footer (decided, v0.1.2).**
+The mark's click used to be the About surface, which spent the chrome's
+most prominent click on the least common action. The mark now goes home:
+out of every overlay (page, settings, lightbox, modals, menus, confirms),
+back to the All apps list with search and channel reset, the way a logo
+click behaves everywhere else on the desktop. About keeps the modal (the
+shape the desktop trains with Help, About) but its trigger moved to an
+info icon in the footer, ahead of the apps count, where fine print lives.
+Both the mark and the icon wear hover states and tooltips saying what
+they do.
+
 **Relay topology: the rendezvous set (decided).** Nostr relays do not gossip to
 each other, so a publisher and a reader must share at least one relay for anything
 to flow. The model is a small, public, versioned **rendezvous set**
