@@ -291,6 +291,12 @@ fn tint_strong(fg: Rgba) -> Rgba {
     rgba((u32::from(fg) & 0xFFFF_FF00) | 0x55)
 }
 
+/// Ink at ~60% alpha: a quiet second run inside a filled control (a
+/// count beside its label), same hue, less voice.
+pub fn fg_soft(fg: Rgba) -> Rgba {
+    rgba((u32::from(fg) & 0xFFFF_FF00) | 0x99)
+}
+
 /// A small tinted label: colored text on a whisper of the same color,
 /// kuma's rubber-band trick.
 pub fn badge(text: &str, fg: Rgba) -> Div {

@@ -3139,9 +3139,9 @@ impl StoreRoot {
             .border_b_1()
             .border_color(ui::divider())
             .bg(ui::panel())
-            .child(self.category_chip("All", None, cx))
-            .children(self.category_counts().into_iter().map(|(name, _)| {
-                self.category_chip(name, Some(name.to_string()), cx)
+            .child(self.category_chip("All", None, None, cx))
+            .children(self.category_counts().into_iter().map(|(name, count)| {
+                self.category_chip(name, Some(name.to_string()), Some(count), cx)
             }))
             // the sort picker: the list order is a chosen option,
             // persisted like the other view preferences
@@ -3180,10 +3180,18 @@ impl StoreRoot {
             .into_any_element()
     }
 
-    fn category_chip(&self, label: &str, value: Option<String>, cx: &mut Context<Self>) -> AnyElement {
+    fn category_chip(
+        &self,
+        label: &str,
+        value: Option<String>,
+        count: Option<usize>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let active = self.category == value;
         div()
             .id(SharedString::from(format!("cat-{label}")))
+            .flex()
+            .items_center()
             .px_2()
             .py_0p5()
             .rounded_sm()
@@ -3201,6 +3209,17 @@ impl StoreRoot {
                 cx.notify();
             }))
             .child(label.to_string())
+            // the chosen category wears its size; unselected chips
+            // stay quiet, and All has no count of its own (the
+            // footer already speaks for the whole catalog)
+            .when(active, |chip| match count {
+                Some(count) => chip.child(
+                    div()
+                        .text_color(ui::fg_soft(ui::accent_fg()))
+                        .child(format!(" · {count}")),
+                ),
+                None => chip,
+            })
             .into_any_element()
     }
 
@@ -5844,13 +5863,6 @@ impl Render for StoreRoot {
         let total = self.apps.len();
         let installed_count = self.installed.len();
         let search_focused = self.focus_handle.is_focused(window);
-        // the count by the mark: the view's rows while a list is on
-        // screen (live under search, chips, and lenses), the catalog
-        // total when no list is (pages, settings, collections)
-        let browsing = !self.settings_open
-            && self.collection_view.is_none()
-            && !(page_open && selected.is_some());
-        let count = if browsing { self.filtered().len() } else { total };
 
         div()
             .key_context("StoreRoot")
@@ -5881,15 +5893,11 @@ impl Render for StoreRoot {
                     .border_b_1()
                     .border_color(ui::divider())
                     .bg(ui::panel())
-                    // the mark: home, back to the All apps list, with
-                    // the view's count riding along as its label
+                    // the mark: home, back to the All apps list
                     .child(
                         div()
                             .id("mark-home")
                             .flex_none()
-                            .flex()
-                            .items_center()
-                            .gap_1p5()
                             .px_1()
                             .py_0p5()
                             .rounded_sm()
@@ -5921,16 +5929,7 @@ impl Render for StoreRoot {
                             })
                             .children(crate::cache::orchard_mark().map(|path| {
                                 gpui::img(path).w(px(22.)).h(px(22.))
-                            }))
-                            .child(
-                                div()
-                                    .text_size(px(ui::TEXT_SIZE_SMALL))
-                                    .text_color(ui::text_dim())
-                                    .child(format!(
-                                        "{count} app{}",
-                                        if count == 1 { "" } else { "s" }
-                                    )),
-                            ),
+                            })),
                     )
                     // the search, centered on the window width: an
                     // absolute layer spanning the bar, content centered
