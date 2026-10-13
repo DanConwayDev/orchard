@@ -3354,6 +3354,7 @@ impl StoreRoot {
                     row_publisher.as_deref().unwrap_or("")
                 );
                 let digest_id = format!("{row_id}-digest");
+                let repo_verified_id = format!("{row_id}-repo-verified");
                 let is_selected = selected == Some(app.app_id.as_str())
                     && self.selected_publisher.as_deref() == app.publisher.as_deref();
                 let is_installed = self.installed.contains_key(&app.app_id);
@@ -3468,13 +3469,31 @@ impl StoreRoot {
                                     )
                                     // repo-verified: the forge hosts
                                     // this publisher key (quiet by
-                                    // default, details on the page)
+                                    // default, the words on hover)
                                     .when(row_repo_ok, |row| {
-                                        row.child(ui::icon(
-                                            "icons/check.svg",
-                                            13.,
-                                            ui::risk_color(orchard_core::Risk::Low),
-                                        ))
+                                        row.child(
+                                            div()
+                                                .id(SharedString::from(
+                                                    repo_verified_id,
+                                                ))
+                                                .hover(|style| {
+                                                    style.bg(gpui::transparent_black())
+                                                })
+                                                .tooltip(|_window, cx| {
+                                                    cx.new(|_| {
+                                                        TextTooltip(
+                                                            "Repository-verified: the linked repository carries this publisher's signing key"
+                                                                .into(),
+                                                        )
+                                                    })
+                                                    .into()
+                                                })
+                                                .child(ui::icon(
+                                                    "icons/check.svg",
+                                                    13.,
+                                                    ui::risk_color(orchard_core::Risk::Low),
+                                                )),
+                                        )
                                     }),
                             )
                             .child(
@@ -5163,7 +5182,23 @@ impl StoreRoot {
                             .text_color(ui::text_dim())
                             .children(card.date_note.clone().map(|note| div().child(note)))
                             .children(card.repo_ok.then(|| {
-                                ui::icon("icons/check.svg", 12., ui::accent())
+                                // the repo-verified check, same words
+                                // as the rows and the page link
+                                div()
+                                    .id(SharedString::from(format!(
+                                        "pub-card-repo-{index}"
+                                    )))
+                                    .hover(|style| style.bg(gpui::transparent_black()))
+                                    .tooltip(|_window, cx| {
+                                        cx.new(|_| {
+                                            TextTooltip(
+                                                "Repository-verified: the linked repository carries this publisher's signing key"
+                                                    .into(),
+                                            )
+                                        })
+                                        .into()
+                                    })
+                                    .child(ui::icon("icons/check.svg", 12., ui::accent()))
                             })),
                     ),
             );
@@ -7863,11 +7898,26 @@ fn project_link(
         .child(ui::icon(icon, 13., ui::accent()))
         .child(url)
         .when(verified, |link| {
-            link.child(ui::icon(
-                "icons/check.svg",
-                13.,
-                ui::risk_color(orchard_core::Risk::Low),
-            ))
+            link.child(
+                div()
+                    .id(SharedString::from(format!("link-{id}-verified")))
+                    .flex_none()
+                    .hover(|style| style.bg(gpui::transparent_black()))
+                    .tooltip(|_window, cx| {
+                        cx.new(|_| {
+                            TextTooltip(
+                                "Repository-verified: the linked repository carries this publisher's signing key"
+                                    .into(),
+                            )
+                        })
+                        .into()
+                    })
+                    .child(ui::icon(
+                        "icons/check.svg",
+                        13.,
+                        ui::risk_color(orchard_core::Risk::Low),
+                    )),
+            )
         })
 }
 
