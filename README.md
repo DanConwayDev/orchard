@@ -48,15 +48,17 @@ with the milestone history.
 Once the `v0.1.0` release exists, the whole app is one flatpak command
 away, pinned to the exact bytes the release signed:
 
-    flatpak install --system -y \
+    flatpak install --user -y \
       docker://ghcr.io/letdown2491/orchard@sha256:<digest from the release notes>
 
 The digest is per-arch (x86_64 and aarch64 are separate pins); take the
 line for your arch from the release notes, or from the signed listing
 event on the rendezvous relays. It is the same command the Orchard
 client itself runs for every install, and flatpak is the one
-prerequisite Orchard has anyway. Updates after that first install come
-through Orchard's own catalog, not the command line.
+prerequisite Orchard has anyway. The install is per-user (flatpak's
+system-scope image install is broken; see DESIGN.md), so no polkit
+password appears. Updates after that first install come through
+Orchard's own catalog, not the command line.
 
 ## Try it (Fedora atomic host, x86_64)
 
