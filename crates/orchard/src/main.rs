@@ -51,6 +51,15 @@ fn start_indexd(catalog: orchard_core::CatalogFile, settings: orchard_core::Sett
             }
         })
         .expect("failed to spawn indexd thread");
+    // the UI's first fetches (profiles, graph) fire within
+    // milliseconds; give the server's bind a moment, or the client
+    // degrades for an hour over a lost race
+    for _ in 0..40 {
+        if std::net::TcpStream::connect(addr).is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
 }
 
 /// Catalog file candidates, mirroring indexd's standalone runner.
@@ -77,8 +86,13 @@ pub fn catalog_file_paths() -> Vec<std::path::PathBuf> {
 }
 
 fn main() {
-    // The catalog file feeds indexd at startup; the client then reads it
-    // back over HTTP to prove the loop.
+    // The catalog file seeds indexd's base document (dev checkout:
+    // the demo app rides along under the relay feed). The server
+    // itself starts unconditionally: its relay threads are what turn
+    // relay events into catalog rows, and profiles and the graph
+    // live there too. A real install has no seed file and an empty
+    // base; gating the server on one would strand the whole Orchard
+    // channel on a demo artifact.
     let seed_catalog = catalog_file_paths()
         .iter()
         .find_map(|path| {
@@ -86,18 +100,10 @@ fn main() {
             serde_json::from_slice::<orchard_core::CatalogFile>(&bytes).ok()
         });
     let settings = orchard_core::SettingsHandle::load_default();
-    if let Some(catalog) = seed_catalog {
-        start_indexd(catalog, settings.clone());
-        // the UI's first fetches (profiles, graph) fire within
-        // milliseconds; give the in-process server's bind a moment,
-        // or the client degrades for an hour over a lost race
-        for _ in 0..40 {
-            if std::net::TcpStream::connect(indexd_addr()).is_ok() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(25));
-        }
-    }
+    start_indexd(
+        seed_catalog.unwrap_or(orchard_core::CatalogFile { version: 1, apps: Vec::new() }),
+        settings.clone(),
+    );
     let settings_for_root = settings.clone();
 
     Application::new()
