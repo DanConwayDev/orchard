@@ -4301,7 +4301,10 @@ impl StoreRoot {
                     .min_h_0()
                     .overflow_y_scroll()
                     .track_scroll(&self.page_scroll)
-                    .child(div().flex().justify_center().child(content)),
+                    // a cushion below the last section (the Remove
+                    // row when installed): a scroll end that sits
+                    // flush on the viewport edge reads as clipped
+                    .child(div().flex().justify_center().pb_5().child(content)),
             )
             .into_any_element()
     }
