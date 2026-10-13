@@ -90,13 +90,20 @@ client learned from Nostr. Consequences:
     glib 2.43 ctypes round-trip; matches Fedora's live images).
   - Manifest digest is the pinned identity: `sha256(manifest bytes)`, the same value
     flatpak records as the commit's `Alt-id`.
-- **MVP install transport:** `flatpak install --system -y oci:<layout-dir>` (or
-  `oci-archive:`). Direct `docker://` installs also work (1.17+) but flatpak hard-wires
-  https for them (`flatpak-docker-reference.c`), so a local registry needs TLS; local
-  registry + CA install is the follow-up, and ghcr/quay are https anyway. The native
-  `oci+http://` remote flow (client-is-the-remote, GNOME Software integration) needs
-  the shim to serve an **ostree summary** whose ref checksums are manifest digests with
-  `xa.oci-registry-uri` in the summary metadata; that is a later milestone, not MVP.
+- **MVP install transport:** `flatpak install --user -y oci:<layout-dir>` (or
+  `oci-archive:`, `docker://...`). User scope, decided 2026-10-12: flatpak's
+  **system-scope image install is broken** (1.18.4 through main). Image installs
+  create the transient origin remote with an empty URL, and every system-helper
+  trust check keys on the URL (`flatpak_dir_get_remote_oci` wants an `oci+`
+  prefix), so the helper path fails with "Can't pull from untrusted non-gpg
+  verified remote". The user scope never consults the system helper and works;
+  it also needs no polkit dialog. Reviewed-channel (Flathub) installs stay
+  system scope (`install_ref`). Direct `docker://` installs need https
+  (`flatpak-docker-reference.c` hard-wires it), so a local registry needs TLS.
+  The native `oci+http://` remote flow (client-is-the-remote, GNOME Software
+  integration) needs the shim to serve an **ostree summary** whose ref checksums
+  are manifest digests with `xa.oci-registry-uri` in the summary metadata; that
+  is a later milestone, not MVP.
 - **Runtime convention (important):** apps default to runtimes hosted on the flathub
   remote (standard flatpakref behavior) so runtimes are shared, not duplicated per app.
   Self-contained images are an explicit opt-in in the publish manifest.
@@ -432,7 +439,7 @@ opening items because they need the push, the signing secret, and a tag.
 - [x] The bootstrap story is a flatpak one-liner, pinned by digest:
       every Orchard user has flatpak as a runtime prerequisite anyway, and
       the self-publish artifact is already a flatpak OCI image, so
-      `flatpak install --system -y docker://<ghcr>@sha256:<pin>` is the
+      `flatpak install --user -y docker://<ghcr>@sha256:<pin>` is the
       whole install: the same command the client runs, with the digest
       from the release notes or the signed listing, one pin per arch. A
       deb is the later, non-technical path (step zero only; updates come

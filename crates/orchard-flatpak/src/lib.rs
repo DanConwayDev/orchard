@@ -6,11 +6,12 @@
 //! - commands are returned as [`Command`] builders so they are unit-testable
 //!   without executing anything and the UI layer can add progress handling.
 //!
-//! Scope: everything installs to the **system** installation. That is where
-//! this host's remotes and runtimes already live (flathub is a system
-//! remote), so a per-user install would re-download hundreds of MB of
-//! runtimes the system already has. System installs may show a polkit
-//! dialog; that is normal desktop behavior, the same as GNOME Software.
+//! Scope: the reviewed (Flathub) channel installs to the **system**
+//! installation, where flathub's remotes and runtimes already live. The
+//! publisher channel installs to the **user** installation: flatpak's
+//! system-scope image install is broken as of 1.18.4 (see
+//! [`install_image`]), and a user-scope install also needs no polkit
+//! dialog, so no password on install.
 //!
 //! Install transport for Orchard-channel apps: `flatpak install` accepts
 //! image locations directly (`oci:<dir>`, `oci-archive:<file>`,
@@ -66,13 +67,40 @@ pub fn install_ref(app_id: &str, remote: &str) -> Command {
     cmd
 }
 
+/// The flatpak installation an op targets. `System` is the machine-wide
+/// install (polkit-gated); `User` is per-user under `$HOME`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scope {
+    System,
+    User,
+}
+
+impl Scope {
+    fn flag(self) -> &'static str {
+        match self {
+            Scope::System => "--system",
+            Scope::User => "--user",
+        }
+    }
+}
+
 /// Install an OCI image directly, no remote involved (flatpak >= 1.17).
 ///
 /// `location` is an image location as understood by `flatpak install`:
 /// `oci:<dir>`, `oci-archive:<file>`, or `docker://<registry>/<repo>:<tag>`.
+///
+/// This is user scope, on purpose. Flatpak's image-install flow creates the
+/// transient origin remote with an empty URL, and every system-helper trust
+/// check keys on the URL (`flatpak_dir_get_remote_oci` wants an `oci+`
+/// prefix), so `install --system` of any image location dies with "Can't
+/// pull from untrusted non-gpg verified remote" on flatpak 1.18.4 through
+/// current main. The user scope never consults the system helper: the pull
+/// rides the image source directly, and that path works end to end
+/// (verified against 1.18.4 with a local registry). A user-scope install
+/// also needs no polkit dialog.
 pub fn install_image(location: &str) -> Command {
     let mut cmd = flatpak_command();
-    cmd.args(["install", "--system", "-y", location]);
+    cmd.args(["install", "--user", "-y", location]);
     cmd
 }
 
@@ -83,10 +111,10 @@ pub fn update() -> Command {
     cmd
 }
 
-/// Uninstall an app id. User data is kept.
-pub fn uninstall(app_id: &str) -> Command {
+/// Uninstall an app id from the given scope. User data is kept.
+pub fn uninstall(scope: Scope, app_id: &str) -> Command {
     let mut cmd = flatpak_command();
-    cmd.args(["uninstall", "--system", "-y", app_id]);
+    cmd.args(["uninstall", scope.flag(), "-y", app_id]);
     cmd
 }
 
@@ -110,11 +138,12 @@ pub fn list_installed() -> Command {
     cmd
 }
 
-/// Info about one installed app: `flatpak info <app>`. Its text output
-/// carries the installed size among other fields.
-pub fn info(app_id: &str) -> Command {
+/// Info about one installed app in the given scope: `flatpak info
+/// <scope> <app>`. Its text output carries the installed size among
+/// other fields.
+pub fn info(scope: Scope, app_id: &str) -> Command {
     let mut cmd = flatpak_command();
-    cmd.args(["info", "--system", app_id]);
+    cmd.args(["info", scope.flag(), app_id]);
     cmd
 }
 
@@ -209,9 +238,25 @@ mod tests {
         ] {
             let cmd = install_image(location);
             let args = arg_strings(&cmd);
-            assert!(args.contains(&"--system".to_string()));
+            // user scope: flatpak's system-scope image install is broken
+            // (empty-URL origin remote), see install_image's doc
+            assert!(args.contains(&"--user".to_string()));
             assert!(args.last().is_some_and(|last| last == location));
         }
+    }
+
+    #[test]
+    fn uninstall_targets_the_given_scope() {
+        let cmd = uninstall(Scope::User, "rocks.orchard.Hello");
+        assert_eq!(
+            arg_strings(&cmd),
+            ["uninstall", "--user", "-y", "rocks.orchard.Hello"]
+        );
+        let cmd = uninstall(Scope::System, "org.gnome.Polari");
+        assert_eq!(
+            arg_strings(&cmd),
+            ["uninstall", "--system", "-y", "org.gnome.Polari"]
+        );
     }
 
     #[test]

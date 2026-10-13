@@ -165,6 +165,9 @@ pub struct InstalledInfo {
     pub size: Option<String>,
     /// Sandbox metadata ini read from the deploy, for the permissions view.
     pub metadata: Option<String>,
+    /// True when the deploy lives in the user installation rather than
+    /// the system one. Publisher-channel apps install user-scope.
+    pub user_scope: bool,
 }
 
 pub struct StoreRoot {
@@ -2227,7 +2230,18 @@ impl StoreRoot {
             return;
         }
         self.record_installed_from(app_id, None);
-        let cmd = orchard_flatpak::uninstall(app_id);
+        // remove from the scope the app deployed to: publisher-channel
+        // apps are user installs, reviewed (Flathub) apps system installs
+        let scope = if self
+            .installed
+            .get(app_id)
+            .is_some_and(|info| info.user_scope)
+        {
+            orchard_flatpak::Scope::User
+        } else {
+            orchard_flatpak::Scope::System
+        };
+        let cmd = orchard_flatpak::uninstall(scope, app_id);
         self.jobs
             .insert(app_id.to_string(), Job::new(JobState::Removing));
         self.run_job(cmd, app_id, "Remove", "", cx);
@@ -8185,12 +8199,15 @@ fn list_installed() -> HashMap<String, InstalledInfo> {
                 .map(|f| f.trim().to_string())
                 .filter(|version| !version.is_empty() && version != "—");
             let _origin = fields.next().map(|f| f.trim().to_string());
+            // the installation column: "user" or "system"
+            let user_scope = fields.next().is_some_and(|f| f.trim() == "user");
             Some((
                 app_id.clone(),
                 InstalledInfo {
                     version,
-                    size: installed_size(&app_id),
+                    size: installed_size(&app_id, user_scope),
                     metadata: orchard_flatpak::installed_metadata(&app_id),
+                    user_scope,
                 },
             ))
         })
@@ -8198,9 +8215,14 @@ fn list_installed() -> HashMap<String, InstalledInfo> {
 }
 
 /// The "Installed Size" line of `flatpak info`, e.g. `1.0 GB`. None when
-/// flatpak or the app is missing.
-fn installed_size(app_id: &str) -> Option<String> {
-    let output = orchard_flatpak::info(app_id).output().ok()?;
+/// flatpak or the app is missing. Reads the scope the app deployed to.
+fn installed_size(app_id: &str, user_scope: bool) -> Option<String> {
+    let scope = if user_scope {
+        orchard_flatpak::Scope::User
+    } else {
+        orchard_flatpak::Scope::System
+    };
+    let output = orchard_flatpak::info(scope, app_id).output().ok()?;
     if !output.status.success() {
         return None;
     }
