@@ -1380,12 +1380,30 @@ impl StoreRoot {
         .detach();
     }
 
+    /// The signed-in identity's existing review for an app, if any:
+    /// the composer's prefill and the edit wording's test.
+    fn own_review(&self, app_id: &str) -> Option<&orchard_core::Review> {
+        let reviewer = self.reviewer.as_ref()?;
+        self.reviews
+            .get(app_id)?
+            .iter()
+            .find(|review| review.pubkey == reviewer.signer_pubkey)
+    }
+
     /// Enter the review flow from the page: compose when signed in,
-    /// the sign-in modal when not. Both expand the section.
+    /// the sign-in modal when not. Both expand the section. An
+    /// existing review pre-fills the draft, since writing again is
+    /// how a replaceable review edits; the caret starts at the end.
     fn start_review(&mut self, cx: &mut Context<Self>) {
         self.reviews_expanded = true;
         self.review_error = None;
         if self.reviewer.is_some() {
+            if let Some(app_id) = self.selected.clone()
+                && let Some(own) = self.own_review(&app_id).cloned()
+            {
+                self.review_cursor = own.content.len();
+                self.review_draft = (own.rating, own.content);
+            }
             self.composing = true;
         } else {
             self.open_signin_modal(true, cx);
@@ -1579,8 +1597,19 @@ impl StoreRoot {
                         this.signin_modal = false;
                         this.signin_for_review = false;
                         this.composing = from_reviews;
-                        this.review_draft = (None, String::new());
-                        this.review_cursor = 0;
+                        // back from pairing into the composer: the
+                        // same prefill an already-signed-in start
+                        // gets, when a review of this app exists
+                        if from_reviews
+                            && let Some(app_id) = this.selected.clone()
+                            && let Some(own) = this.own_review(&app_id).cloned()
+                        {
+                            this.review_draft = (own.rating, own.content.clone());
+                            this.review_cursor = own.content.len();
+                        } else {
+                            this.review_draft = (None, String::new());
+                            this.review_cursor = 0;
+                        }
                         this.review_anchor = None;
                         this.review_layout = None;
                         this.review_error = None;
@@ -4931,7 +4960,9 @@ impl StoreRoot {
                         .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
                             this.start_review(cx);
                         }))
-                        .child(if signed_in {
+                        .child(if self.own_review(app_id).is_some() {
+                            "Edit your review (r)".to_string()
+                        } else if signed_in {
                             "Write a review (r)".to_string()
                         } else {
                             "Sign in to review".to_string()

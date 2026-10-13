@@ -286,7 +286,10 @@ app id), so editing is republishing and one identity holds one review per app; a
 malformed rating is a hard error like any other protocol violation. indexd serves the
 merged document at `/v1/reviews` and the raw kind 0 metadata per pubkey at
 `/v1/profiles`; the client fetches on page open and while a page is open on the
-refresh tick. Posting requires sign-in through NIP-46 Nostr Connect: the client shows
+refresh tick. The composer makes replaceability visible as an edit: an existing
+review pre-fills the draft (stars, text, caret at the end) and the invitation
+reads "Edit your review" once yours is on the app. Posting requires sign-in
+through NIP-46 Nostr Connect: the client shows
 a modal with the `nostrconnect://` URI in a clickable box (an ephemeral client key,
 the connect relay, and an anti-spoofing secret inside); clicking copies the URI and
 opens it with the desktop's scheme handler, where a signer app takes the pairing.
