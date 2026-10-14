@@ -23,7 +23,7 @@ pub struct Listing {
     pub screenshots: Vec<String>,
     pub license: Option<String>,
     pub repository: Option<String>,
-    /// The project's homepage, the `h` tag.
+    /// The project's homepage, the NIP-82 `url` tag.
     pub homepage: Option<String>,
 }
 
@@ -85,7 +85,7 @@ pub fn sign_listing(keys: &Keys, listing: &Listing) -> Result<Event> {
         .tag_maybe(optional_tag("icon", &listing.icon))
         .tag_maybe(optional_tag("license", &listing.license))
         .tag_maybe(optional_tag("repository", &listing.repository))
-        .tag_maybe(optional_tag("h", &listing.homepage));
+        .tag_maybe(optional_tag("url", &listing.homepage));
     let builder = listing
         .categories
         .iter()

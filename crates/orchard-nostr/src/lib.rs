@@ -485,7 +485,8 @@ impl Feed {
                 screenshots: parts.tag_values("screenshot"),
                 platforms,
                 repository: parts.tag("repository"),
-                homepage: parts.tag("h"),
+                homepage: parts.tag("url").or_else(|| parts.tag_values("h").into_iter()
+                    .find(|value| value.starts_with("https://") || value.starts_with("http://"))),
                 event,
             },
         );
@@ -974,6 +975,23 @@ mod tests {
     /// A realistic test digest (64 hex chars).
     const DIGEST: &str = "f127a079f4a50c3d960e6707aeb7373ee01403cc7b079b9b6fc3743c21a6e7a7";
 
+    #[test]
+    fn homepage_prefers_url_and_accepts_legacy_http_h() {
+        let keys = demo_keys();
+        for (tags, expected) in [
+            (vec![("h", "https://legacy.example")], Some("https://legacy.example")),
+            (vec![("h", DIGEST)], None),
+            (vec![("h", "https://legacy.example"), ("url", "https://current.example")], Some("https://current.example")),
+        ] {
+            let mut tags = tags;
+            tags.push(("d", "com.example.Home"));
+            let event = signed(&keys, KIND_APP, "", tags);
+            let mut feed = Feed::new();
+            assert!(feed.absorb(event).unwrap());
+            assert_eq!(feed.listings.values().next().unwrap().homepage.as_deref(), expected);
+        }
+    }
+
     fn demo_keys() -> Keys {
         Keys::parse("5122b2537caa7e084e8aec9278e222b1a9b53a1cd2dbfb7d76f0b1bd41c8d6ea").unwrap()
     }
@@ -999,7 +1017,7 @@ mod tests {
                 ("t", "Utilities"),
                 ("f", "linux-x86_64"),
                 ("repository", "https://github.com/example/hello"),
-                ("h", "https://hello.example.com"),
+                ("url", "https://hello.example.com"),
             ],
         );
         let asset = signed(
