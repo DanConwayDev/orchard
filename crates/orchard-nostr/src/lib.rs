@@ -100,12 +100,12 @@ impl Parts {
             .filter(|value| !value.is_empty())
     }
 
-    /// Every value of the named tag (row's second element onward).
+    /// The value of each named tag. Later elements are hints, not values.
     fn tag_values(&self, name: &str) -> Vec<String> {
         self.tags
             .iter()
             .filter(|row| row.first().is_some_and(|key| key == name))
-            .flat_map(|row| row.iter().skip(1).cloned())
+            .filter_map(|row| row.get(1).cloned())
             .filter(|value| !value.is_empty())
             .collect()
     }
@@ -990,6 +990,14 @@ mod tests {
             assert!(feed.absorb(event).unwrap());
             assert_eq!(feed.listings.values().next().unwrap().homepage.as_deref(), expected);
         }
+    }
+
+    #[test]
+    fn repeated_tags_do_not_treat_relay_hints_as_values() {
+        let event = EventBuilder::new(Kind::Custom(KIND_RELEASE as u16), "")
+            .tag(Tag::custom("e", [DIGEST, "wss://relay.example.com"]))
+            .finalize(&demo_keys()).unwrap();
+        assert_eq!(Parts::parse(&event).unwrap().tag_values("e"), [DIGEST]);
     }
 
     fn demo_keys() -> Keys {
