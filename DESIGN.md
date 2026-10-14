@@ -127,7 +127,7 @@ Zapstore publishers readable on Orchard day one:
 | Event | Kind | `d` tag | Tags | Content |
 |---|---|---|---|---|
 | Publisher profile | 0 | (none) | standard NIP-01 | name, nip05, about |
-| App listing | 32267 | `<app-id>` | `name`, `summary`, `icon`, `image`, `t` (categories), `f` (platform), `license`, `repository`, `h` | full description |
+| App listing | 32267 | `<app-id>` | `name`, `summary`, `icon`, `image`, `t` (categories), `f` (platform), `license`, `repository`, `url` | full description |
 | Release | 30063 | `<app-id>@<version>@<platform>` | `i`, `version`, `f`, `c` (channel), `e` (asset refs) | changelog |
 | Asset | 3063 | (none) | `i`, `x` (sha256), `version`, `url`, `m`, `size`, `f`, **`oci`**, **`runtime`** | (none) |
 | Review | 30065 | `<app-id>` | `rating` (0.0 to 5.0, one decimal) | review text |
