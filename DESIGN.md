@@ -116,8 +116,7 @@ distribution infrastructure stays at zero central servers.
 - **Publish CLI (`orchard-publish`):** manifest → build → OCI push → sign → Nostr
   events. The layer and gzip are deterministic, so the same tree builds to the same
   digest. Registry pushes speak the Docker v2 bearer-token dance (anonymous or basic
-  auth); the proof-file write accepts 201 and 200 (first matrix leg creates, second
-  updates). CI (`self-publish.yml`) runs on a `v*` tag, builds in the dev image, and
+  auth); the proof-file write accepts 201 and 200. CI (`self-publish.yml`) runs on a `v*` tag, builds in the dev image, and
   takes the release version from the tag.
 
 ## Nostr protocol (NIP-82 draft, Zapstore-compatible)
@@ -147,8 +146,10 @@ Zapstore publishers readable on Orchard day one:
   `/v2/<repository>/blobs/sha256:<hash>` for config/layers. Blossom URLs may use
   any host; no sibling-URL convention or ncontainer event is required. Runtime
   and permissions come from the verified config, without downloading layers.
-- One release references all architecture assets. This changes release addresses
-  and asset fields; no dual publication of the old format is included.
+- One release references all architecture assets. `--upload-only` pushes each
+  architecture without signing; `--asset` publishes them together without
+  the build tree. This changes release addresses and asset fields; no dual
+  publication of the old format is included.
 - **Migration:** a 30066 signed by the OLD key hands the app id to a successor; once the
   successor's listing exists, the old row stops projecting. Replaceable per (app id,
   old key); revocation is a newer statement with no `p`. Only the listed key can

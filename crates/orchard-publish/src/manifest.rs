@@ -141,13 +141,6 @@ pub fn load(path: &Path) -> Result<Manifest> {
         );
     }
     manifest.artifact.tree = base.join(&manifest.artifact.tree);
-    let tree = &manifest.artifact.tree;
-    if !tree.join("metadata").is_file() {
-        bail!(
-            "artifact tree {} has no metadata ini: the sandbox ini is the source of truth",
-            tree.display()
-        );
-    }
     Ok(manifest)
 }
 
@@ -193,7 +186,7 @@ tree = "tree"
     }
 
     #[test]
-    fn rejects_tree_without_metadata() {
+    fn publication_manifest_does_not_require_the_build_tree() {
         let dir = std::env::temp_dir().join(format!("orchard-manifest-bad-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("tree")).unwrap();
         let path = dir.join("app.toml");
@@ -213,7 +206,7 @@ tree = "tree"
 "#,
         )
         .unwrap();
-        assert!(load(&path).is_err());
+        assert!(load(&path).is_ok());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
