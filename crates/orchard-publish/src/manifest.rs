@@ -56,9 +56,6 @@ pub struct ReleaseMeta {
     #[serde(default)]
     pub platforms: Vec<String>,
     pub notes: Option<String>,
-    /// Runtime requirement recorded on the asset event, e.g.
-    /// `org.freedesktop.Platform/x86_64/25.08`.
-    pub runtime: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -107,21 +104,6 @@ impl Manifest {
         } else {
             self.release.platforms.clone()
         }
-    }
-
-    /// The runtime requirement for this build's arch: a runtime ref
-    /// is `<id>/<arch>/<branch>` and the arch segment follows the
-    /// build, so one TOML serves every CI leg. A runtime that is not
-    /// three segments passes through untouched.
-    pub fn runtime_for_build(&self) -> Option<String> {
-        self.release.runtime.as_ref().map(|runtime| {
-            let mut pieces: Vec<String> =
-                runtime.split('/').map(str::to_string).collect();
-            if pieces.len() == 3 {
-                pieces[1] = self.ref_arch();
-            }
-            pieces.join("/")
-        })
     }
 
     /// Flatpak ref architecture (`linux-x86_64` to `x86_64`).

@@ -46,9 +46,8 @@ artifact and pre-flights the deploy, installing the runtime first (user
 scope when a remote serves it there, otherwise system scope under
 polkit) and chaining the app install behind it. Keep the line accurate;
 a runtime no enabled remote serves fails the install up front with that
-fact, before anything downloads. The manifest's `[release].runtime` is
-the listing's copy of the same fact and is rewritten per build arch; the
-tree's `metadata` is what the client actually reads.
+fact, before image layers download. The tree's `metadata` is what the
+client reads; no separate runtime declaration is needed in the publish manifest.
 
 One build constraint before the first push: `files/` runs against the
 runtime's glibc, and glibc only goes backwards. Freedesktop 25.08
@@ -123,7 +122,6 @@ version = "1.2.0"                       # or ORCHARD_PUBLISH_VERSION in CI
 channel = "stable"                      # stable (default) or beta
 arch = "linux-x86_64"                   # this build's target
 platforms = ["linux-x86_64", "linux-aarch64"]   # full coverage the listing claims
-runtime = "org.freedesktop.Platform/x86_64/25.08"   # per-arch segment auto-adjusted
 notes = "What changed in 1.2.0."        # the release's changelog
 
 [artifact]
@@ -148,8 +146,6 @@ Field notes:
 - `platforms` is the listing's coverage claim and must name every arch any
   CI leg builds. Each leg publishes an identical listing, so a missing
   arch here is a missing button on someone's machine.
-- `runtime` is written once; the arch segment is rewritten per build leg
-  (`.../x86_64/25.08` becomes `.../aarch64/25.08` on the arm runner).
 - `relays` must include `wss://relay.orchard.rocks`, the rendezvous relay
   the project operates, listed first. The third-party relays are
   redundancy and can refuse or drop Orchard events at any time, so a
@@ -175,7 +171,7 @@ Field notes:
    then a fetch of the manifest *by digest*. The signed events only go out
    if the registry serves exactly the bytes that were built.
 3. **Signs four events** with your key: an asset (kind 3063: digest, size,
-   location, runtime), a release (kind 30063: version, channel, notes,
+   manifest URL, MIME, filename, software target), a release (kind 30063: version, channel, notes,
    reference to the asset), a listing (kind 32267: name, summary,
    description, categories, media, platform coverage, license, links), and
    a profile (kind 0) when `author-name` or `nip05` is set.
@@ -188,7 +184,7 @@ carried one affects availability only.
 
 | Flag | Meaning |
 |---|---|
-| `--registry host/repo` | push target; without it the artifact stays a local OCI layout |
+| `--registry host/repo` | required registry target; events identify its immutable manifest URL |
 | `--tag tag` | push tag override (the manifest's `[publish] tag` by default). The event's location carries the digest, so this never decides what a client installs; CI pushes `latest-<arch>` so matrix legs don't share a tag |
 | `--relays url,url` | override the manifest's relay list for this run; also bypasses the required-relay check |
 | `--nsec <key>` | signing key (hex or nsec); `ORCHARD_NSEC` env also works |
@@ -240,20 +236,15 @@ Details worth knowing:
 
 ## Multi-arch
 
-One listing, one button in the client, and the device picks the artifact.
-The shape:
+NIP-82 releases use one `app@version` address referencing every architecture's
+asset. Separate architecture jobs must not each publish that address, since
+one would replace the other. This CLI currently requires a single declared
+platform; the matrix workflow below needs combined publication before use.
 
-- Releases and assets are per-arch: the release's `d` tag is
-  `<app-id>@<version>@<platform>`, so one relay holds both arches of one
-  version side by side.
-- The listing is per-coverage: its `platforms` tags name every arch the
-  project ships, identical from every publish leg.
-- CI runs one job per arch (passing `--arch`) and both sign the same
-  listing.
-
-On an aarch64 machine, an app published only for x86_64 still shows, with
-an honest "no aarch64 build yet, published for x86_64" instead of an
-install button that cannot work.
+Assets describe manifest bytes using standard URL, MIME, size, filename and
+bare SHA-256 fields plus `T=flatpak-oci`. Runtime and permissions come from
+the verified config. Older clients expecting `oci` and `runtime` asset tags
+cannot install these new assets. No dual legacy publication is included.
 
 ## CI workflow
 

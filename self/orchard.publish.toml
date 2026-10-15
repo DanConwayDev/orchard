@@ -22,7 +22,6 @@ arch = "linux-x86_64"
 # the full coverage both CI legs build; every leg publishes the same
 # listing, and each host picks the artifact built for it
 platforms = ["linux-x86_64", "linux-aarch64"]
-runtime = "org.freedesktop.Platform/x86_64/25.08"
 notes = "App pages show screenshots: publisher listings carry image URLs (the same strip reviewed apps always had). First release through the self-update chain: coming from 0.2.0, update in place; nothing to do by hand."
 
 [artifact]
