@@ -683,14 +683,36 @@ fn load_cache(path: &Option<std::path::PathBuf>, feed: &Arc<Mutex<orchard_nostr:
 }
 
 /// Periodically write the feed's events to the cache when they changed.
-/// Coalesces bursts: relay event storms cost at most one write per tick.
+/// Coalesces bursts by waiting for a quiet gap: a backfill storm costs
+/// one serialization (when it has been quiet for two seconds), not one
+/// per tick; a feed that never quiets writes at most every 30 seconds.
 fn spawn_cache_writer(path: Option<std::path::PathBuf>, feed: Arc<Mutex<orchard_nostr::Feed>>) {
     let Some(path) = path else { return };
+    /// How long the feed must have been quiet before a write.
+    const QUIET_MS: u64 = 2000;
+    /// How long a dirty feed may go unwritten even without a quiet
+    /// gap: a crash must not cost more than this much sync.
+    const MAX_STALE_MS: u64 = 30_000;
     if std::thread::Builder::new()
         .name("nostr-cache".into())
         .spawn(move || {
             loop {
-                std::thread::sleep(std::time::Duration::from_secs(3));
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                // the peek is one uncontended lock and two atomic
+                // loads: no serialization, until a write is due
+                let (last_change, dirty_since) = feed
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .dirty_state();
+                if dirty_since == 0 {
+                    continue;
+                }
+                let now = orchard_nostr::unix_millis();
+                let quiet = now.saturating_sub(last_change) >= QUIET_MS;
+                let stale = now.saturating_sub(dirty_since) >= MAX_STALE_MS;
+                if !quiet && !stale {
+                    continue;
+                }
                 guarded("nostr-cache", || {
                     // the feed's change flag is the tick's whole cost
                     // when nothing happened: no serialization, no lock

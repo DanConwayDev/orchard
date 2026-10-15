@@ -139,6 +139,11 @@ struct Migration {
 struct Release {
     event: Event,
     created_at: u64,
+    /// The signer's hex key, kept at absorb: the trim and the
+    /// projection compare it against the listing's author on every
+    /// visit, and re-formatting the pubkey per visit is the
+    /// projection loop's allocation churn.
+    publisher: String,
     version: String,
     /// The platform this release was built for, from the `f` tag.
     /// None: a legacy release from before the tag existed; it stays
@@ -154,6 +159,9 @@ struct Release {
 struct Asset {
     event: Event,
     created_at: u64,
+    /// The signer's hex key, kept at absorb (same reason as the
+    /// release's).
+    publisher: String,
     /// The platform this artifact was built for, from the `f` tag.
     /// None: a legacy asset from before the tag existed.
     platform: Option<String>,
@@ -210,6 +218,14 @@ struct Review {
     rating: Option<f32>,
 }
 
+/// Unix millis, for the writer's debounce clocks.
+pub fn unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or_default()
+}
+
 /// The accumulated set of verified NIP-82 events, ready to project into a
 /// catalog. Replaceable semantics: the newest event per `d` wins.
 /// Listings are keyed (app id, publisher): the permissionless case is
@@ -220,6 +236,20 @@ pub struct Feed {
     /// cache writer: without a change, a writer tick costs one flag
     /// check, not a full-feed serialization under the lock.
     dirty: std::sync::atomic::AtomicBool,
+    /// Unix millis of the newest retained event: the cache writer
+    /// waits for a quiet gap after the last change, so a backfill
+    /// storm costs one serialization, not one per tick.
+    last_change: std::sync::atomic::AtomicU64,
+    /// Unix millis of when the current dirty stretch began, 0 when
+    /// clean: the writer's staleness bound writes a feed that never
+    /// quiets instead of holding the cache back forever.
+    dirty_since: std::sync::atomic::AtomicU64,
+    /// Every verified event id ever absorbed. Relays re-deliver the
+    /// since-overlap window on every reconnect; a seen id
+    /// short-circuits before the schnorr check, because the id is the
+    /// canonical hash of the signed bytes and has nothing to teach
+    /// the feed a second time.
+    seen: std::collections::HashSet<EventId>,
     listings: BTreeMap<(String, String), Listing>,
     /// (app id, old key) -> the newest migration statement that key
     /// signed for the id.
@@ -253,13 +283,33 @@ impl Feed {
     /// Swap out the change flag: true when an event was retained (or
     /// the feed was cleared) since the last take.
     pub fn take_dirty(&self) -> bool {
-        self.dirty.swap(false, std::sync::atomic::Ordering::Relaxed)
+        let was = self.dirty.swap(false, std::sync::atomic::Ordering::Relaxed);
+        if was {
+            self.dirty_since
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+        was
     }
 
     /// Re-arm the change flag after a failed persistence tick, so the
     /// writer retries instead of assuming the loss was written.
     pub fn mark_dirty(&self) {
         self.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+        // restore the stretch's start so the staleness bound and the
+        // quiet gap keep measuring the same dirty period
+        self.dirty_since
+            .compare_exchange(0, unix_millis(), std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed)
+            .ok();
+    }
+
+    /// (last change, dirty-since) in unix millis, dirty-since 0 meaning
+    /// clean. Two atomic loads: the writer peeks without the lock and
+    /// takes the lock only when a write is actually due.
+    pub fn dirty_state(&self) -> (u64, u64) {
+        (
+            self.last_change.load(std::sync::atomic::Ordering::Relaxed),
+            self.dirty_since.load(std::sync::atomic::Ordering::Relaxed),
+        )
     }
 
     /// The newest event time the feed holds, across every kind: the
@@ -298,7 +348,7 @@ impl Feed {
             self.listings.keys().cloned().collect();
         for (app_id, releases) in self.releases.iter_mut() {
             releases.retain(|release| {
-                listed.contains(&(app_id.clone(), release.event.pubkey.to_string()))
+                listed.contains(&(app_id.clone(), release.publisher.clone()))
             });
             // stored newest-first; the tail is the newest
             releases.truncate(VERSION_TAIL);
@@ -349,12 +399,20 @@ impl Feed {
     /// but not useful (stale replaceable, wrong kind, no linux platform,
     /// duplicate asset); `Err` means malformed or rejected.
     pub fn absorb(&mut self, event: Event) -> Result<bool> {
+        // a seen id short-circuits before verification: the id is the
+        // canonical hash of the signed bytes, so the same id carries
+        // nothing new, and relays re-deliver the since-overlap window
+        // on every reconnect
+        if self.seen.contains(&event.id) {
+            return Ok(false);
+        }
         // NIP-01 integrity: the id is the event's canonical hash and the
         // signature must verify against it. A bad signature is a hard
         // error, not a skip: relays that pass garbage are lying.
         event
             .verify()
             .map_err(|err| anyhow::anyhow!("signature verification failed: {err}"))?;
+        self.seen.insert(event.id);
 
         let parts = Parts::parse(&event)?;
         // first-seen bookkeeping: keep the earliest event per author
@@ -376,6 +434,15 @@ impl Feed {
             _ => Ok(false),
         };
         if matches!(retained, Ok(true)) {
+            let now = unix_millis();
+            self.last_change
+                .store(now, std::sync::atomic::Ordering::Relaxed);
+            // the stretch's start is taken only from clean: a burst of
+            // retained events shares one dirty_since
+            if self.dirty_since.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+                self.dirty_since
+                    .store(now, std::sync::atomic::Ordering::Relaxed);
+            }
             self.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         retained
@@ -479,10 +546,7 @@ impl Feed {
             return Ok(false);
         }
         let releases = self.releases.entry(app_id.to_string()).or_default();
-        if releases
-            .iter()
-            .any(|old| old.event.id.to_string() == parts.id)
-        {
+        if releases.iter().any(|old| old.event.id == event.id) {
             return Ok(false);
         }
         // newest first; equal timestamps keep insertion order
@@ -494,6 +558,7 @@ impl Feed {
             position,
             Release {
                 created_at: parts.created_at,
+                publisher: parts.pubkey.clone(),
                 version,
                 platform,
                 channel: parts.tag("c"),
@@ -524,6 +589,7 @@ impl Feed {
             parts.id.clone(),
             Asset {
                 created_at: parts.created_at,
+                publisher: parts.pubkey.clone(),
                 platform: parts.tag("f"),
                 digest,
                 location,
@@ -680,7 +746,7 @@ impl Feed {
             let same_publisher = |reference: &String| {
                 self.assets
                     .get(reference)
-                    .filter(|asset| asset.event.pubkey.to_string() == *author)
+                    .filter(|asset| asset.publisher == *author)
                     .filter(|asset| asset.location.is_some())
                     .filter(|asset| asset.installable_kind())
             };
@@ -706,7 +772,7 @@ impl Feed {
             ) -> impl Iterator<Item = &'a Release> + 'a {
                 releases
                     .iter()
-                    .filter(move |release| release.event.pubkey.to_string() == author)
+                    .filter(move |release| release.publisher == author)
                     // flatpak installs from the stable branch; "main" is
                     // Zapstore's default channel name for the same thing
                     .filter(|release| {

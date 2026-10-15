@@ -220,11 +220,29 @@ pub fn verify_bundle(
         anyhow!("https artifact has no pinned digest: the event must carry the sha256")
     })?;
     if dest.is_file() {
-        // a completed twin: hash what is on disk
-        let bytes = std::fs::read(dest).with_context(|| format!("reading {}", dest.display()))?;
-        let digest = sha256_digest(&bytes);
+        // a completed twin: stream-hash what is on disk (the bundle
+        // is a hundred megabytes; it does not belong in RAM)
+        let file =
+            std::fs::File::open(dest).with_context(|| format!("reading {}", dest.display()))?;
+        let mut reader = std::io::BufReader::with_capacity(64 * 1024, file);
+        let mut hasher = Sha256::new();
+        let mut size = 0u64;
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let read = std::io::Read::read(&mut reader, &mut buffer)
+                .with_context(|| format!("reading {}", dest.display()))?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+            size += read as u64;
+        }
+        let digest = format!(
+            "sha256:{}",
+            hasher.finalize().iter().map(|b| format!("{b:02x}")).collect::<String>()
+        );
         check_pin(Some(pinned), &digest)?;
-        return Ok(bundle_report(&digest, bytes.len() as u64));
+        return Ok(bundle_report(&digest, size));
     }
     let response = agent().get(url).call().with_context(|| format!("fetching {url}"))?;
     let mut reader = response.into_reader();

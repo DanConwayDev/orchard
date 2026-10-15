@@ -2143,9 +2143,7 @@ impl StoreRoot {
     /// refills from the relays within seconds.
     fn clear_event_cache(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
-            let agent = ureq::AgentBuilder::new()
-                .timeout(std::time::Duration::from_secs(5))
-                .build();
+            let agent = http_agent();
             let _ = agent
                 .post(&format!("http://127.0.0.1:{INDEXD_PORT}/v1/cache"))
                 .call();
@@ -8695,10 +8693,22 @@ fn dedupe_reviewed(apps: Vec<StoreApp>) -> Vec<StoreApp> {
 }
 
 /// Orchard channel: catalog over HTTP from indexd, file fallback.
+/// The shared HTTP client for catalog-side reads: one agent keeps its
+/// connection pool and TLS setup alive across the 30s polls instead of
+/// paying both per call and dropping the keep-alive each time.
+fn http_agent() -> ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT
+        .get_or_init(|| {
+            ureq::AgentBuilder::new()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+        })
+        .clone()
+}
+
 fn load_orchard_catalog() -> Vec<StoreApp> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(5))
-        .build();
+    let agent = http_agent();
     let catalog: Option<CatalogFile> = agent
         .get(&format!("http://127.0.0.1:{INDEXD_PORT}/v1/catalog"))
         .call()
@@ -8722,9 +8732,7 @@ fn load_orchard_catalog() -> Vec<StoreApp> {
 /// The raw kind 0 metadata per pubkey from indexd, for merging a new
 /// display name against the author's existing profile.
 fn fetch_profile_raws() -> anyhow::Result<std::collections::BTreeMap<String, String>> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(5))
-        .build();
+    let agent = http_agent();
     let file: orchard_core::ProfilesFile = agent
         .get(&format!("http://127.0.0.1:{INDEXD_PORT}/v1/profiles"))
         .call()?
@@ -8753,9 +8761,7 @@ type ReviewsIndex = (
 );
 
 fn load_reviews() -> anyhow::Result<ReviewsIndex> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(5))
-        .build();
+    let agent = http_agent();
     let file: orchard_core::ReviewsFile = agent
         .get(&format!("http://127.0.0.1:{INDEXD_PORT}/v1/reviews"))
         .call()?
@@ -8773,9 +8779,7 @@ fn load_reviews() -> anyhow::Result<ReviewsIndex> {
 /// Fetch the reviewer contact-list graph from indexd. Blocking: runs
 /// on the background pool.
 fn load_graph() -> anyhow::Result<std::collections::BTreeMap<String, Vec<String>>> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(5))
-        .build();
+    let agent = http_agent();
     let file: orchard_core::GraphFile = agent
         .get(&format!("http://127.0.0.1:{INDEXD_PORT}/v1/graph"))
         .call()?
@@ -8863,9 +8867,7 @@ fn split_nip05(claim: &str) -> Option<(String, String)> {
 /// unverified, never a guess. `base` is the scheme plus host, so the
 /// tests can point at a local server.
 fn fetch_nip05_names(base: &str, local: &str) -> Option<std::collections::BTreeMap<String, String>> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(5))
-        .build();
+    let agent = http_agent();
     let record: serde_json::Value = agent
         .get(&format!("{base}/.well-known/nostr.json?name={local}"))
         .call()
@@ -8934,9 +8936,7 @@ fn proof_url(repository: &str) -> Option<String> {
 /// on the background pool.
 fn fetch_proof_keys(url: &str) -> Option<Vec<String>> {
     use nostr::nips::nip19::FromBech32 as _;
-    let agent = ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(5))
-        .build();
+    let agent = http_agent();
     let body = agent.get(url).call().ok()?.into_string().ok()?;
     let keys: Vec<String> = orchard_core::proof::parse_proof_keys(&body)?
         .into_iter()
