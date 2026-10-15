@@ -31,8 +31,8 @@ installs.
 ## The app tree and sandbox permissions
 
 The tree's `metadata` ini is the sandbox source of truth: `[Context]`
-filesystems, sockets, and `[Session Bus]` policies. It is baked into the
-image config labels byte-for-byte at build time.
+filesystems and sockets, and `[Session Bus Policy]` entries. It is baked
+into the image config labels byte-for-byte at build time.
 
 Sandbox permissions are never published in events. The client reads them
 from the artifact itself when the page opens, so what the permissions
@@ -63,7 +63,7 @@ That leaves a build directory whose interesting parts are:
   `flatpak-builder` extracts from the build; it stays there after
   `build-export`, so nothing needs re-deriving
 - `build-dir/metadata`: the sandbox ini (`[Application]`, `[Context]`,
-  `[Session Bus]`) the build declared
+  `[Session Bus Policy]`) the build declared
 
 Assemble Orchard's tree from exactly those three; skip `var/` (builder
 scratch, empty but shippable-looking):
@@ -74,10 +74,13 @@ scratch, empty but shippable-looking):
     cp build-dir/metadata tree/metadata
 
 `metadata` is the sandbox ini `[Application]` plus `[Context]` and
-`[Session Bus]`: what the build declared is what the artifact carries,
-and what the client's permissions viewer shows. Check it by hand once;
-a module that quietly needed more sandbox than you intended is visible
-here before your users find out.
+`[Session Bus Policy]`: what the build declared is what the artifact
+carries, and what the client's permissions viewer shows. Check it by hand
+once; a module that quietly needed more sandbox than you intended is
+visible here before your users find out. Bus access needs the
+`[Session Bus Policy]` section (`org.freedesktop.Flatpak=talk` for
+`flatpak-spawn --host`): a `talk` key under `[Context]` is silently
+ignored, and every spawn then fails with "Portal call failed".
 
 The rest is the ordinary publish: point the manifest's
 `[artifact].tree` at that directory and run `orchard-publish`. CI does

@@ -7,4 +7,6 @@ command=orchard
 sockets=x11;wayland;
 shared=network;
 filesystems=home;/var/lib/flatpak:ro;
-talk=org.freedesktop.Flatpak;
+
+[Session Bus Policy]
+org.freedesktop.Flatpak=talk
