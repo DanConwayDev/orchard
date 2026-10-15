@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## v0.1.3 (2026-10-14)
 
 - **Other enabled flatpak remotes ingest as channels, not just Flathub** (issue #3).
