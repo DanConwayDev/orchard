@@ -160,6 +160,44 @@ pub fn artifact_dir(app_id: &str, digest: &str) -> PathBuf {
     dir
 }
 
+/// Drop every artifact layout for an app id except the newest (by
+/// directory mtime): each release's OCI layout is rebuildable but
+/// roughly a hundred megabytes, and without this a history of them
+/// outlives every cap. Runs after a successful deploy, when the
+/// newest layout is the one the deployment came from.
+pub fn prune_old_artifacts(app_id: &str) {
+    let dir = root().join("artifacts").join(app_id);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let mut layouts: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .map(|entry| {
+            (
+                entry
+                    .metadata()
+                    .and_then(|meta| meta.modified())
+                    .unwrap_or(std::time::UNIX_EPOCH),
+                entry.path(),
+            )
+        })
+        .collect();
+    if layouts.len() <= 1 {
+        return;
+    }
+    layouts.sort_by_key(|(modified, _)| *modified);
+    for (_, path) in layouts.iter().rev().skip(1) {
+        let _ = std::fs::remove_dir_all(path);
+    }
+}
+
+/// Drop every artifact layout for an app id: the app was uninstalled,
+/// so none of them can serve a deploy until it is downloaded again.
+pub fn drop_artifacts(app_id: &str) {
+    let _ = std::fs::remove_dir_all(root().join("artifacts").join(app_id));
+}
+
 /// Delete every cached image. The directory is rebuilt lazily on the
 /// next fetch; pairing QR files share the dir and are transient by
 /// design, so clearing them costs nothing.

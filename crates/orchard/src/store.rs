@@ -33,7 +33,7 @@ const FLATHUB_REMOTE: &str = "flathub";
 const STATUS_HOLD: Duration = Duration::from_secs(10);
 
 /// Lifecycle of a per-app operation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobState {
     Verifying,
     Installing,
@@ -1867,18 +1867,6 @@ impl StoreRoot {
         cx.notify();
     }
 
-    /// Show or hide the Orchard channel's source (Flathub is locked
-    /// on: reviewed installs resolve their runtimes from it). Hiding
-    /// the source of the active channel filter resets the filter: the
-    /// hidden channel no longer appears in the dropdown, so an
-    /// empty-looking list would only confuse.
-    fn set_orchard_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
-        self.edit_settings(|settings| settings.orchard_source = visible, cx);
-        if matches!(&self.filter, Filter::Publisher) && !visible {
-            self.filter = Filter::All;
-        }
-    }
-
     /// The relay group the settings page edits, for the draft input.
     /// The required relay is pinned: a file list that omits it still
     /// shows it first, so the display matches what the client reads.
@@ -2202,7 +2190,7 @@ impl StoreRoot {
                 self.run_job(cmd, &app.app_id, "Install", &channel.remote, cx);
             }
             Source::Publisher => {
-                self.verify_then_install(app, cx);
+                self.verify_then_install(app, false, cx);
             }
         }
         cx.notify();
@@ -2238,7 +2226,7 @@ impl StoreRoot {
                 let cmd = orchard_flatpak::update_ref(channel_scope(&channel), &app.app_id);
                 self.run_job(cmd, &app.app_id, "Update", &channel.remote, cx);
             }
-            Source::Publisher => self.verify_then_install(app, cx),
+            Source::Publisher => self.verify_then_install(app, true, cx),
         }
         cx.notify();
     }
@@ -2246,7 +2234,7 @@ impl StoreRoot {
     /// Publisher channel: verify the registry manifest against the pinned
     /// digest, then hand flatpak the image location. The install refuses to
     /// start on digest mismatch.
-    fn verify_then_install(&mut self, app: StoreApp, cx: &mut Context<Self>) {
+    fn verify_then_install(&mut self, app: StoreApp, updating: bool, cx: &mut Context<Self>) {
         let Some(location_text) = app.location.clone() else {
             return;
         };
@@ -2458,7 +2446,11 @@ impl StoreRoot {
                             .is_some_and(|job| job.cancel_requested)
                         {
                             this.jobs.remove(&app.app_id);
-                            this.note("Install cancelled.".to_string());
+                            this.note(if updating {
+                                "Update cancelled.".to_string()
+                            } else {
+                                "Install cancelled.".to_string()
+                            });
                             cx.notify();
                             return;
                         }
@@ -2479,14 +2471,21 @@ impl StoreRoot {
                         };
                         // the install phase continues the same job: the
                         // elapsed clock and a cancel pressed mid-verify
-                        // carry over
+                        // carry over. An update keeps the update label:
+                        // the publisher path verifies then re-deploys,
+                        // and the user pressed Update, not Install
+                        let install_state = if updating {
+                            JobState::Updating
+                        } else {
+                            JobState::Installing
+                        };
                         let next = this
                             .jobs
                             .get(&app.app_id)
                             .cloned()
-                            .unwrap_or_else(|| Job::new(JobState::Installing));
+                            .unwrap_or_else(|| Job::new(install_state));
                         this.jobs
-                            .insert(app.app_id.clone(), Job { state: JobState::Installing, ..next });
+                            .insert(app.app_id.clone(), Job { state: install_state, ..next });
                         // the deployment's key baseline: updates are
                         // compared against this from now on
                         this.record_installed_from(
@@ -2497,12 +2496,18 @@ impl StoreRoot {
                             RuntimePlan::First(runtime_cmd, verify) => this.run_job_chained(
                                 runtime_cmd,
                                 &app.app_id,
-                                "Runtime install",
+                                if updating { "Runtime update" } else { "Runtime install" },
                                 &place,
                                 Some(ChainedInstall { cmd: app_cmd, verify }),
                                 cx,
                             ),
-                            _ => this.run_job(app_cmd, &app.app_id, "Install", &place, cx),
+                            _ => this.run_job(
+                                app_cmd,
+                                &app.app_id,
+                                if updating { "Update" } else { "Install" },
+                                &place,
+                                cx,
+                            ),
                         }
                     }
                     Err(err) => {
@@ -2821,7 +2826,7 @@ impl StoreRoot {
                                     "the runtime deploy did not stick: {failed_ref} is not deployed, so the install cannot continue"
                                 ));
                             }
-                            if let Some(next) = chain {
+                            if let Some(next) = chain.take() {
                                 this.jobs.insert(
                                     app_id.clone(),
                                     Job::new(JobState::Installing),
@@ -2829,6 +2834,19 @@ impl StoreRoot {
                                 this.run_job_chained(
                                     next.cmd, &app_id, "Install", &place, None, cx,
                                 );
+                            }
+                            // cache hygiene on a finished deploy: an
+                            // install or update keeps only the newest
+                            // layout (each is ~100MB of rebuildable
+                            // bytes), a remove keeps none
+                            if chain.is_none() {
+                                match label.as_str() {
+                                    "Remove" => crate::cache::drop_artifacts(&app_id),
+                                    "Install" | "Update" => {
+                                        crate::cache::prune_old_artifacts(&app_id)
+                                    }
+                                    _ => {}
+                                }
                             }
                         }
                         Ok(false) => {
@@ -7549,47 +7567,25 @@ impl StoreRoot {
             .filter(|value| !value.trim().is_empty())
             .map(|value| ("SOCIAL_RELAYS", value));
         let (image_bytes, event_bytes) = self.cache_sizes;
-        // with one source hidden there is one channel, so the startup
-        // choices collapse the same way the channel menu does
-        let both_visible = settings.flathub_source && settings.orchard_source;
-        let channel_options: &[(&'static str, &'static str)] = if both_visible {
-            &[
-                ("all", "All"),
-                ("flathub", "Flathub"),
-                ("orchard", "Orchard"),
-                ("installed", "Installed"),
-            ]
-        } else {
-            &[("all", "All"), ("installed", "Installed")]
-        };
-
+        // both channels are required, so there is nothing to toggle:
+        // the section is the startup choice alone. Reviewed installs
+        // resolve their runtimes from Flathub, publisher installs and
+        // the app's own updates come from the Orchard channel
         let sources_body = div()
             .flex()
             .flex_col()
             .gap_1p5()
             .child(self.settings_row(
-                "Flathub channel",
-                "Reviewed, curated apps from flathub.org. Required: reviewed installs resolve their runtimes and dependencies from it.",
-                ui::badge("required", ui::accent()),
-            ))
-            .child(self.settings_row(
-                "Orchard channel",
-                "Publisher-signed apps from the Nostr catalog.",
-                div()
-                    .id("settings-source-orchard")
-                    .cursor_pointer()
-                    .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
-                        let visible = !this.settings.get().orchard_source;
-                        this.set_orchard_visible(visible, cx);
-                    }))
-                    .child(ui::toggle_pill(settings.orchard_source)),
-            ))
-            .child(self.settings_row(
                 "Opens on",
                 "The channel the store starts on.",
                 self.settings_segmented(
                     "default-channel",
-                    channel_options,
+                    &[
+                        ("all", "All"),
+                        ("flathub", "Flathub"),
+                        ("orchard", "Orchard"),
+                        ("installed", "Installed"),
+                    ],
                     &settings.default_channel,
                     |this, name, cx| {
                         this.edit_settings(|s| s.default_channel = name.to_string(), cx);
@@ -7729,7 +7725,7 @@ impl StoreRoot {
                     )
                     .child(self.settings_section(
                         "icons/sprout.svg",
-                        "Sources",
+                        "Catalog",
                         sources_body.into_any_element(),
                     ))
                     .child(self.settings_section(
