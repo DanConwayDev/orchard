@@ -60,6 +60,14 @@
   ride a capped one (the newest few hundred, plenty for publisher
   names and icons). The backfill anchor waits for both streams'
   EOSE.
+- **Reconnects back off and ping.** Relays and the proxies in front
+  of them drop long-lived connections without a closing handshake, so
+  the session now pings at each read checkpoint to keep the path
+  warm, and repeated failures stretch the retry (doubled each miss,
+  five seconds to five minutes) until a session that completes a
+  backfill or lives a minute resets the stretch: a relay that resets
+  once an hour retries in seconds; one that is down is retried every
+  few minutes, not hammered and not spamming the log.
 
 ## v0.1.4 (2026-10-15)
 

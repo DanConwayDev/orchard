@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use nostr::prelude::*;
-use tungstenite::Message;
+use tungstenite::{Bytes, Message};
 
 use crate::Feed;
 
@@ -104,6 +104,27 @@ const PROFILE_LIMIT: usize = 200;
 
 const BACKOFF: Duration = Duration::from_secs(5);
 
+/// The ceiling the reconnect delay stretches to: a relay that is down
+/// (or refusing us) is retried every few minutes, not every few
+/// seconds.
+const BACKOFF_CAP: Duration = Duration::from_secs(300);
+
+/// A session that lived this long counts as a healthy connection: the
+/// next drop restarts the retry stretch from the base delay instead of
+/// compounding. A relay that resets once an hour is not sick, and its
+/// reconnects should stay cheap.
+const HEALTHY_SESSION: Duration = Duration::from_secs(60);
+
+/// The reconnect delay after `failures` consecutive short-or-failed
+/// sessions: the base doubled each miss, capped. One reset is a blip
+/// and retries in seconds; a relay that is down or refusing is
+/// retried, not hammered.
+fn backoff_delay(failures: u32) -> Duration {
+    BACKOFF
+        .saturating_mul(1u32 << failures.saturating_sub(1).min(20))
+        .min(BACKOFF_CAP)
+}
+
 /// How far behind the feed's newest event a reconnect asks: enough
 /// overlap to survive clock skew, small enough that a busy relay's
 /// re-delivery stays cheap. Longer outages heal through the cache
@@ -152,7 +173,9 @@ pub fn run_forever(
     // a reconnect re-pulls everything, so an interrupted first sync
     // heals instead of freezing a partial catalog in
     let mut backfilled = false;
+    let mut failures: u32 = 0;
     while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+        let started = std::time::Instant::now();
         // rebuilt per session: the anchor moves as the feed grows
         let subs = subscriptions(
             &feed
@@ -169,19 +192,33 @@ pub fn run_forever(
         match outcome {
             Ok(Ok(saw_eose)) => {
                 backfilled |= saw_eose;
-                // clean close: still a stop; retry in case the relay restarts
-                std::thread::sleep(BACKOFF);
+                // a session that completed a backfill, or simply lived
+                // a while, says the relay is healthy: the next drop
+                // retries from the base delay, not the stretched one.
+                // A clean close that came fast is a drop all the same.
+                if saw_eose || started.elapsed() >= HEALTHY_SESSION {
+                    failures = 0;
+                } else {
+                    failures += 1;
+                }
             }
             Ok(Err(err)) => {
-                eprintln!("relay {url}: {err:#}; retrying in {}s", BACKOFF.as_secs());
-                std::thread::sleep(BACKOFF);
+                failures += 1;
+                eprintln!(
+                    "relay {url}: {err:#}; retrying in {}s",
+                    backoff_delay(failures).as_secs()
+                );
             }
             Err(panic) => {
+                failures += 1;
                 let message = panic_message(&panic);
-                eprintln!("relay {url}: session panicked: {message}; retrying in {}s", BACKOFF.as_secs());
-                std::thread::sleep(BACKOFF);
+                eprintln!(
+                    "relay {url}: session panicked: {message}; retrying in {}s",
+                    backoff_delay(failures).as_secs()
+                );
             }
         }
+        std::thread::sleep(backoff_delay(failures));
     }
 }
 
@@ -228,6 +265,12 @@ fn session(
                 if stop.load(std::sync::atomic::Ordering::Relaxed) {
                     return Ok(saw_eose);
                 }
+                // keep-alive: relays and the proxies in front of them
+                // reset an idle connection without a closing handshake
+                // (observed on relay.orchard.rocks and
+                // relay.primal.net), and a client ping keeps the path
+                // warm and a dead one detectable at the next read
+                socket.send(Message::Ping(Bytes::new()))?;
                 continue;
             }
             Err(err) => return Err(err.into()),
@@ -616,6 +659,17 @@ mod tests {
         );
         // the same feed, pre-backfill, still carries no filter
         assert!(!subscriptions(&feed, false)[0].contains("since"));
+    }
+
+    /// The reconnect delay doubles per consecutive miss and caps, so
+    /// a down relay is retried minutes apart instead of hammered.
+    #[test]
+    fn backoff_doubles_and_caps() {
+        assert_eq!(backoff_delay(1), BACKOFF);
+        assert_eq!(backoff_delay(2), Duration::from_secs(10));
+        assert_eq!(backoff_delay(6), Duration::from_secs(160));
+        assert_eq!(backoff_delay(7), BACKOFF_CAP);
+        assert_eq!(backoff_delay(1000), BACKOFF_CAP);
     }
 
     /// The contact list's follows are its p tags, in tag order.
