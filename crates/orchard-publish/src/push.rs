@@ -363,3 +363,15 @@ mod tests {
         Some(out)
     }
 }
+
+/// The NIP-82 asset URL identifies the immutable manifest bytes in the registry.
+pub fn manifest_url(registry_repo: &str, digest: &str) -> Result<String> {
+    orchard_core::oci_asset::hash_hex(digest)?;
+    let (scheme, rest) = if let Some(rest) = registry_repo.strip_prefix("https://") {
+        (Some("https"), rest)
+    } else if let Some(rest) = registry_repo.strip_prefix("http://") {
+        (Some("http"), rest)
+    } else { (None, registry_repo) };
+    let (registry, repository) = rest.split_once('/').context("registry needs host/repository")?;
+    Ok(format!("{}/v2/{repository}/manifests/{digest}", registry_base(registry, scheme)))
+}

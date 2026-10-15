@@ -143,6 +143,13 @@ fn run() -> Result<()> {
     if let Some(arch) = &args.arch {
         manifest.release.arch = arch.clone();
     }
+    // A shared release address must not be overwritten by separate arch jobs.
+    if manifest.listing_platforms() != vec![manifest.release.arch.clone()] {
+        bail!("publish all declared platforms together; this build supports one platform per run");
+    }
+    if args.registry.is_none() {
+        bail!("manifest assets require an HTTP(S) registry URL; pass --registry");
+    }
     let app_id = &manifest.app.id;
     let version = &manifest.release.version;
 
@@ -217,9 +224,9 @@ fn run() -> Result<()> {
                 bail!("registry serves {digest}, built {built_digest}", built_digest = built.manifest_digest);
             }
             println!("pushed as {registry_repo}:{tag}");
-            format!("docker://{registry_repo}@{digest}")
+            push::manifest_url(registry_repo, &digest)?
         }
-        _ => format!("oci:{}", built.layout.display()),
+        _ => push::manifest_url(args.registry.as_deref().unwrap(), &built.manifest_digest)?,
     };
 
     // sign: asset first so the release can reference its id. The
@@ -232,20 +239,42 @@ fn run() -> Result<()> {
             app_id: app_id.clone(),
             version: version.clone(),
             platform: manifest.release.arch.clone(),
-            digest: built.manifest_digest.clone(),
-            location: location.clone(),
-            runtime: manifest.runtime_for_build(),
+            digest: orchard_core::oci_asset::hash_hex(&built.manifest_digest)?.to_string(),
+            url: location.clone(),
+            size: std::fs::metadata(built.layout.join("blobs/sha256")
+                .join(orchard_core::oci_asset::hash_hex(&built.manifest_digest)?))?.len(),
+            filename: format!("{app_id}-{}.manifest.json", manifest.release.arch),
+            mime: orchard_core::oci_asset::MIME.into(),
         },
     )?;
+    let mut asset_events = vec![asset];
+    let manifest_bytes = std::fs::read(built.layout.join("blobs/sha256")
+        .join(orchard_core::oci_asset::hash_hex(&built.manifest_digest)?))?;
+    let image: serde_json::Value = serde_json::from_slice(&manifest_bytes)?;
+    let layers = image["layers"].as_array().ok_or_else(|| anyhow::anyhow!("missing layers"))?;
+    for descriptor in std::iter::once(&image["config"]).chain(layers) {
+        let digest = descriptor["digest"].as_str().ok_or_else(|| anyhow::anyhow!("missing digest"))?;
+        let url = push::manifest_url(args.registry.as_deref().unwrap(), digest)?;
+        let (base, hash) = url.rsplit_once("/manifests/").unwrap();
+        asset_events.push(events::sign_asset(&keys, &Asset {
+            app_id: app_id.clone(), version: version.clone(),
+            platform: manifest.release.arch.clone(),
+            digest: orchard_core::oci_asset::hash_hex(digest)?.into(),
+            url: format!("{base}/blobs/{hash}"),
+            size: descriptor["size"].as_u64().ok_or_else(|| anyhow::anyhow!("missing size"))?,
+            mime: descriptor["mediaType"].as_str().ok_or_else(|| anyhow::anyhow!("missing MIME"))?.into(),
+            filename: orchard_core::oci_asset::hash_hex(digest)?.into(),
+        })?);
+    }
     let release = events::sign_release(
         &keys,
         &Release {
             app_id: app_id.clone(),
             version: version.clone(),
-            platform: manifest.release.arch.clone(),
+            platforms: vec![manifest.release.arch.clone()],
             channel: manifest.release.channel.clone(),
             notes: manifest.release.notes.clone(),
-            asset_id: asset.id.to_string(),
+            asset_ids: asset_events.iter().map(|e| e.id.to_string()).collect(),
         },
     )?;
     let listing = events::sign_listing(
@@ -263,7 +292,8 @@ fn run() -> Result<()> {
             homepage: manifest.app.homepage.clone(),
         },
     )?;
-    let mut signed = vec![asset, release, listing];
+    let mut signed = asset_events;
+    signed.extend([release, listing]);
     if let Some(publish) = &manifest.publish
         && (publish.author_name.is_some() || publish.nip05.is_some())
     {
