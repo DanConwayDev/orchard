@@ -121,9 +121,14 @@ impl Job {
 /// and ref to re-verify before it starts: the runtime pre-flight's
 /// chain must not build an install on a deploy that reported
 /// success but did not stick (observed once on flatpak 1.18.4).
+/// A follow-up of its own makes the chain two deep: an update runs
+/// uninstall, then (when the runtime pre-flight demanded it) the
+/// runtime deploy, then the app install.
 struct ChainedInstall {
     cmd: std::process::Command,
     verify: Option<(orchard_flatpak::Scope, String)>,
+    then: Option<Box<ChainedInstall>>,
+    label: &'static str,
 }
 
 /// Which section of the catalog list is shown.
@@ -2463,11 +2468,8 @@ impl StoreRoot {
                         // The catalog ref must match what the image labels
                         // claim; flatpak enforces this again at pull time.
                         let _ = flatpak_ref;
-                        let app_cmd = match &runtime_plan {
-                            RuntimePlan::NoDeps | RuntimePlan::First(_, Some(_)) => {
-                                orchard_flatpak::install_image(&install_arg, true)
-                            }
-                            _ => orchard_flatpak::install_image(&install_arg, false),
+                        let app_cmd = |no_deps: bool| {
+                            orchard_flatpak::install_image(&install_arg, no_deps)
                         };
                         // the install phase continues the same job: the
                         // elapsed clock and a cancel pressed mid-verify
@@ -2492,19 +2494,88 @@ impl StoreRoot {
                             &app.app_id,
                             app.publisher.as_deref(),
                         );
+                        let install_label: &'static str =
+                            if updating { "Update" } else { "Install" };
+                        let install_step = |no_deps: bool| ChainedInstall {
+                            cmd: app_cmd(no_deps),
+                            verify: None,
+                            then: None,
+                            label: install_label,
+                        };
+                        // An update brings the installed ref down
+                        // before the install: flatpak refuses to
+                        // install over an installed ref at any
+                        // version ("is already installed"), and the
+                        // oci: flow leaves no persistent remote for
+                        // flatpak update to serve from, so there is
+                        // no in-place update to ask for. The running
+                        // instance survives the uninstall (deleted
+                        // deploys stay mapped) and user data is
+                        // kept; a failed install leaves the cached
+                        // layout one press away.
                         match runtime_plan {
-                            RuntimePlan::First(runtime_cmd, verify) => this.run_job_chained(
-                                runtime_cmd,
-                                &app.app_id,
-                                if updating { "Runtime update" } else { "Runtime install" },
-                                &place,
-                                Some(ChainedInstall { cmd: app_cmd, verify }),
-                                cx,
-                            ),
+                            RuntimePlan::First(runtime_cmd, verify) => {
+                                // the runtime's deploy hands the job
+                                // to the app install it was making
+                                // way for; the app installs --no-deps
+                                // when the runtime landed system-
+                                // scope (the verify pair is the
+                                // marker)
+                                let runtime_label: &'static str = if updating {
+                                    "Runtime update"
+                                } else {
+                                    "Runtime install"
+                                };
+                                let no_deps = verify.is_some();
+                                if updating {
+                                    let runtime_step = ChainedInstall {
+                                        cmd: runtime_cmd,
+                                        verify,
+                                        then: Some(Box::new(install_step(no_deps))),
+                                        label: runtime_label,
+                                    };
+                                    this.run_job_chained(
+                                        orchard_flatpak::uninstall(
+                                            orchard_flatpak::Scope::User,
+                                            &app.app_id,
+                                        ),
+                                        &app.app_id,
+                                        install_label,
+                                        &place,
+                                        Some(runtime_step),
+                                        cx,
+                                    );
+                                } else {
+                                    this.run_job_chained(
+                                        runtime_cmd,
+                                        &app.app_id,
+                                        runtime_label,
+                                        &place,
+                                        Some(install_step(no_deps)),
+                                        cx,
+                                    );
+                                }
+                            }
+                            _ if updating => {
+                                this.run_job_chained(
+                                    orchard_flatpak::uninstall(
+                                        orchard_flatpak::Scope::User,
+                                        &app.app_id,
+                                    ),
+                                    &app.app_id,
+                                    install_label,
+                                    &place,
+                                    Some(install_step(matches!(
+                                        runtime_plan,
+                                        RuntimePlan::NoDeps
+                                    ))),
+                                    cx,
+                                );
+                            }
                             _ => this.run_job(
-                                app_cmd,
+                                app_cmd(matches!(runtime_plan, RuntimePlan::NoDeps)),
                                 &app.app_id,
-                                if updating { "Update" } else { "Install" },
+                                install_label,
                                 &place,
                                 cx,
                             ),
@@ -2779,9 +2850,16 @@ impl StoreRoot {
             let mut chain_failed = None;
             if status.as_ref().is_ok_and(|s| s.success()) {
                 if let Some(next) = then {
-                    let ChainedInstall { cmd, verify } = next;
+                    let ChainedInstall { cmd, verify, then, label } = next;
                     match verify {
-                        None => chain = Some(ChainedInstall { cmd, verify: None }),
+                        None => {
+                            chain = Some(ChainedInstall {
+                                cmd,
+                                verify: None,
+                                then,
+                                label,
+                            })
+                        }
                         Some((scope, runtime_ref)) => {
                             let marker = runtime_ref.clone();
                             let stuck = cx
@@ -2793,7 +2871,12 @@ impl StoreRoot {
                                 })
                                 .await;
                             if stuck {
-                                chain = Some(ChainedInstall { cmd, verify: None });
+                                chain = Some(ChainedInstall {
+                                    cmd,
+                                    verify: None,
+                                    then,
+                                    label,
+                                });
                             } else {
                                 chain_failed = Some(runtime_ref);
                             }
@@ -2827,19 +2910,27 @@ impl StoreRoot {
                                 ));
                             }
                             if let Some(next) = chain.take() {
-                                this.jobs.insert(
-                                    app_id.clone(),
-                                    Job::new(JobState::Installing),
-                                );
+                                let ChainedInstall { cmd, verify: _, then, label } = next;
+                                let state = match label {
+                                    "Update" | "Runtime update" => JobState::Updating,
+                                    _ => JobState::Installing,
+                                };
+                                this.jobs.insert(app_id.clone(), Job::new(state));
                                 this.run_job_chained(
-                                    next.cmd, &app_id, "Install", &place, None, cx,
+                                    cmd,
+                                    &app_id,
+                                    label,
+                                    &place,
+                                    then.map(|boxed| *boxed),
+                                    cx,
                                 );
-                            }
-                            // cache hygiene on a finished deploy: an
-                            // install or update keeps only the newest
-                            // layout (each is ~100MB of rebuildable
-                            // bytes), a remove keeps none
-                            if chain.is_none() {
+                            } else {
+                                // cache hygiene on a finished deploy
+                                // (only when no follow-up step will
+                                // deploy again): an install or update
+                                // keeps only the newest layout (each
+                                // is ~100MB of rebuildable bytes), a
+                                // remove keeps none
                                 match label.as_str() {
                                     "Remove" => crate::cache::drop_artifacts(&app_id),
                                     "Install" | "Update" => {

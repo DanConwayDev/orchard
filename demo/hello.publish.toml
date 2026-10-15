@@ -13,10 +13,10 @@ description = "The Orchard demo: a shell script packaged as a flatpak by orchard
 categories = ["Utilities"]
 
 [release]
-version = "1.2.0"
+version = "1.4.0"
 arch = "linux-x86_64"
 runtime = "org.freedesktop.Platform/x86_64/25.08"
-notes = "Third demo release, published with the orchard-publish CLI: manifest, build, push, sign."
+notes = "Seam prototype release: exercises the flatpak update path."
 
 [artifact]
 tree = "hello"
