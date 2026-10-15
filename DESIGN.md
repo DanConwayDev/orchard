@@ -245,14 +245,13 @@ sandbox; bump the pin with the runtime the publish manifest targets, and wipe
 | M4 | Permissions viewer (built, reads the real sandbox from the artifact); `orchard://` scheme handler | viewer done; handler not built |
 | M5 | Publish CLI: manifest → build → push → sign → events, proven live against a TLS registry | done |
 | M6 | Reviews, review trust, circle + two-hop graph, self-distribution (Orchard publishes itself through the ordinary path), rendezvous topology | code complete 2026-10-11 |
-| M7 | The public loop: tags ship through CI to ghcr, install and update through the GUI | v0.1.0 and v0.1.1 shipped; v0.1.2 staged |
+| M7 | The public loop: tags ship through CI to ghcr, install and update through the GUI | v0.1.0 through v0.1.3 shipped |
 
 **M7 open items:**
 
-- [ ] Push the v0.1.2 stack and cut the tag (CI ships the artifact: sandbox grants and
-      the corrected version string reach installed clients).
 - [ ] The update handoff test: a tag delivering an update through the installed client
-      in the GUI.
+      in the GUI (0.1.2 installs can take 0.1.4 directly: same runtime target, same
+      publisher key, full-image updates; see CHANGELOG).
 - [ ] Purge the six inert probe rows from the production relay's database (operator
       action; recipe in `relay/README.md`).
 

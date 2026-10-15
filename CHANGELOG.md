@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.1.4 (2026-10-15)
+
 - **Flathub is a required source.** Reviewed installs resolve their
   runtimes and dependencies from Flathub, so the settings row no longer
   offers a switch: it wears the same "required" badge as the pinned

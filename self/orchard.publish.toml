@@ -17,13 +17,13 @@ repository = "https://github.com/Letdown2491/orchard"
 icon = "https://raw.githubusercontent.com/Letdown2491/orchard/main/assets/orchard-512.png"
 
 [release]
-version = "0.1.3"
+version = "0.1.4"
 arch = "linux-x86_64"
 # the full coverage both CI legs build; every leg publishes the same
 # listing, and each host picks the artifact built for it
 platforms = ["linux-x86_64", "linux-aarch64"]
 runtime = "org.freedesktop.Platform/x86_64/25.08"
-notes = "First self-hosted release: Orchard installing and updating Orchard through its own registry and relays."
+notes = "Publisher installs pre-flight the runtime they need; Flathub is a required source; update checks run every launch with a Daily cadence; settings page scrolls and keeps one column width; channel clicks leave the app page."
 
 [artifact]
 tree = "tree"

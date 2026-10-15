@@ -39,6 +39,17 @@ from the artifact itself when the page opens, so what the permissions
 viewer shows is exactly what install will grant. There is no
 declared-versus-actual gap because there is only one source: the artifact.
 
+The `[Application]` section's `runtime=` line matters beyond the build:
+flatpak's image install path does not resolve runtimes from remotes the
+way a classic install does, so the client reads this line from the
+artifact and pre-flights the deploy, installing the runtime first (user
+scope when a remote serves it there, otherwise system scope under
+polkit) and chaining the app install behind it. Keep the line accurate;
+a runtime no enabled remote serves fails the install up front with that
+fact, before anything downloads. The manifest's `[release].runtime` is
+the listing's copy of the same fact and is rewritten per build arch; the
+tree's `metadata` is what the client actually reads.
+
 One build constraint before the first push: `files/` runs against the
 runtime's glibc, and glibc only goes backwards. Freedesktop 25.08
 carries 2.42 (the Fedora 43 set), so a binary built on a newer toolchain
@@ -405,6 +416,9 @@ repository for reuse, point the listing at the PNG.
 - [ ] `platforms` lists every arch this tag actually builds.
 - [ ] `metadata` ini matches the sandbox the app really needs; the page
       shows it verbatim.
+- [ ] `metadata`'s `[Application] runtime=` names a runtime branch your
+      users' remotes can serve (see above): the client pre-flights that
+      deploy from this line.
 - [ ] Icon is a PNG URL (see Media above) that resolves publicly.
 - [ ] Dry run first: `--skip-relays --registry localhost:5000/...` against
       a throwaway registry, then the real run. (Orchard's own dry run:
