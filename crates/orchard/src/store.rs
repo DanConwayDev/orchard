@@ -8178,29 +8178,28 @@ fn extra_channels(listings: &[orchard_flatpak::RemoteListing]) -> Vec<RemoteChan
         .filter(|url| !url.is_empty())
         .collect();
     let mut seen_names: Vec<&str> = vec![FLATHUB_REMOTE, orchard_flatpak::REMOTE_NAME];
-    let mut extras: Vec<RemoteChannel> = listings
-        .iter()
-        .filter(|listing| {
-            !listing.no_enumerate()
-                && !seen_names.contains(&listing.name.as_str())
-                && (listing.url.is_empty() || !seen_urls.contains(&listing.url.as_str()))
-        })
-        .map(|listing| {
-            seen_names.push(listing.name.as_str());
-            if !listing.url.is_empty() {
-                seen_urls.push(listing.url.as_str());
-            }
-            RemoteChannel {
-                remote: listing.name.clone(),
-                title: if listing.title.is_empty() {
-                    listing.name.clone()
-                } else {
-                    listing.title.clone()
-                },
-                user_scope: !listing.system(),
-            }
-        })
-        .collect();
+    let mut extras: Vec<RemoteChannel> = Vec::new();
+    for listing in listings {
+        if listing.no_enumerate()
+            || seen_names.contains(&listing.name.as_str())
+            || (!listing.url.is_empty() && seen_urls.contains(&listing.url.as_str()))
+        {
+            continue;
+        }
+        seen_names.push(listing.name.as_str());
+        if !listing.url.is_empty() {
+            seen_urls.push(listing.url.as_str());
+        }
+        extras.push(RemoteChannel {
+            remote: listing.name.clone(),
+            title: if listing.title.is_empty() {
+                listing.name.clone()
+            } else {
+                listing.title.clone()
+            },
+            user_scope: !listing.system(),
+        });
+    }
     extras.sort_by(|a, b| a.title.cmp(&b.title));
     extras
 }
