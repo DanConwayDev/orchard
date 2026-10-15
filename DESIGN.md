@@ -15,7 +15,7 @@ client, not a gatekeeper.**
 | Artifacts | OCI images on developer-owned registries (ghcr, quay, self-hosted); `.flatpak` bundles as fallback |
 | Metadata protocol | Nostr events (Zapstore-style, NIP-82 draft); Orchard is a client/indexer, never the source of truth |
 | Product surface | Desktop client only (no server-side store) |
-| Flathub | Ingested client-side as a read-only "reviewed" channel |
+| Flathub | Ingested client-side as a read-only "reviewed" channel; other enabled classic remotes ingest the same way as extra channels (no-enumerate remotes excepted) |
 | Binaries | Developer-owned registries only; Orchard never stores or proxies bytes |
 | Media | Publisher-hosted URLs; no Orchard-run media service |
 | Sandbox permissions | Never published in events: flatpak bakes `finish-args` into the artifact, the client reads the real sandbox from it; no declared-vs-actual gap |
@@ -162,6 +162,14 @@ Zapstore publishers readable on Orchard day one:
 Read AppStream locally from the user's existing flathub remote: zero mirroring, zero
 network for the catalog. Rendered as the "Flathub" channel; Orchard-native apps as the
 "Orchard" channel. One unified catalog.
+
+Other enabled classic remotes (FlatPark and the like) ingest as extra channels through
+the same reader: `flatpak remotes` enumerates (disabled and `no-enumerate` remotes
+skipped, same-URL subset remotes deduped), each remote's AppStream parses with the same
+code, and the row carries its origin remote so install, metadata, and updates route to
+the installation that hosts it. The same app id on two remotes renders once, the
+built-in remote's row winning; per-channel twins are a follow-up. Orchard itself stays
+read-only over flatpak state: no `remote-add`, no key handling.
 
 ## Client
 

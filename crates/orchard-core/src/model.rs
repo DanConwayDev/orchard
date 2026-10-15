@@ -217,7 +217,10 @@ pub struct CatalogApp {
 /// Which half of the store an app came from, for badges and install routing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
-    /// Flathub: the reviewed, centralized channel.
+    /// A classic flatpak remote: GPG-signed AppStream metadata the
+    /// client reads locally. Flathub is the built-in; other enabled
+    /// remotes ingest as channels alongside it, and the row's remote
+    /// name ([`StoreApp::remote`]) routes its install and queries.
     Reviewed,
     /// An Orchard catalog: permissionless, publisher-owned, digest-pinned.
     Publisher,
@@ -243,6 +246,10 @@ pub struct StoreApp {
     pub repository: Option<String>,
     pub license: Option<String>,
     pub source: Source,
+    /// The flatpak remote a reviewed row's AppStream came from:
+    /// installs, metadata, and updates route through it. None on
+    /// publisher rows.
+    pub remote: Option<String>,
     pub icon_path: Option<std::path::PathBuf>,
     pub icon_url: Option<String>,
     pub categories: Vec<String>,
@@ -265,7 +272,7 @@ pub struct StoreApp {
 }
 
 impl StoreApp {
-    pub fn from_appstream(app: &crate::appstream::AppstreamApp) -> Self {
+    pub fn from_appstream(app: &crate::appstream::AppstreamApp, remote: &str) -> Self {
         StoreApp {
             app_id: app.id.clone(),
             name: app.name.clone(),
@@ -278,6 +285,7 @@ impl StoreApp {
             repository: None,
             license: app.license.clone(),
             source: Source::Reviewed,
+            remote: Some(remote.to_string()),
             icon_path: app.icon_path.clone(),
             icon_url: app.icon_url.clone(),
             categories: app.categories.clone(),
@@ -309,6 +317,7 @@ impl StoreApp {
             repository: app.repository.clone(),
             license: None,
             source: Source::Publisher,
+            remote: None,
             icon_path: None,
             icon_url: app.icon_url.clone(),
             categories: app.categories.clone(),
@@ -321,4 +330,22 @@ impl StoreApp {
             platforms: app.platforms.clone(),
         }
     }
+}
+
+/// A classic-remote channel the store renders: the built-in Flathub,
+/// plus every other enabled remote whose AppStream the client could
+/// read. Enumeration lives in the client; the type here is what the
+/// UI and the routing helpers share.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteChannel {
+    /// The flatpak remote name: the key installs, metadata queries,
+    /// and updates route through.
+    pub remote: String,
+    /// The remote's display title ("Flathub"), from `flatpak
+    /// remotes`; the remote name when it ships none.
+    pub title: String,
+    /// True when the remote exists only in the user installation:
+    /// its queries target `--user`, not the polkit-gated system
+    /// install.
+    pub user_scope: bool,
 }

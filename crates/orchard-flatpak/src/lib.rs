@@ -6,9 +6,13 @@
 //! - commands are returned as [`Command`] builders so they are unit-testable
 //!   without executing anything and the UI layer can add progress handling.
 //!
-//! Scope: the reviewed (Flathub) channel installs to the **system**
-//! installation, where flathub's remotes and runtimes already live. The
-//! publisher channel installs to the **user** installation: flatpak's
+//! Scope: the reviewed channel (Flathub, plus other enabled classic
+//! remotes) installs to the installation that hosts its remote, the
+//! **system** install in the common case (that is where flathub's
+//! remotes and runtimes live). A remote added only to the **user**
+//! installation is invisible to the system one, so its installs and
+//! queries take `--user`; [`RemoteListing::system`] is the discriminator.
+//! The publisher channel installs to the **user** installation: flatpak's
 //! system-scope image install is broken as of 1.18.4 (see
 //! [`install_image`]), and a user-scope install also needs no polkit
 //! dialog, so no password on install.
@@ -59,11 +63,13 @@ pub fn ensure_oci_remote(index_url: &str) -> Command {
     cmd
 }
 
-/// Install an app id from a normal remote (the Flathub channel), e.g.
-/// `flatpak install --system -y flathub org.gnome.Polari`.
-pub fn install_ref(app_id: &str, remote: &str) -> Command {
+/// Install an app id from a classic remote, e.g.
+/// `flatpak install --system -y flathub org.gnome.Polari`. The scope
+/// must be one hosting the remote: a user-install-only remote is
+/// unknown to the system installation and vice versa.
+pub fn install_ref(app_id: &str, remote: &str, scope: Scope) -> Command {
     let mut cmd = flatpak_command();
-    cmd.args(["install", "--system", "-y", remote, app_id]);
+    cmd.args(["install", scope.flag(), "-y", remote, app_id]);
     cmd
 }
 
@@ -138,6 +144,81 @@ pub fn list_installed() -> Command {
     cmd
 }
 
+/// A remote known to the host's flatpak, from `flatpak remotes`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteListing {
+    /// The remote's local name: the key `install` and `remote-info`
+    /// route through.
+    pub name: String,
+    /// The remote's display title ("Flathub"). Empty when the remote
+    /// ships none (flatpak prints `-` for an unset title).
+    pub title: String,
+    /// The remote's repository URL, empty when unknown. Subset
+    /// remotes share their parent's URL.
+    pub url: String,
+    /// Raw options column, e.g. `system,filtered`, `user`,
+    /// `no-enumerate`.
+    pub options: String,
+}
+
+impl RemoteListing {
+    fn has_option(&self, want: &str) -> bool {
+        self.options.split(',').any(|opt| opt.trim() == want)
+    }
+
+    /// True when the remote was added with `--no-enumerate`: it asks
+    /// stores not to list its contents. The origin remotes that
+    /// `.flatpakref` installs create carry this flag.
+    pub fn no_enumerate(&self) -> bool {
+        self.has_option("no-enumerate")
+    }
+
+    /// True when the remote serves the system installation. A remote
+    /// can exist in both installations; the system one is where the
+    /// polkit-gated (passwordless-prompting) install flow already
+    /// points, so it is preferred when present.
+    pub fn system(&self) -> bool {
+        self.has_option("system")
+    }
+}
+
+/// The remotes known to the host:
+/// `flatpak remotes --columns=name,title,url,options`. Disabled
+/// remotes are omitted unless `--show-disabled` is passed, which this
+/// deliberately does not.
+pub fn list_remotes() -> Command {
+    let mut cmd = flatpak_command();
+    cmd.args(["remotes", "--columns=name,title,url,options"]);
+    cmd
+}
+
+/// The tab-separated rows `flatpak remotes` prints, one row per
+/// remote per installation. An unset title or URL comes back empty.
+pub fn parse_remotes(output: &str) -> Vec<RemoteListing> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split('\t');
+            let name = fields.next()?.trim().to_string();
+            if name.is_empty() {
+                return None;
+            }
+            let field = |text: Option<&str>| -> String {
+                text.map(str::trim)
+                    .filter(|text| !text.is_empty() && *text != "-")
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            Some(RemoteListing {
+                title: field(fields.next()),
+                url: field(fields.next()),
+                options: field(fields.next()),
+                name,
+            })
+        })
+        .collect()
+}
+
 /// Info about one installed app in the given scope: `flatpak info
 /// <scope> <app>`. Its text output carries the installed size among
 /// other fields.
@@ -148,29 +229,29 @@ pub fn info(scope: Scope, app_id: &str) -> Command {
 }
 
 /// The sandbox metadata ini of an app on a remote, before install:
-/// `flatpak remote-info --show-metadata <remote> <app>`. This is the
-/// manifest of the commit that would be installed.
-pub fn remote_metadata(remote: &str, app_id: &str) -> Command {
+/// `flatpak remote-info --show-metadata <scope> <remote> <app>`. This is
+/// the manifest of the commit that would be installed.
+pub fn remote_metadata(scope: Scope, remote: &str, app_id: &str) -> Command {
     let mut cmd = flatpak_command();
-    cmd.args(["remote-info", "--show-metadata", "--system", remote, app_id]);
+    cmd.args(["remote-info", "--show-metadata", scope.flag(), remote, app_id]);
     cmd
 }
 
 /// Update an installed app to its remote's current commit:
-/// `flatpak update --system -y <app>`. The app's own origin remote
+/// `flatpak update <scope> -y <app>`. The app's own origin remote
 /// supplies the new commit.
-pub fn update_ref(app_id: &str) -> Command {
+pub fn update_ref(scope: Scope, app_id: &str) -> Command {
     let mut cmd = flatpak_command();
-    cmd.args(["update", "--system", "-y", app_id]);
+    cmd.args(["update", scope.flag(), "-y", app_id]);
     cmd
 }
 
 /// Summary of the remote's current commit for an app, before install:
-/// `flatpak remote-info <remote> <app>`: version and the download /
-/// installed sizes of what would be installed.
-pub fn remote_info(remote: &str, app_id: &str) -> Command {
+/// `flatpak remote-info <scope> <remote> <app>`: version and the
+/// download / installed sizes of what would be installed.
+pub fn remote_info(scope: Scope, remote: &str, app_id: &str) -> Command {
     let mut cmd = flatpak_command();
-    cmd.args(["remote-info", "--system", remote, app_id]);
+    cmd.args(["remote-info", scope.flag(), remote, app_id]);
     cmd
 }
 
@@ -220,13 +301,15 @@ mod tests {
 
     #[test]
     fn install_ref_builds_expected_invocation() {
-        let cmd = install_ref("org.gnome.Polari", "flathub");
-        let args = arg_strings(&cmd);
-        let tail: Vec<String> = args.iter().skip(args.len() - 5).cloned().collect();
-        assert_eq!(
-            tail,
-            ["install", "--system", "-y", "flathub", "org.gnome.Polari"]
-        );
+        for (scope, flag) in [(Scope::System, "--system"), (Scope::User, "--user")] {
+            let cmd = install_ref("org.gnome.Polari", "flathub", scope);
+            let args = arg_strings(&cmd);
+            let tail: Vec<String> = args.iter().skip(args.len() - 5).cloned().collect();
+            assert_eq!(
+                tail,
+                ["install", flag, "-y", "flathub", "org.gnome.Polari"]
+            );
+        }
     }
 
     #[test]
@@ -270,10 +353,51 @@ mod tests {
 
     #[test]
     fn update_ref_builds_expected_invocation() {
-        let cmd = update_ref("org.gnome.Polari");
-        let args = arg_strings(&cmd);
-        let tail: Vec<String> = args.iter().skip(args.len() - 4).cloned().collect();
-        assert_eq!(tail, ["update", "--system", "-y", "org.gnome.Polari"]);
+        for (scope, flag) in [(Scope::System, "--system"), (Scope::User, "--user")] {
+            let cmd = update_ref(scope, "org.gnome.Polari");
+            let args = arg_strings(&cmd);
+            let tail: Vec<String> = args.iter().skip(args.len() - 4).cloned().collect();
+            assert_eq!(tail, ["update", flag, "-y", "org.gnome.Polari"]);
+        }
+    }
+
+    #[test]
+    fn list_remotes_requests_the_four_columns() {
+        let args = arg_strings(&list_remotes());
+        assert!(args
+            .contains(&"remotes".to_string()));
+        assert!(args
+            .contains(&"--columns=name,title,url,options".to_string()));
+    }
+
+    #[test]
+    fn parse_remotes_reads_rows_and_unset_fields() {
+        // The live shape: one row per remote per installation, tab
+        // separated, `-` for an unset title.
+        let listings = parse_remotes(
+            "flathub\tFlathub\thttps://dl.flathub.org/repo/\tsystem,filtered\n\
+             flathub\tFlathub\thttps://dl.flathub.org/repo/\tuser\n\
+             onepassword-origin\t-\thttps://onepass.example/repo\tsystem,no-enumerate\n\
+             viola\t-\thttps://violabrowser.com/downloads/flatpak/repo\tsystem\n",
+        );
+        assert_eq!(listings.len(), 4);
+        assert_eq!(listings[0].name, "flathub");
+        assert_eq!(listings[0].title, "Flathub");
+        assert_eq!(listings[0].url, "https://dl.flathub.org/repo/");
+        assert!(listings[0].system());
+        assert!(!listings[0].no_enumerate());
+        assert!(listings[2].no_enumerate());
+        assert_eq!(listings[2].title, "", "a `-` title is unset");
+        assert!(listings[3].system());
+        assert_eq!(listings[3].title, "", "a `-` title is unset");
+    }
+
+    #[test]
+    fn parse_remotes_skips_blank_rows() {
+        assert!(parse_remotes("").is_empty());
+        assert!(parse_remotes("\n").is_empty());
+        // a name-less row is not a remote
+        assert!(parse_remotes("\tTitle\thttps://x\tuser\n").is_empty());
     }
 
     #[test]

@@ -3,7 +3,8 @@
 //! MVP: browse and search the Flathub catalog (from the local AppStream),
 //! plus the Orchard channel (publisher apps from the catalog served by the
 //! in-process indexd), with digest-verified direct OCI installs and a
-//! finish-args permissions viewer.
+//! finish-args permissions viewer. Other enabled flatpak remotes ingest
+//! as channels alongside Flathub through the same local AppStream reader.
 
 mod assets;
 mod cache;

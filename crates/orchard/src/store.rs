@@ -18,7 +18,7 @@ use gpui::{
     TextLayout, TextRun, UniformListScrollHandle, Window,
 };
 
-use orchard_core::{oci, permissions, CatalogFile, Risk, Source, StoreApp};
+use orchard_core::{oci, permissions, CatalogFile, RemoteChannel, Risk, Source, StoreApp};
 
 use crate::ui::{self, app_icon, badge, button, Tone};
 
@@ -118,25 +118,38 @@ impl Job {
 }
 
 /// Which section of the catalog list is shown.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Filter {
     All,
+    /// The built-in reviewed channel: flathub's AppStream.
     Reviewed,
+    /// One extra classic remote's channel, by remote name. The menu
+    /// of these is dynamic: whatever `flatpak remotes` enumerates
+    /// with a readable AppStream ([`StoreRoot::channels`]).
+    Remote(String),
     Publisher,
     Installed,
 }
 
 impl Filter {
-    fn label(&self) -> &'static str {
+    /// The menu label, with the remote's display title when it has one.
+    fn label(&self, channels: &[RemoteChannel]) -> String {
         match self {
-            Filter::All => "All",
-            Filter::Reviewed => "Flathub",
-            Filter::Publisher => "Orchard",
-            Filter::Installed => "Installed",
+            Filter::All => "All".to_string(),
+            Filter::Reviewed => "Flathub".to_string(),
+            Filter::Publisher => "Orchard".to_string(),
+            Filter::Installed => "Installed".to_string(),
+            Filter::Remote(name) => channels
+                .iter()
+                .find(|channel| &channel.remote == name)
+                .map(|channel| channel.title.clone())
+                .unwrap_or_else(|| name.clone()),
         }
     }
 
-    /// The filter a settings name selects, if it names one.
+    /// The filter a settings name selects, if it names one. Extra
+    /// remotes have no settings name: only the built-ins are options
+    /// for the "opens on" default.
     fn from_setting(name: &str) -> Option<Filter> {
         match name {
             "all" => Some(Filter::All),
@@ -221,7 +234,12 @@ pub struct StoreRoot {
     /// When the current note line was raised, same clock.
     note_at: Option<Instant>,
     error: Option<String>,
-    flathub_loading: bool,
+    /// True until the reviewed channels' first background load lands.
+    reviewed_loading: bool,
+    /// The reviewed channels the client renders: the built-in
+    /// Flathub, then every extra enabled remote with a readable
+    /// AppStream. Feeds the channel menu and the provenance badges.
+    channels: Vec<RemoteChannel>,
     /// Remote images resolved through the disk cache: url -> path, or
     /// None when the fetch failed.
     fetched: HashMap<String, Option<PathBuf>>,
@@ -423,7 +441,8 @@ impl StoreRoot {
             verified_pins: load_digest_cache_at(&digest_cache_path()),
             continuity: load_continuity(),
             error: None,
-            flathub_loading: true,
+            reviewed_loading: true,
+            channels: Vec::new(),
             fetched: HashMap::new(),
             fetching: HashSet::new(),
             cache_sizes: (0, 0),
@@ -623,15 +642,17 @@ impl StoreRoot {
         })
         .detach();
 
-        // Reviewed channel: parse flathub's AppStream in the background.
+        // Reviewed channels: parse every enabled classic remote's
+        // local AppStream (flathub first) in the background.
         cx.spawn(async move |this, cx| {
-            let apps = cx
+            let (apps, channels) = cx
                 .background_executor()
-                .spawn(async move { load_flathub() })
+                .spawn(async move { load_reviewed() })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.apps.extend(apps);
-                this.flathub_loading = false;
+                this.channels = channels;
+                this.reviewed_loading = false;
                 cx.notify();
             });
         })
@@ -655,14 +676,27 @@ impl StoreRoot {
             .iter()
             .enumerate()
             // a hidden source vanishes from every channel, list and
-            // filter alike: visibility is the source's own switch
+            // filter alike: visibility is the source's own switch.
+            // The switch is the Flathub channel's own: the extra
+            // remotes' rows stay visible, their consent was adding
+            // the remote to flatpak
             .filter(|(_, app)| match app.source {
-                Source::Reviewed => settings.flathub_source,
+                Source::Reviewed => {
+                    settings.flathub_source
+                        || app.remote.as_deref() != Some(FLATHUB_REMOTE)
+                }
                 Source::Publisher => settings.orchard_source,
             })
-            .filter(|(_, app)| match self.filter {
+            .filter(|(_, app)| match &self.filter {
                 Filter::All => true,
-                Filter::Reviewed => app.source == Source::Reviewed,
+                Filter::Reviewed => {
+                    app.source == Source::Reviewed
+                        && app.remote.as_deref() == Some(FLATHUB_REMOTE)
+                }
+                Filter::Remote(name) => {
+                    app.source == Source::Reviewed
+                        && app.remote.as_deref() == Some(name.as_str())
+                }
                 Filter::Publisher => app.source == Source::Publisher,
                 Filter::Installed => self.installed.contains_key(&app.app_id),
             })
@@ -703,6 +737,35 @@ impl StoreRoot {
             app.app_id == app_id
                 && self.selected_publisher.as_deref() == app.publisher.as_deref()
         })
+    }
+
+    /// The routing channel for a reviewed row: the remote's own
+    /// channel when enumerated, else a system-scope default for the
+    /// name. The fallback keeps install and metadata queries working
+    /// when enumeration failed (no flatpak CLI in the sandbox):
+    /// flathub keeps its display label, exactly as the client behaved
+    /// before extra channels existed.
+    fn channel_for(&self, remote: Option<&str>) -> RemoteChannel {
+        let name = remote.unwrap_or(FLATHUB_REMOTE);
+        self.channels
+            .iter()
+            .find(|channel| channel.remote == name)
+            .cloned()
+            .unwrap_or_else(|| RemoteChannel {
+                remote: name.to_string(),
+                title: (if name == FLATHUB_REMOTE { "Flathub" } else { name }).to_string(),
+                user_scope: false,
+            })
+    }
+
+    /// The provenance badge text of a reviewed row: the remote's
+    /// display title when known, else the Flathub label the built-in
+    /// has always worn.
+    fn reviewed_badge(&self, app: &StoreApp) -> String {
+        match &app.remote {
+            Some(remote) if app.source == Source::Reviewed => self.channel_for(Some(remote)).title,
+            _ => "Flathub".to_string(),
+        }
     }
 
     fn refresh_installed(&mut self, cx: &mut Context<Self>) {
@@ -787,7 +850,14 @@ impl StoreRoot {
         let source = self.find_app(app_id).map(|a| a.source);
         let not_installed = !self.installed.contains_key(app_id);
         match source {
-            Some(Source::Reviewed) if not_installed => self.ensure_remote_data(app_id, cx),
+            Some(Source::Reviewed) if not_installed => {
+                let channel = self
+                    .find_app(app_id)
+                    .map(|a| self.channel_for(a.remote.as_deref()));
+                if let Some(channel) = channel {
+                    self.ensure_remote_data(app_id, &channel, cx);
+                }
+            }
             Some(Source::Publisher) if not_installed => self.ensure_publisher_data(app_id, cx),
             _ => {}
         }
@@ -797,7 +867,12 @@ impl StoreRoot {
 
     /// Fetch an app's remote commit summary and sandbox manifest
     /// (once per session; failures retry on the next page open).
-    fn ensure_remote_data(&mut self, app_id: &str, cx: &mut Context<Self>) {
+    fn ensure_remote_data(
+        &mut self,
+        app_id: &str,
+        channel: &RemoteChannel,
+        cx: &mut Context<Self>,
+    ) {
         let key = app_key(app_id, self.selected_publisher.as_deref());
         if self.remote_metadata.contains_key(&key) && self.remote_sizes.contains_key(&key)
             || !self.remote_fetching.insert(key.clone())
@@ -805,14 +880,15 @@ impl StoreRoot {
             return;
         }
         let app_id = app_id.to_string();
-        let remote = FLATHUB_REMOTE.to_string();
+        let remote = channel.remote.clone();
+        let scope = channel_scope(channel);
         cx.spawn(async move |this, cx| {
             let id = app_id.clone();
             let remote_meta = remote.clone();
             let metadata = cx
                 .background_executor()
                 .spawn(async move {
-                    orchard_flatpak::remote_metadata(&remote_meta, &id)
+                    orchard_flatpak::remote_metadata(scope, &remote_meta, &id)
                         .output()
                         .ok()
                         .filter(|out| out.status.success())
@@ -824,7 +900,7 @@ impl StoreRoot {
             let sizes = cx
                 .background_executor()
                 .spawn(async move {
-                    orchard_flatpak::remote_info(&remote, &id)
+                    orchard_flatpak::remote_info(scope, &remote, &id)
                         .output()
                         .ok()
                         .filter(|out| out.status.success())
@@ -1761,7 +1837,7 @@ impl StoreRoot {
             },
             cx,
         );
-        let hidden = match self.filter {
+        let hidden = match &self.filter {
             Filter::Reviewed => reviewed,
             Filter::Publisher => !reviewed,
             _ => false,
@@ -2086,10 +2162,12 @@ impl StoreRoot {
         }
         match app.source {
             Source::Reviewed => {
-                let cmd = orchard_flatpak::install_ref(&app.app_id, FLATHUB_REMOTE);
+                let channel = self.channel_for(app.remote.as_deref());
+                let cmd =
+                    orchard_flatpak::install_ref(&app.app_id, &channel.remote, channel_scope(&channel));
                 self.jobs
                     .insert(app.app_id.clone(), Job::new(JobState::Installing));
-                self.run_job(cmd, &app.app_id, "Install", "flathub", cx);
+                self.run_job(cmd, &app.app_id, "Install", &channel.remote, cx);
             }
             Source::Publisher => {
                 self.verify_then_install(app, cx);
@@ -2124,8 +2202,9 @@ impl StoreRoot {
         match app.source {
             Source::Reviewed => {
                 self.jobs.insert(app.app_id.clone(), Job::new(JobState::Updating));
-                let cmd = orchard_flatpak::update_ref(&app.app_id);
-                self.run_job(cmd, &app.app_id, "Update", "flathub", cx);
+                let channel = self.channel_for(app.remote.as_deref());
+                let cmd = orchard_flatpak::update_ref(channel_scope(&channel), &app.app_id);
+                self.run_job(cmd, &app.app_id, "Update", &channel.remote, cx);
             }
             Source::Publisher => self.verify_then_install(app, cx),
         }
@@ -3090,7 +3169,7 @@ impl StoreRoot {
             .min_w_0()
             .bg(ui::inset())
             .into_any_element()
-        } else if self.flathub_loading {
+        } else if self.reviewed_loading {
             self.render_skeleton()
         } else if self.filter == Filter::Installed {
             div()
@@ -3435,7 +3514,7 @@ impl StoreRoot {
                                             .child(app.name.clone()),
                                     )
                                     .child(match app.source {
-                                        Source::Reviewed => badge("Flathub", ui::text_dim()),
+                                        Source::Reviewed => badge(&self.reviewed_badge(app), ui::text_dim()),
                                         Source::Publisher => badge("Orchard", ui::accent()),
                                     })
                                     // digest ok: this client has checked
@@ -5887,7 +5966,7 @@ impl Render for StoreRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let page_open = self.page_open;
         let selected = self.selected_app().cloned();
-        let filter = self.filter;
+        let filter = self.filter.clone();
         let total = self.apps.len();
         let installed_count = self.installed.len();
         let search_focused = self.focus_handle.is_focused(window);
@@ -6191,8 +6270,8 @@ impl Render for StoreRoot {
                                     })
                                     .child(ui::icon("icons/info.svg", 12., ui::text_dim())),
                             )
-                            .child(match self.flathub_loading {
-                                true => format!("{total} apps (loading Flathub…) · {installed_count} installed"),
+                            .child(match self.reviewed_loading {
+                                true => format!("{total} apps (loading catalog…) · {installed_count} installed"),
                                 false => format!("{total} apps · {installed_count} installed"),
                             }),
                     )
@@ -6714,27 +6793,33 @@ impl StoreRoot {
                 MouseButton::Left,
                 |_e: &MouseDownEvent, _w, cx: &mut gpui::App| cx.stop_propagation(),
             )
-            .children(
-                // a hidden source loses its menu entry, and a single
-                // visible source loses its own entry too: when one
-                // source is hidden, All already is that channel
-                [
-                    Filter::All,
-                    Filter::Reviewed,
-                    Filter::Publisher,
-                    Filter::Installed,
-                ]
-                .iter()
-                .filter(|f| match f {
-                    Filter::Reviewed | Filter::Publisher => {
-                        self.settings.get().flathub_source && self.settings.get().orchard_source
-                    }
-                    _ => true,
-                })
-                .map(|f| {
-                    let active = *f == self.filter;
+            .children({
+                // The menu: the two built-ins (a hidden source loses
+                // its entry, and a single visible source loses its
+                // own entry too, since All already is that channel),
+                // then one entry per extra remote channel, then
+                // Installed.
+                let mut entries: Vec<Filter> = vec![Filter::All];
+                let both_visible = self.settings.get().flathub_source
+                    && self.settings.get().orchard_source;
+                if both_visible {
+                    entries.push(Filter::Reviewed);
+                }
+                entries.extend(
+                    self.channels
+                        .iter()
+                        .filter(|channel| channel.remote != FLATHUB_REMOTE)
+                        .map(|channel| Filter::Remote(channel.remote.clone())),
+                );
+                if both_visible {
+                    entries.push(Filter::Publisher);
+                }
+                entries.push(Filter::Installed);
+                entries.into_iter().map(|f| {
+                    let active = f == self.filter;
+                    let label = f.label(&self.channels);
                     div()
-                        .id(SharedString::from(format!("channel-item-{}", f.label())))
+                        .id(SharedString::from(format!("channel-item-{label}")))
                         .flex()
                         .items_center()
                         .justify_between()
@@ -6749,17 +6834,17 @@ impl StoreRoot {
                         })
                         .hover(|style| style.bg(ui::surface()))
                         .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
-                            this.filter = *f;
+                            this.filter = f.clone();
                             this.channel_menu = None;
                             // a pending install confirm does not
                             // survive a channel switch
                             this.confirm = None;
                             cx.notify();
                         }))
-                        .child(f.label().to_string())
+                        .child(label.clone())
                         .children(active.then(|| "✓".to_string()))
-                }),
-            )
+                })
+            })
             .into_any_element()
     }
 
@@ -7504,7 +7589,7 @@ impl StoreRoot {
                     cx.notify();
                 }),
             )
-            .child(filter.label().to_string())
+            .child(filter.label(&self.channels))
             .child(ui::icon("icons/chevron_down.svg", 11., ui::text_dim()))
             .into_any_element()
     }
@@ -7984,36 +8069,151 @@ fn no_build_note(app: &StoreApp) -> String {
     }
 }
 
-fn load_flathub() -> Vec<StoreApp> {
-    let mut saw_file = false;
-    for path in
-        orchard_core::appstream::appstream_paths(FLATHUB_REMOTE, &orchard_core::host_ref_arch())
+/// The scope a channel's flatpak queries target: the installation
+/// that hosts its remote.
+fn channel_scope(channel: &RemoteChannel) -> orchard_flatpak::Scope {
+    if channel.user_scope {
+        orchard_flatpak::Scope::User
+    } else {
+        orchard_flatpak::Scope::System
+    }
+}
+
+/// The reviewed channels to render: every enabled classic remote
+/// with a readable AppStream, flathub first. Enumeration is
+/// best-effort: with the CLI gone or failing, the client still
+/// serves flathub by name, exactly as before extra channels existed.
+fn load_reviewed() -> (Vec<StoreApp>, Vec<RemoteChannel>) {
+    let arch = orchard_core::host_ref_arch();
+    let listings: Vec<orchard_flatpak::RemoteListing> = match orchard_flatpak::list_remotes().output()
     {
-        if !path.exists() {
-            continue;
+        Ok(out) if out.status.success() => {
+            orchard_flatpak::parse_remotes(&String::from_utf8_lossy(&out.stdout))
         }
-        saw_file = true;
+        Ok(_) => {
+            eprintln!("remote channels: `flatpak remotes` failed; serving flathub only");
+            Vec::new()
+        }
+        Err(err) => {
+            eprintln!("remote channels: `flatpak remotes` unavailable ({err}); serving flathub only");
+            Vec::new()
+        }
+    };
+    let mut channels = vec![flathub_channel(&listings)];
+    channels.extend(extra_channels(&listings));
+
+    let mut apps = Vec::new();
+    let mut rendered = Vec::new();
+    for channel in channels {
+        let Some(path) = orchard_core::appstream::appstream_paths(&channel.remote, &arch)
+            .into_iter()
+            .find(|path| path.exists())
+        else {
+            // a remote whose appstream never synced is a logged skip,
+            // not an empty dead-end channel
+            eprintln!(
+                "{} catalog: no appstream synced on this machine; skipping",
+                channel.remote
+            );
+            continue;
+        };
         let icons_root = path
             .parent()
             .map(|active| active.join("icons"))
             .unwrap_or_default();
         match orchard_core::appstream::load(&path, &icons_root) {
-            Ok(apps) => {
-                eprintln!("flathub catalog: {} apps from {}", apps.len(), path.display());
-                return apps
-                    .iter()
-                    .map(StoreApp::from_appstream)
-                    .collect();
+            Ok(rows) => {
+                eprintln!(
+                    "{} catalog: {} apps from {}",
+                    channel.remote,
+                    rows.len(),
+                    path.display()
+                );
+                apps.extend(
+                    rows.iter()
+                        .map(|row| StoreApp::from_appstream(row, &channel.remote)),
+                );
+                rendered.push(channel);
             }
-            // An empty Flathub channel is indistinguishable from a
+            // An empty classic channel is indistinguishable from a
             // broken one unless the failure reaches the log; say so.
-            Err(err) => eprintln!("flathub catalog: {}: {err:#}", path.display()),
+            Err(err) => eprintln!("{} catalog: {}: {err:#}", channel.remote, path.display()),
         }
     }
-    if !saw_file {
-        eprintln!("flathub catalog: no appstream file for the flathub remote on this machine");
+    (dedupe_reviewed(apps), rendered)
+}
+
+/// The built-in channel: flathub, titled and scoped from the
+/// enumeration when it took place. The historical shape (system
+/// scope, the "Flathub" label) is the fallback.
+fn flathub_channel(listings: &[orchard_flatpak::RemoteListing]) -> RemoteChannel {
+    let rows: Vec<&orchard_flatpak::RemoteListing> = listings
+        .iter()
+        .filter(|listing| listing.name == FLATHUB_REMOTE)
+        .collect();
+    RemoteChannel {
+        remote: FLATHUB_REMOTE.to_string(),
+        title: rows
+            .first()
+            .map(|listing| listing.title.clone())
+            .filter(|title| !title.is_empty())
+            .unwrap_or_else(|| "Flathub".to_string()),
+        user_scope: !rows.is_empty() && !rows.iter().any(|listing| listing.system()),
     }
-    Vec::new()
+}
+
+/// The extra classic-remote channels: every enumerated remote except
+/// the built-in flathub and the Orchard native remote, `no-enumerate`
+/// remotes skipped (they ask stores not to list them), same-name
+/// rows (one remote, two installations) collapsed, and same-URL
+/// remotes dropped (a flathub subset shares its parent's URL and
+/// would render a second Flathub). Titles sorted for a stable menu.
+fn extra_channels(listings: &[orchard_flatpak::RemoteListing]) -> Vec<RemoteChannel> {
+    let flathub = listings
+        .iter()
+        .find(|listing| listing.name == FLATHUB_REMOTE);
+    let mut seen_urls: Vec<&str> = flathub
+        .map(|listing| listing.url.as_str())
+        .into_iter()
+        .filter(|url| !url.is_empty())
+        .collect();
+    let mut seen_names: Vec<&str> = vec![FLATHUB_REMOTE, orchard_flatpak::REMOTE_NAME];
+    let mut extras: Vec<RemoteChannel> = listings
+        .iter()
+        .filter(|listing| {
+            !listing.no_enumerate()
+                && !seen_names.contains(&listing.name.as_str())
+                && (listing.url.is_empty() || !seen_urls.contains(&listing.url.as_str()))
+        })
+        .map(|listing| {
+            seen_names.push(listing.name.as_str());
+            if !listing.url.is_empty() {
+                seen_urls.push(listing.url.as_str());
+            }
+            RemoteChannel {
+                remote: listing.name.clone(),
+                title: if listing.title.is_empty() {
+                    listing.name.clone()
+                } else {
+                    listing.title.clone()
+                },
+                user_scope: !listing.system(),
+            }
+        })
+        .collect();
+    extras.sort_by(|a, b| a.title.cmp(&b.title));
+    extras
+}
+
+/// Keep the first row per app id: the same app on two classic
+/// remotes renders once, in channel order (the built-in remote's row
+/// wins). Per-channel twins with a provenance group are the
+/// follow-up (issue #3).
+fn dedupe_reviewed(apps: Vec<StoreApp>) -> Vec<StoreApp> {
+    let mut seen = HashSet::new();
+    apps.into_iter()
+        .filter(|app| seen.insert(app.app_id.clone()))
+        .collect()
 }
 
 /// Orchard channel: catalog over HTTP from indexd, file fallback.
@@ -8687,6 +8887,112 @@ mod tests {
             list_sort(&older, &newer, ListSort::Updated, "2026-10-11"),
             Ordering::Greater
         );
+    }
+
+    fn listing(name: &str, title: &str, url: &str, options: &str) -> orchard_flatpak::RemoteListing {
+        orchard_flatpak::RemoteListing {
+            name: name.into(),
+            title: title.into(),
+            url: url.into(),
+            options: options.into(),
+        }
+    }
+
+    /// A minimal reviewed row for channel tests.
+    fn reviewed_app(id: &str, summary: &str, remote: &str) -> StoreApp {
+        StoreApp::from_appstream(
+            &orchard_core::appstream::AppstreamApp {
+                id: id.into(),
+                name: "Overlap".into(),
+                summary: summary.into(),
+                description: None,
+                version: None,
+                release_date: None,
+                homepage: None,
+                developer: None,
+                license: None,
+                icon_path: None,
+                icon_url: None,
+                categories: Vec::new(),
+                screenshots: Vec::new(),
+            },
+            remote,
+        )
+    }
+
+    #[test]
+    fn dedupe_reviewed_keeps_the_first_channel_row_per_app_id() {
+        let flathub_row = reviewed_app("com.example.Overlap", "flathub's row", FLATHUB_REMOTE);
+        let park_row = reviewed_app("com.example.Overlap", "flatpark's row", "flatpark");
+        let unique = reviewed_app("com.example.Unique", "unique", "flatpark");
+        let kept = dedupe_reviewed(vec![flathub_row, park_row, unique]);
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0].remote.as_deref(), Some(FLATHUB_REMOTE));
+        assert_eq!(kept[0].summary, "flathub's row");
+        assert_eq!(kept[1].app_id, "com.example.Unique");
+        assert_eq!(kept[1].remote.as_deref(), Some("flatpark"));
+    }
+
+    #[test]
+    fn extra_channels_filter_and_dedupe() {
+        let listings = vec![
+            listing("flathub", "Flathub", "https://dl.flathub.org/repo/", "system"),
+            // user install of the built-in: same name, not an extra
+            listing("flathub", "Flathub", "https://dl.flathub.org/repo/", "user"),
+            // the Orchard native remote never renders as an AppStream
+            // channel; its catalog is the publisher channel
+            listing("orchard", "", "oci+http://127.0.0.1:7780", "user,oci"),
+            // no-enumerate: the remote asks stores not to list it
+            listing(
+                "onepassword-origin",
+                "",
+                "https://onepass.example/repo",
+                "system,no-enumerate",
+            ),
+            // a flathub subset shares the parent's URL
+            listing(
+                "flathub-verified",
+                "Flathub (verified)",
+                "https://dl.flathub.org/repo/",
+                "user",
+            ),
+            // a user-install-only remote: queryable, user scope
+            listing("rvgl", "RVGL", "https://rvgl.example/repo", "user"),
+            listing("flatpark", "FlatPark", "https://flatpark.org/repo", "system"),
+        ];
+        let extras = extra_channels(&listings);
+        let names: Vec<&str> = extras.iter().map(|c| c.remote.as_str()).collect();
+        // titles sorted: FlatPark before RVGL
+        assert_eq!(names, vec!["flatpark", "rvgl"]);
+        let flatpark = &extras[0];
+        assert_eq!(flatpark.title, "FlatPark");
+        assert!(!flatpark.user_scope);
+        let rvgl = &extras[1];
+        assert_eq!(rvgl.title, "RVGL", "an unset title falls back to the name");
+        assert!(rvgl.user_scope);
+    }
+
+    #[test]
+    fn flathub_channel_takes_title_and_scope_from_enumeration() {
+        let both = vec![
+            listing("flathub", "Flathub", "https://dl.flathub.org/repo/", "system"),
+            listing("flathub", "Flathub", "https://dl.flathub.org/repo/", "user"),
+        ];
+        let channel = flathub_channel(&both);
+        assert_eq!(channel.title, "Flathub");
+        assert!(!channel.user_scope, "a system row keeps the system scope");
+        // user-only flathub installs route through --user
+        let user_only = vec![listing(
+            "flathub",
+            "Flathub",
+            "https://dl.flathub.org/repo/",
+            "user",
+        )];
+        assert!(flathub_channel(&user_only).user_scope);
+        // enumeration failed: the historical shape is the fallback
+        let fallback = flathub_channel(&[]);
+        assert!(!fallback.user_scope);
+        assert_eq!(fallback.title, "Flathub");
     }
 
 
