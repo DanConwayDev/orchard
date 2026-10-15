@@ -1,6 +1,55 @@
 # Changelog
 
-## Unreleased
+## v0.2.0 (2026-10-15)
+
+- **Zapstore releases install and update.** Apps published in Zapstore's
+  shape now flow through the whole store: the artifact location is a
+  plain https URL (a blossom, the bytes named by their own sha256), the
+  pin rides the event's digest tag, and the kind rides content-type and
+  file-name tags. The catalog picks the flatpak artifact out of a
+  release that also ships apk, exe, and AppImage builds (they share the
+  platform tags, so the kind, not just the platform, decides what is
+  installable); the client downloads the bundle over https and verifies
+  it against the pinned sha256 before anything installs; the bundle
+  header carries the metadata ini, so the runtime pre-flight and the
+  permissions viewer read the same bytes they get from an image label;
+  the install is `flatpak install --user --bundle`. A content-addressed
+  URL whose path names a different digest than the event's pin is
+  rejected outright, and an unpinned bundle refuses to install: the pin
+  is the whole contract when the artifact is one opaque file. The
+  Orchard channel accepts Zapstore's `main` channel name beside
+  `stable`, and a listing built only for other platforms still shows
+  (with no install offer), as before.
+- **Updates uninstall first, then install.** Flatpak 1.18.4 refuses
+  `flatpak install` over an installed ref at any version (`--or-update`
+  included), and `flatpak update` is blind here: the oci: install
+  flow's origin remote is transient, so the deployment's Origin names a
+  remote that does not exist and there is nothing to serve the update
+  from. That is what failed the 0.1.2 to 0.1.4 self-update: verify and
+  download succeeded, the flatpak step did not. Image updates now run
+  as one chained job, uninstall then install: the running instance
+  survives the uninstall (deleted deploys stay mapped), user data is
+  kept, and a failed install leaves the cached layout one press away.
+  The 0.1.2 and 0.1.4 clients updating to 0.2.0 still run the old
+  code, which performs the update and hits the old failure: uninstall
+  and reinstall by hand once. That is the last manual hop; 0.2.0 and
+  later self-update through the new chain.
+- **Bundle updates skip the chain.** A bundle install over an installed
+  ref updates in place (proven bundle-over-bundle), so a bundle
+  artifact's update is a plain install job: no uninstall step.
+- **Update jobs say Update.** The publisher update path ran under
+  Install labels end to end (Verifying, then Installing, then
+  "Install"): an update keeps Update labels and verbs throughout.
+- **The Sources section is now Catalog.** Both channels are required
+  (Flathub feeds reviewed runtimes, the Orchard channel feeds publisher
+  installs and the app's own updates), so neither belongs behind a
+  toggle: the section holds only "Opens on". A settings file saved
+  before the change (with a source turned off) is re-clamped to on at
+  load.
+- **The artifact cache prunes itself.** A finished deploy keeps only
+  the newest cached artifact per app (each is roughly a hundred
+  megabytes and every older one was there for a retry that never
+  comes); a finished remove drops all of them.
 
 ## v0.1.4 (2026-10-15)
 

@@ -28,6 +28,7 @@ client, not a gatekeeper.**
 | Confirmations | One confirm modal for every consequential action (install, update, remove, job cancel, settings clears); no two-press arming, nothing configurable |
 | Update checks | The launch check is unconditional (every session, whatever the setting says); the cadence only picks the repeats: Off, Hourly, Daily (default) |
 | Update affordance | No "Update available" badge: the Update button wears the amber itself, on rows and the app page; a publisher-key change is a banner on the page and a line in the confirm modal |
+| Update seam | Image updates are uninstall-then-install: flatpak 1.18.4 refuses `flatpak install` over an installed ref at any version (`--or-update` included) and the `oci:` flow's origin remote is transient, so `flatpak update` is blind. The running instance survives the uninstall (deleted deploys stay mapped) and user data is kept. Bundle artifacts (`.flatpak` over https) install with `--bundle` and update in place, no chain |
 | Language / UI | Rust end-to-end; GPUI `0.2` from crates.io |
 | Build | Podman container on the atomic host (see "Build environment") |
 | Trust grouping | Flathub listings group by the developer claim (navigation); Orchard listings group by publisher key only |
@@ -92,6 +93,18 @@ distribution infrastructure stays at zero central servers.
   (`~/.cache/orchard/artifacts/<app-id>/<digest>`, content-addressed, staged by rename)
   and hand flatpak `oci:<dir>`. Publishing emits asset locations in digest form
   (`docker://host/repo@sha256:...`), so verify and install resolve immutable bytes.
+  A finished deploy prunes the app's older layouts; a finished remove drops them all.
+- **Bundle assets (Zapstore-shaped):** an asset may instead carry a plain https
+  location (`url` tag: blossom and friends), the sha256 pinned on `x`, and the kind
+  on `m`/`filename`. The catalog picks only flatpak artifacts (a release's apk and
+  AppImage ride the same platform tags, so the kind decides, not just the platform);
+  a content-addressed URL path must agree with the digest pin at absorb time. The
+  client downloads the bundle and verifies it against the pin: a bundle is one opaque
+  file, so the pin is the whole contract and an unpinned bundle refuses to install.
+  The bundle header carries the deploy ref and the metadata ini, so the runtime
+  pre-flight and the permissions viewer read the same bytes they get from an image
+  label. Install is `flatpak install --user --bundle`; flatpak resolves missing
+  runtimes from the remotes itself, and bundle installs update in place.
 - **Bootstrap:** `curl` the release's per-arch oci-archive and
   `flatpak install --user oci-archive:` ; every later update flows through the catalog.
 - **Runtime convention:** apps default to runtimes hosted on the flathub remote, so
@@ -249,9 +262,14 @@ sandbox; bump the pin with the runtime the publish manifest targets, and wipe
 
 **M7 open items:**
 
-- [ ] The update handoff test: a tag delivering an update through the installed client
-      in the GUI (0.1.2 installs can take 0.1.4 directly: same runtime target, same
-      publisher key, full-image updates; see CHANGELOG).
+- [x] The update handoff test: attempted live with 0.1.2 (installing 0.1.4): verify
+      and download succeeded, the flatpak step failed ("is already installed"). Root
+      cause and redesign 2026-10-15: the update seam is now uninstall-then-install
+      (see Decisions), proven against hello artifacts and a bundle app. The 0.1.x
+      to 0.2.0 hop itself stays manual: the old client performs the update and
+      fails, so release notes ask for one uninstall + reinstall, the last manual
+      hop. 0.2.0 and later self-update through the new chain (bundle artifacts in
+      place, image artifacts through the chain).
 - [ ] Purge the six inert probe rows from the production relay's database (operator
       action; recipe in `relay/README.md`).
 

@@ -17,13 +17,13 @@ repository = "https://github.com/Letdown2491/orchard"
 icon = "https://raw.githubusercontent.com/Letdown2491/orchard/main/assets/orchard-512.png"
 
 [release]
-version = "0.1.4"
+version = "0.2.0"
 arch = "linux-x86_64"
 # the full coverage both CI legs build; every leg publishes the same
 # listing, and each host picks the artifact built for it
 platforms = ["linux-x86_64", "linux-aarch64"]
 runtime = "org.freedesktop.Platform/x86_64/25.08"
-notes = "Publisher installs pre-flight the runtime they need; Flathub is a required source; update checks run every launch with a Daily cadence; settings page scrolls and keeps one column width; channel clicks leave the app page."
+notes = "Zapstore-published flatpak releases now install and update from Orchard; image updates uninstall first, then install (the running app keeps working, user data is kept); bundle artifacts update in place; the Sources settings section is now Catalog, holding only Opens on; the artifact cache keeps only the newest layout per app. Coming from 0.1.2 or 0.1.4: uninstall and reinstall once, the old client cannot perform this update."
 
 [artifact]
 tree = "tree"
