@@ -383,7 +383,7 @@ impl Feed {
 
     fn absorb_app(&mut self, event: Event, parts: Parts) -> Result<bool> {
         let Some(app_id) = parts.tag("d") else {
-            bail!("app listing without d tag");
+            return Ok(false);
         };
         // Only flatpak platforms are catalogable: Zapstore android events
         // must not become rows in a flatpak store. A listing with no `f`
@@ -424,7 +424,7 @@ impl Feed {
 
     fn absorb_migration(&mut self, event: Event, parts: Parts) -> Result<bool> {
         let Some(app_id) = parts.tag("d") else {
-            bail!("migration without d tag");
+            return Ok(false);
         };
         let key = (app_id, parts.pubkey.clone());
         let newer = self
@@ -447,12 +447,18 @@ impl Feed {
 
     fn absorb_release(&mut self, event: Event, parts: Parts) -> Result<bool> {
         let Some(d) = parts.tag("d") else {
-            bail!("release without d tag");
+            return Ok(false);
         };
         // d names the release: <app-id>@<version> for legacy events,
         // <app-id>@<version>@<platform> once releases grew a platform.
         // Per-arch identity keeps one arch's republish from replacing
         // the other's on a relay, which keys replaceability on d.
+        // Anything else (Zapstore runs its own d convention) is not an
+        // Orchard release: a skip, not an error. The sync must never
+        // wedge on content: a validly signed event whose shape we do
+        // not speak arrives on the public relays the moment any
+        // third-party publisher shows up, and one bail in a session
+        // would retry forever, freezing the whole catalog.
         let pieces: Vec<&str> = d.split('@').collect();
         let (app_id, version, platform) = match pieces.as_slice() {
             [app_id, version] => (app_id.to_string(), version.to_string(), None),
@@ -461,16 +467,16 @@ impl Feed {
                 version.to_string(),
                 Some(platform.to_string()),
             ),
-            _ => bail!("release d tag must be <app-id>@<version>[@<platform>], got {d:?}"),
+            _ => return Ok(false),
         };
         if app_id.is_empty() || version.is_empty() || platform.as_deref() == Some("") {
-            bail!("release d tag must be <app-id>@<version>[@<platform>], got {d:?}");
+            return Ok(false);
         }
         // the i tag must agree with the d tag's app id when present
         if let Some(i) = parts.tag("i")
             && i != app_id
         {
-            bail!("release i tag {i:?} disagrees with d tag {app_id:?}");
+            return Ok(false);
         }
         let releases = self.releases.entry(app_id.to_string()).or_default();
         if releases
@@ -504,7 +510,13 @@ impl Feed {
         // (`oci`); Zapstore-shaped events name a plain https URL the
         // flatpak bundle is served from
         let location = parts.tag("oci").or_else(|| parts.tag("url"));
-        check_digest_agreement(digest.as_deref(), location.as_deref())?;
+        // a location that names a different digest than the pin never
+        // stores: the check runs before the insert, so such an asset
+        // is not merely untrusted, it is absent. A skip keeps the
+        // sync alive against hostile events too.
+        if !digest_agrees(digest.as_deref(), location.as_deref()) {
+            return Ok(false);
+        }
         if self.assets.contains_key(&parts.id) {
             return Ok(false);
         }
@@ -547,17 +559,19 @@ impl Feed {
 
     fn absorb_review(&mut self, event: Event, parts: Parts) -> Result<bool> {
         let Some(app_id) = parts.tag("d") else {
-            bail!("review without d tag");
+            return Ok(false);
         };
         // a rating tag, when present, must be a sane 0.0 to 5.0: a client
-        // that publishes another format is broken, not lying
+        // that publishes another format is broken, not lying. Skip, not
+        // error: the sync must never wedge on content.
         let rating = match parts.tag("rating") {
             Some(raw) => {
-                let value: f32 = raw
-                    .parse()
-                    .with_context(|| format!("review rating {raw:?} is not a number"))?;
+                let value: f32 = match raw.parse() {
+                    Ok(value) => value,
+                    Err(_) => return Ok(false),
+                };
                 if !(0.0..=5.0).contains(&value) {
-                    bail!("review rating {value} outside 0.0 to 5.0");
+                    return Ok(false);
                 }
                 Some(value)
             }
@@ -838,33 +852,30 @@ impl Feed {
 /// When the location embeds its own digest (`docker://…@sha256:…`), it must
 /// agree with the `x` pin; path-style locations (`oci:/dir`) carry no
 /// digest and are checked at install time instead.
-fn check_digest_agreement(digest: Option<&str>, location: Option<&str>) -> Result<()> {
+/// Whether an asset's location agrees with its digest pin. An oci
+/// ref pins the digest in its `@sha256:` suffix; a content-addressed
+/// https path (blossom and friends name the file by its own sha256)
+/// must agree with the digest too when it carries one. Silent on
+/// everything else: no pin is no claim.
+fn digest_agrees(digest: Option<&str>, location: Option<&str>) -> bool {
     let (Some(digest), Some(location)) = (digest, location) else {
-        return Ok(());
+        return true;
     };
     let Some(at) = location.rfind('@') else {
-        // not an oci pin; a content-addressed https path (blossom and
-        // friends name the file by its own sha256) must agree with
-        // the digest too when it carries one
+        // not an oci pin
         if location.starts_with("http") {
             if let Some(segment) = location.rsplit('/').next() {
                 let hex = segment.trim_end_matches(".flatpak");
-                let is_hex64 =
-                    hex.len() == 64 && hex.chars().all(|c| c.is_ascii_hexdigit());
+                let is_hex64 = hex.len() == 64 && hex.chars().all(|c| c.is_ascii_hexdigit());
                 if is_hex64 && !format!("sha256:{hex}").eq_ignore_ascii_case(digest) {
-                    bail!(
-                        "asset url {location:?} names {hex}, disagrees with digest {digest:?}"
-                    );
+                    return false;
                 }
             }
         }
-        return Ok(());
+        return true;
     };
     let pinned = &location[at + 1..];
-    if pinned.starts_with("sha256:") && !pinned.eq_ignore_ascii_case(digest) {
-        bail!("asset oci ref {location:?} pins {pinned:?}, disagrees with digest {digest:?}");
-    }
-    Ok(())
+    !(pinned.starts_with("sha256:") && !pinned.eq_ignore_ascii_case(digest))
 }
 
 /// Accept bare 64-hex or already-prefixed digests; the catalog's pin
@@ -1398,7 +1409,7 @@ mod tests {
     }
 
     #[test]
-    fn mismatched_pin_and_ref_is_rejected() {
+    fn mismatched_pin_and_ref_is_skipped() {
         let keys = demo_keys();
         let other = "aa".repeat(32);
         let asset = signed(
@@ -1408,7 +1419,11 @@ mod tests {
             vec![("x", DIGEST), ("oci", &format!("docker://ghcr.io/x@sha256:{other}"))],
         );
         let mut feed = Feed::new();
-        assert!(feed.absorb(asset).is_err(), "pin/ref disagreement must reject");
+        assert!(
+            !feed.absorb(asset).unwrap(),
+            "pin/ref disagreement must skip: not stored, never installable"
+        );
+        assert!(feed.assets.is_empty());
     }
 
     /// A Zapstore-shaped asset: the location is a plain https URL (a
@@ -1526,9 +1541,10 @@ mod tests {
     }
 
     /// A content-addressed URL whose path names a different sha256
-    /// than the event's digest pin is rejected at absorb time.
+    /// than the event's digest pin never stores: the asset is absent,
+    /// so nothing can ever install it, and the sync keeps running.
     #[test]
-    fn mismatched_url_and_digest_is_rejected() {
+    fn mismatched_url_and_digest_is_skipped() {
         let keys = demo_keys();
         let other = "bb".repeat(32);
         let asset = signed(
@@ -1542,7 +1558,35 @@ mod tests {
             ],
         );
         let mut feed = Feed::new();
-        assert!(feed.absorb(asset).is_err(), "url/digest disagreement must reject");
+        assert!(!feed.absorb(asset).unwrap(), "url/digest disagreement must skip");
+        assert!(feed.assets.is_empty());
+    }
+
+    /// A release whose d tag follows another convention (Zapstore
+    /// shapes its own) is a skip, not an error: one foreign event on
+    /// a public relay must not wedge the catalog sync in a retry
+    /// loop.
+    #[test]
+    fn foreign_release_shapes_are_skipped() {
+        let keys = demo_keys();
+        let asset = signed(
+            &keys,
+            KIND_RELEASE,
+            "",
+            vec![("d", "stampede-android-apk")],
+        );
+        let mut feed = Feed::new();
+        assert!(!feed.absorb(asset.clone()).unwrap(), "foreign d shape must skip");
+        assert!(feed.releases.is_empty());
+        // and the relay frame path survives it: no session error
+        let frame = serde_json::json!(["EVENT", "sub", serde_json::to_value(&asset).unwrap()]);
+        let (absorbed, eose) =
+            crate::relay::handle_frame(
+                &frame.to_string(),
+                &std::sync::Arc::new(std::sync::Mutex::new(feed)),
+            )
+            .unwrap();
+        assert!(!absorbed && !eose);
     }
 
     #[test]

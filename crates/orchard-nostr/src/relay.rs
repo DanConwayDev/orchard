@@ -226,13 +226,21 @@ fn session(
 
 /// Process one text frame. Returns whether an event was absorbed and
 /// whether the frame was the relay's end-of-stored-events marker.
-fn handle_frame(text: &str, feed: &Arc<Mutex<Feed>>) -> Result<(bool, bool)> {
+pub(crate) fn handle_frame(text: &str, feed: &Arc<Mutex<Feed>>) -> Result<(bool, bool)> {
     let frame: serde_json::Value = serde_json::from_str(text)?;
     match frame.as_array().and_then(|rows| rows.first()).and_then(|v| v.as_str()) {
         // ["EVENT", <sub-id>, <event>]
         Some("EVENT") => {
             let raw = frame.get(2).ok_or_else(|| anyhow::anyhow!("EVENT frame without event"))?;
-            let event: Event = serde_json::from_value(raw.clone())?;
+            let event: Event = match serde_json::from_value(raw.clone()) {
+                Ok(event) => event,
+                // an unparseable event is relay garbage: skip it and
+                // keep the session, never wedge the sync on content
+                Err(err) => {
+                    eprintln!("relay event unparseable, skipping: {err}");
+                    return Ok((false, false));
+                }
+            };
             // locks recover on poison: the feed is a dedup cache, so
             // the worst case of continuing is a duplicate the feed
             // absorbs anyway, while a poisoned lock would cascade a
@@ -240,7 +248,16 @@ fn handle_frame(text: &str, feed: &Arc<Mutex<Feed>>) -> Result<(bool, bool)> {
             let mut feed = feed
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            feed.absorb(event).map(|absorbed| (absorbed, false))
+            match feed.absorb(event) {
+                Ok(absorbed) => Ok((absorbed, false)),
+                // a rejected event (a tampered signature, a relay
+                // lying) skips and the session lives: one hostile
+                // event must not freeze the catalog with a retry loop
+                Err(err) => {
+                    eprintln!("relay event rejected, skipping: {err:#}");
+                    Ok((false, false))
+                }
+            }
         }
         // ["EOSE", <sub-id>]: the stored history is fully delivered;
         // the subscription stays open, keep reading

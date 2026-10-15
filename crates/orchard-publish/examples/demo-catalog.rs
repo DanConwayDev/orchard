@@ -8,7 +8,13 @@
 //!     cargo run -p orchard-publish --example demo-catalog -- \
 //!         demo/hello.publish.toml \
 //!         <artifact digest, printed by the publish run> \
-//!         demo/catalog.json
+//!         demo/catalog.json [<event cache to append to>]
+//!
+//! The optional fourth argument is the client's event cache
+//! (`$XDG_DATA_HOME/orchard/nostr-events.json`, a JSON array of
+//! serialized events): the signed events land there and the embedded
+//! indexd absorbs them on the next launch, no relay needed. The relay
+//! path stays the real one for production.
 
 use anyhow::{bail, Result};
 use nostr::prelude::*;
@@ -127,8 +133,9 @@ fn main() -> Result<()> {
     .tags(release_tags)
     .finalize(&keys)?;
 
+    let events = [listing, asset, release];
     let mut feed = Feed::new();
-    for event in [listing, asset, release] {
+    for event in events.clone() {
         feed.absorb(event)?;
     }
     let catalog = feed.catalog_for(&arch);
@@ -144,5 +151,19 @@ fn main() -> Result<()> {
         "  digest    {}",
         catalog.apps[0].digest.as_deref().unwrap_or("-")
     );
+
+    // optional: append the signed events to the client's event cache,
+    // so the embedded indexd serves the row without any relay
+    if let Some(cache) = args.next() {
+        let mut events_cache: Vec<String> = std::fs::read(&cache)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        for event in events {
+            events_cache.push(serde_json::to_string(&event)?);
+        }
+        std::fs::write(&cache, serde_json::to_string(&events_cache)?)?;
+        println!("appended 3 events to {}", cache);
+    }
     Ok(())
 }

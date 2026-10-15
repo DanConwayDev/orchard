@@ -229,13 +229,15 @@ mod tests {
         };
         let mut feed = crate::Feed::new();
 
-        // a rating outside 0.0 to 5.0 is a hard error
+        // a rating outside 0.0 to 5.0 is a skip: not stored, and the
+        // sync keeps running
         let bogus = EventBuilder::new(Kind::Custom(crate::KIND_REVIEW as u16), "bogus")
             .tag(Tag::custom("d", ["com.example.Hello"]))
             .tag(Tag::custom("rating", ["9.9"]))
             .finalize(&alice)
             .unwrap();
-        assert!(feed.absorb(bogus).is_err());
+        assert!(!feed.absorb(bogus).unwrap());
+        assert!(feed.reviews().reviews.is_empty());
 
         // alice reviews, then edits: the newest wins, one review remains
         feed.absorb(sign(&alice, "com.example.Hello", Some(3.0), "Meh."))
