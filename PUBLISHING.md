@@ -1,7 +1,7 @@
 # Publishing to Orchard
 
 Publishing is one command. It takes your flatpak app tree, turns it into a
-deterministic OCI artifact, pushes it to your own registry, and signs four
+deterministic OCI artifact, pushes it to your own registry, and signs
 Nostr events that tell every Orchard client where the artifact lives and
 what it is. Orchard never hosts your bytes: your registry does, your media
 URLs do. What Orchard carries is small signed metadata, a few KB per app.
@@ -143,8 +143,8 @@ Field notes:
   listing event carries categories verbatim, and the client matches by
   exact string. An unrecognized category still lists, but only under All.
 - `platforms` is the listing's coverage claim and must name every arch any
-  CI leg builds. Each leg publishes an identical listing, so a missing
-  arch here is a missing button on someone's machine.
+  CI leg builds. Publication requires an asset for every declared platform.
+- Runtime requirements come from the app tree's metadata.
 - `relays` must include `wss://relay.orchard.rocks`, the rendezvous relay
   the project operates, listed first. The third-party relays are
   redundancy and can refuse or drop Orchard events at any time, so a
@@ -169,10 +169,11 @@ Field notes:
 2. **Pushes and reads back.** Monolithic blob upload plus manifest PUT,
    then a fetch of the manifest *by digest*. The signed events only go out
    if the registry serves exactly the bytes that were built.
-3. **Signs four events** with your key: an asset (kind 3063: digest, size,
-   manifest URL, MIME, filename, software target), a release (kind 30063: version, channel, notes,
-   reference to the asset), a listing (kind 32267: name, summary,
-   description, categories, media, platform coverage, license, links), and
+3. **Signs the events** with your key: manifest, config and layer assets per architecture (kind 3063:
+   manifest hash, URL, MIME type, size, platform and format), one release
+   (kind 30063: version, channel, notes, references to every asset), a listing
+   (kind 32267: name, summary, description, categories, media, platform coverage,
+   license, links), and
    a profile (kind 0) when `author-name` or `nip05` is set.
 4. **Sends them to the relays** in `[publish].relays`.
 
@@ -183,19 +184,71 @@ carried one affects availability only.
 
 | Flag | Meaning |
 |---|---|
-| `--registry host/repo` | required registry target; events identify its immutable manifest URL |
-| `--tag tag` | push tag override (the manifest's `[publish] tag` by default). The event's location carries the digest, so this never decides what a client installs; CI pushes `latest-<arch>` so matrix legs don't share a tag |
+| `--registry host/repo` | push layouts to this registry; without it, publication uses the manifest URLs in prepared metadata |
+| `--tag tag` | registry tag prefix override (`[publish].tag`, or `latest`, by default); each image uses `<tag>-<platform>`, while events pin the manifest digest |
 | `--relays url,url` | override the manifest's relay list for this run; also bypasses the required-relay check |
 | `--nsec <key>` | signing key (hex or nsec); `ORCHARD_NSEC` env also works |
-| `--arch linux-aarch64` | build and sign for this arch (CI matrix legs) |
-| `--out dir` | local layout directory (default `target/publish/<app-id>`) |
-| `--skip-push` | build and sign, push nothing |
-| `--skip-relays` | sign, send nothing |
+| `--arch linux-aarch64` | build for this architecture; prepared `--asset` inputs already record their architecture |
+| `--out dir` | directory for the layout, manifest, bootstrap archive and asset metadata (default `target/publish/<app-id>`) |
+| `--upload-only` | build or load prepared outputs and push to `--registry`, recording the manifest URL without signing events; permits one architecture of a multi-arch release |
+| `--asset file` | load prepared asset metadata; repeat for every declared platform when publishing; local layouts are required only when pushing with `--registry` |
+| `--skip-push` | skip registry uploads while still signing; use the registry manifest URL or an already-hosted manifest URL |
+| `--skip-relays` | print signed events without contacting relays or inspecting hosted manifests; `--registry` still pushes unless `--skip-push` is set |
 | `--prove` | after a successful publish, refresh the repository proof file (below) |
 
 Dry runs: `--skip-relays` keeps test events off the public relays entirely.
 Never point a test manifest's relays at the public rendezvous set; test
 events are real events once a relay has them.
+
+## Publish to a registry
+
+The build-and-publish command remains:
+
+    orchard-publish app.publish.toml --registry ghcr.io/you/your-app
+
+Publication checks complete platform coverage, verifies the hosted manifest
+and config, and signs the assets and one combined release. Registry tags use
+`<tag>-<platform>`; the signed URLs use immutable manifest digests.
+Credentials remain `ORCHARD_REGISTRY_USER` and `ORCHARD_REGISTRY_PASSWORD`.
+`--tag` overrides `[publish].tag`.
+
+For CI jobs that upload one architecture before the others are ready, use
+`--upload-only --registry ghcr.io/you/your-app --arch linux-x86_64`. This builds
+and pushes without loading a signing key or publishing events, and records the
+registry URLs for the manifest and all components in the `.asset.json` file. The final publication job needs
+only those metadata files:
+
+    orchard-publish app.publish.toml \
+      --asset dist/com.example.App-linux-x86_64.asset.json \
+      --asset dist/com.example.App-linux-aarch64.asset.json
+
+Without `--registry`, publication verifies the hosted manifest and config rather
+than requiring local layouts or manifest files. It checks the manifest hash,
+size and Flatpak app/architecture ref before signing the complete release.
+
+## Events and inspection
+
+A release uses `d=app-id@version`, references its application with `a`, and
+references all its assets with `e`. Each architecture has a manifest asset,
+a config asset, and one asset per layer (three assets for the current
+single-layer build). Every component has `T=flatpak-oci`, its applicable `f`
+platform, and `url`, `x`, `size`, `m` and `filename` describing its own bytes.
+The manifest MIME is `application/vnd.oci.image.manifest.v1+json`; config and
+layers use their descriptor MIME types. Shared components can carry repeated
+`f` tags when published once for several platforms.
+
+On NIP-82 software asset events (kind 3063), `T` is the optional **software
+target** field: the intended packaging or execution environment when platform
+(`f`) and MIME type (`m`) alone cannot identify a compatible consumer.
+`flatpak-oci` identifies components of a Flatpak OCI image. Consumers
+match the target together with platform and MIME type; an unknown target must
+not be assumed compatible. Lowercase `t` remains a hashtag and does not select
+an installation target.
+
+Orchard verifies the manifest and config to display permissions. Layers are
+only downloaded for installation, when their hashes are checked against the
+manifest. Registry URLs retain the registry authentication flow. An archive
+is useful for bootstrap installation but is not needed to inspect permissions.
 
 ## Proving your repository
 
@@ -235,33 +288,39 @@ Details worth knowing:
 
 ## Multi-arch
 
-NIP-82 releases use one `app@version` address referencing every architecture's
-asset. Separate architecture jobs must not each publish that address, since
-one would replace the other. This CLI currently requires a single declared
-platform; the matrix workflow below needs combined publication before use.
+One listing, one button in the client, and the device picks the artifact.
+The shape:
 
-Assets describe manifest bytes using standard URL, MIME, size, filename and
-bare SHA-256 fields plus `T=flatpak-oci`. Runtime and permissions come from
-the verified config. Older clients expecting `oci` and `runtime` asset tags
-cannot install these new assets. No dual legacy publication is included.
+- Assets are per-arch; a single release with `d=<app-id>@<version>`
+  references all of them. Architecture jobs must not sign separate releases
+  with that same address, because they would replace each other.
+- The listing's platform tags name every architecture the project ships.
+- CI runs one upload job per arch (passing `--arch` and `--upload-only`),
+  then one publication job signs the combined release and listing.
+
+On an aarch64 machine, an app published only for x86_64 still shows, with
+an honest "no aarch64 build yet, published for x86_64" instead of an
+install button that cannot work.
 
 ## CI workflow
 
 `.github/workflows/self-publish.yml` is a working example (Orchard
-publishing itself). The shape to copy:
+publishing itself). The shape to copy, replacing the manifest, assembly script
+and `com.example.App` with your application's paths and ID:
 
 ```yaml
 name: publish
+
 on:
   push:
-    tags: ["v*"]            # the tag is the publish switch
+    tags: ["v*"]
 
 permissions:
-  contents: write           # the repository proof (--prove)
-  packages: write           # ghcr push
+  contents: write
+  packages: write
 
 jobs:
-  publish:
+  prepare:
     strategy:
       fail-fast: false
       matrix:
@@ -273,36 +332,94 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y podman
-      - run: ./scripts/build.sh build --release      # or your own build
-      - run: ./your/assemble.sh                      # produce the app tree
-      - name: Push and sign
+
+      - name: Install podman
+        run: sudo apt-get update && sudo apt-get install -y podman
+
+      - name: Build
+        run: ./scripts/build.sh build --release
+
+      - name: Assemble the app tree
+        run: ./your/assemble.sh
+
+      - name: Push artifact and export metadata
         env:
-          ORCHARD_NSEC: ${{ secrets.ORCHARD_NSEC }}
           ORCHARD_REGISTRY_USER: ${{ github.actor }}
           ORCHARD_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # the proof write
         run: |
-          export ORCHARD_PUBLISH_VERSION="${GITHUB_REF_NAME#v}"   # v1.2.3 -> 1.2.3
-          target/release/orchard-publish your.publish.toml \
-            --arch "${{ matrix.arch }}" \
-            --registry "ghcr.io/${GITHUB_REPOSITORY,,}" \
-            --tag "latest-${{ matrix.arch }}" \
-            --prove
+          # Run the Fedora-built publisher in its build environment.
+          podman run --rm -v "$PWD:/work:Z" -w /work \
+            -e ORCHARD_REGISTRY_USER -e ORCHARD_REGISTRY_PASSWORD \
+            -e ORCHARD_PUBLISH_VERSION="${GITHUB_REF_NAME#v}" \
+            localhost/orchard-dev-rust \
+            target/release/orchard-publish your.publish.toml \
+            --upload-only --arch "${{ matrix.arch }}" --out dist \
+            --registry "ghcr.io/${GITHUB_REPOSITORY,,}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: asset-${{ matrix.arch }}
+          path: dist/*.asset.json
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        if: matrix.arch == 'linux-x86_64'
+        with:
+          name: publisher
+          path: target/release/orchard-publish
+          if-no-files-found: error
 
       - name: Attach the artifact to the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # flatpak's docker:// image fetch never authenticates, and
-          # token registries (ghcr) always challenge, so the release
-          # carries the artifact itself: your users' bootstrap is a
-          # curl plus `flatpak install --user oci-archive:`
-          tar -C "target/publish/your.app.Id" -czf "your-app-${{ matrix.arch }}.oci.tgz" .
+          # The digest-pinned docker:// one-liner cannot work against
+          # ghcr: flatpak's image fetch never authenticates (it does
+          # not even try a token on a 401). The release therefore
+          # carries the artifact itself, as an oci-archive the README's
+          # two-liner installs with flatpak's local path.
+          cp "dist/com.example.App-${{ matrix.arch }}.oci.tgz" \
+            "your-app-${{ matrix.arch }}.oci.tgz"
           gh release create "$GITHUB_REF_NAME" --generate-notes || true
           gh release upload "$GITHUB_REF_NAME" \
             "your-app-${{ matrix.arch }}.oci.tgz" --clobber
+
+  publish:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: asset-*
+          path: dist
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: publisher
+          path: dist/bin
+
+      - name: Sign the combined release
+        env:
+          ORCHARD_NSEC: ${{ secrets.ORCHARD_NSEC }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          sudo apt-get update && sudo apt-get install -y podman
+          chmod +x dist/bin/orchard-publish
+          podman run --rm -v "$PWD:/work:Z" -w /work \
+            -e ORCHARD_NSEC -e GITHUB_TOKEN \
+            -e ORCHARD_PUBLISH_VERSION="${GITHUB_REF_NAME#v}" \
+            registry.fedoraproject.org/fedora:43 \
+            dist/bin/orchard-publish your.publish.toml \
+            --asset dist/com.example.App-linux-x86_64.asset.json \
+            --asset dist/com.example.App-linux-aarch64.asset.json --prove
 ```
+
+Each architecture uploads to GHCR and attaches its bootstrap archive. Only the
+asset metadata and publisher executable pass to the final job, which verifies
+the hosted manifests and signs one release referencing both architectures.
 
 Notes:
 
@@ -311,20 +428,35 @@ Notes:
   bearer-token challenge; other registries use their own credentials.
 - `ORCHARD_PUBLISH_VERSION` overrides the manifest's version, so one
   manifest serves every future tag.
-- `--tag latest-<arch>` keeps the matrix legs off one tag. The tag is
-  a handle for humans and container tools; the client installs by the
-  digest the event carries.
-- Attach the artifact to the release (the step above): it is the only
-  flatpak-reachable copy, because flatpak's docker:// fetch cannot
-  authenticate.
+- Registry tags default to `latest-<platform>`, keeping matrix legs separate.
+  The client installs by the manifest digest the event carries.
+- Attach the archive to the release for bootstrap installation: flatpak's
+  own docker:// fetch cannot authenticate. Orchard fetches registry artifacts
+  through its own authenticated path.
 - `contents: write` matters: `--prove` refreshes `orchard.txt` on the
   default branch through the `GITHUB_TOKEN`, and a read-only token
   fails that write after the artifact and events are already out.
 - ghcr packages are private by default: flip the package public in its
-  settings after the first push, or installs cannot fetch it (and the
-  proof file stays unreadable too).
+  settings after the first push, or publication verification and installs
+  cannot fetch it. The repository proof also needs a public source repository.
 - The workflow fires on `v*` tags only. Pushing the branch publishes
   nothing.
+
+## Local validation
+
+`--skip-relays` prints signed events without contacting relays or inspecting
+hosted manifests. It still requires manifest URLs; supplying
+`--registry` pushes layouts unless `--skip-push` is set. For a network-free
+dry run, use prepared assets with URLs and a disposable signing key,
+without `--registry`.
+`--relays` overrides the manifest's relay list for local tests.
+
+## Protocol transition
+
+Release addresses change from `app@version@platform` to `app@version`.
+Assets use standard manifest URL, MIME, size and bare hash fields, with an
+indexable software target. Dual publication for older clients is not included;
+it can be added if the maintainer wants temporary or permanent support.
 
 ## Your publishing key
 
@@ -337,9 +469,9 @@ registrar credential it effectively is.
 - Never paste it into a chat, an agent session, or a shell history. If a
   key has passed through anything like that, retire it: publish a
   migration to a fresh key (below) and stop using it.
-- If `orchard-publish` finds no key it generates an ephemeral one and
-  prints it with a loud warning. That identity dies with the run unless
-  you capture the nsec immediately. Almost never what you want.
+- Without a configured key, publication generates an ephemeral identity and
+  prints its secret with a warning. Configure a persistent key for releases.
+  Upload-only mode does not load a signing key.
 
 ## Rotating keys
 
@@ -411,10 +543,8 @@ repository for reuse, point the listing at the PNG.
       users' remotes can serve (see above): the client pre-flights that
       deploy from this line.
 - [ ] Icon is a PNG URL (see Media above) that resolves publicly.
-- [ ] Dry run first: `--skip-relays --registry localhost:5000/...` against
-      a throwaway registry, then the real run. (Orchard's own dry run:
-      the demo registry at `https://localhost:5000/orchard` and the dev
-      relay `ws://127.0.0.1:8008`, per DESIGN.md's local loop.)
+- [ ] Upload each architecture and check registry availability.
+- [ ] Dry run with all `--asset` files and `--skip-relays`.
 - [ ] Run with `--prove` (and a `GITHUB_TOKEN` with `contents: write`)
       so the repository link verifies in clients.
 - [ ] Profile published once (`author-name`, `nip05`) and only re-signed

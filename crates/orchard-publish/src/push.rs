@@ -375,3 +375,10 @@ pub fn manifest_url(registry_repo: &str, digest: &str) -> Result<String> {
     let (registry, repository) = rest.split_once('/').context("registry needs host/repository")?;
     Ok(format!("{}/v2/{repository}/manifests/{digest}", registry_base(registry, scheme)))
 }
+
+/// Config and layer endpoints share the registry repository and blob digest.
+pub fn blob_url(registry_repo: &str, digest: &str) -> Result<String> {
+    let url = manifest_url(registry_repo, digest)?;
+    let (base, hash) = url.rsplit_once("/manifests/").context("missing manifest endpoint")?;
+    Ok(format!("{base}/blobs/{hash}"))
+}
