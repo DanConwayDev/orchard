@@ -190,6 +190,7 @@ carried one affects availability only.
 | `--nsec <key>` | signing key (hex or nsec); `ORCHARD_NSEC` env also works |
 | `--arch linux-aarch64` | build for this architecture; prepared `--asset` inputs already record their architecture |
 | `--out dir` | directory for the layout, manifest, bootstrap archive and asset metadata (default `target/publish/<app-id>`) |
+| `--legacy-oci` | add a matching legacy registry location to each manifest asset so v0.2.0 clients can update; requires registry manifest URLs |
 | `--upload-only` | build or load prepared outputs and push to `--registry`, recording the manifest URL without signing events; permits one architecture of a multi-arch release |
 | `--asset file` | load prepared asset metadata; repeat for every declared platform when publishing; local layouts are required only when pushing with `--registry` |
 | `--skip-push` | skip registry uploads while still signing; use the registry manifest URL or an already-hosted manifest URL |
@@ -414,7 +415,7 @@ jobs:
             registry.fedoraproject.org/fedora:43 \
             dist/bin/orchard-publish your.publish.toml \
             --asset dist/com.example.App-linux-x86_64.asset.json \
-            --asset dist/com.example.App-linux-aarch64.asset.json --prove
+            --asset dist/com.example.App-linux-aarch64.asset.json --legacy-oci --prove
 ```
 
 Each architecture uploads to GHCR and attaches its bootstrap archive. Only the
@@ -455,8 +456,17 @@ without `--registry`.
 
 Release addresses change from `app@version@platform` to `app@version`.
 Assets use standard manifest URL, MIME, size and bare hash fields, with an
-indexable software target. Dual publication for older clients is not included;
-it can be added if the maintainer wants temporary or permanent support.
+indexable software target. The self-publishing workflow passes `--legacy-oci`
+to add a digest-pinned `oci` tag to each manifest asset. v0.2.0 reads that
+registry location, while new clients read the standard `url` and component
+assets. Both paths install the same image, through one `app@version` release.
+Keep this flag enabled while v0.2.0 clients need an update path. It does not
+repair the separate v0.1.x installer limitation described in the changelog.
+
+Other publishers can opt into the same transition with `--legacy-oci` when
+using registry manifest URLs. Blossom-only metadata cannot supply a legacy
+registry location and is rejected with this flag. Component-only publication
+without it requires an updated client.
 
 ## Your publishing key
 

@@ -147,8 +147,9 @@ Zapstore publishers readable on Orchard day one:
   and permissions come from the verified config, without downloading layers.
 - One release references all architecture assets. `--upload-only` pushes each
   architecture without signing; `--asset` publishes them together without
-  the build tree. This changes release addresses and asset fields; no dual
-  publication of the old format is included.
+  the build tree. Self-publication enables `--legacy-oci`, adding the same
+  manifest's registry location for v0.2.0 clients. One release serves both
+  readers; config and layer assets do not carry legacy install locations.
 - **Migration:** a 30066 signed by the OLD key hands the app id to a successor; once the
   successor's listing exists, the old row stops projecting. Replaceable per (app id,
   old key); revocation is a newer statement with no `p`. Only the listed key can

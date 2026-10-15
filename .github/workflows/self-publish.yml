@@ -121,4 +121,4 @@ jobs:
             registry.fedoraproject.org/fedora:43 \
             dist/bin/orchard-publish self/orchard.publish.toml \
             --asset dist/rocks.orchard.Orchard-linux-x86_64.asset.json \
-            --asset dist/rocks.orchard.Orchard-linux-aarch64.asset.json --prove
+            --asset dist/rocks.orchard.Orchard-linux-aarch64.asset.json --legacy-oci --prove
