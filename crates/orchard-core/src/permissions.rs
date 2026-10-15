@@ -87,6 +87,40 @@ pub fn finish_args_from_metadata(metadata: &str) -> Vec<String> {
     args
 }
 
+/// The `[Application]` `runtime=` requirement of a metadata ini, as
+/// the full flatpak ref (`runtime/<id>/<arch>/<branch>`). The install
+/// pre-flight checks and deploys this before an `oci:` install:
+/// flatpak's image path does not resolve runtimes from remotes the
+/// way a classic install does.
+pub fn runtime_ref_from_metadata(metadata: &str) -> Option<String> {
+    let mut group = String::new();
+    for line in metadata.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(next) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+            group = next.trim().to_string();
+            continue;
+        }
+        if group != "Application" {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=')
+            && key.trim() == "runtime"
+        {
+            let value = value.trim();
+            // a runtime ref is exactly <id>/<arch>/<branch>
+            return if value.split('/').count() == 3 && !value.contains("…") {
+                Some(format!("runtime/{value}"))
+            } else {
+                None
+            };
+        }
+    }
+    None
+}
+
 fn bus_arg(talk_flag: &str, own_flag: &str, name: &str, policy: &str) -> String {
     match policy {
         "talk" => format!("--{talk_flag}={name}"),
@@ -240,6 +274,31 @@ mod tests {
         assert_eq!(home.risk, Risk::High);
         let socket = grants.iter().find(|g| g.arg == "--socket=x11").unwrap();
         assert_eq!(socket.risk, Risk::Low);
+    }
+
+    #[test]
+    fn runtime_ref_comes_from_the_application_group() {
+        let metadata = "[Application]\nname=com.orchard.Hello\nruntime=org.freedesktop.Platform/x86_64/25.08\ncommand=hello-orchard\n";
+        assert_eq!(
+            runtime_ref_from_metadata(metadata),
+            Some("runtime/org.freedesktop.Platform/x86_64/25.08".to_string())
+        );
+    }
+
+    #[test]
+    fn runtime_ref_ignores_other_groups_and_malformed_values() {
+        // a runtime= outside [Application] is not the app's runtime
+        assert_eq!(
+            runtime_ref_from_metadata("[Extension x]\nruntime=org.r/x86_64/25.08\n"),
+            None
+        );
+        // two parts is not a ref
+        assert_eq!(
+            runtime_ref_from_metadata("[Application]\nruntime=org.r/25.08\n"),
+            None
+        );
+        // no runtime line at all
+        assert_eq!(runtime_ref_from_metadata("[Application]\nname=x\n"), None);
     }
 
     #[test]

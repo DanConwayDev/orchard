@@ -117,6 +117,15 @@ impl Job {
     }
 }
 
+/// The command a successful job chains into, plus a runtime scope
+/// and ref to re-verify before it starts: the runtime pre-flight's
+/// chain must not build an install on a deploy that reported
+/// success but did not stick (observed once on flatpak 1.18.4).
+struct ChainedInstall {
+    cmd: std::process::Command,
+    verify: Option<(orchard_flatpak::Scope, String)>,
+}
+
 /// Which section of the catalog list is shown.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Filter {
@@ -2281,6 +2290,127 @@ impl StoreRoot {
                 .background_executor()
                 .spawn(async move { oci::verify(&location, pinned.as_deref()) })
                 .await;
+
+            // The runtime pre-flight. Flatpak's oci: path does not
+            // resolve runtimes from remotes the way a classic install
+            // does: it accepts only what the installing scope already
+            // has deployed, and a publisher artifact can need a branch
+            // this machine never deployed (observed: Amethyst's
+            // artifact needs freedesktop 26.08, deployed nowhere, and
+            // the install died with "requires the runtime ... which
+            // was not found"). Read the runtime= the artifact's own
+            // metadata declares and plan around it: deployed
+            // user-scope, the plain install proceeds; deployed only
+            // system-scope, the app installs --no-deps and runs
+            // against it (a user install runs a system runtime: how
+            // Orchard itself is deployed); deployed nowhere, the
+            // runtime installs first, user scope when a user remote
+            // serves it (no polkit), system scope (polkit) when only
+            // a system remote does.
+            enum RuntimePlan {
+                /// The runtime is deployed user-scope: plain install.
+                Plain,
+                /// The runtime is deployed system-scope only:
+                /// --no-deps, the runtime resolves at run time.
+                NoDeps,
+                /// The runtime is deployed nowhere: install it from
+                /// the serving remote first, then the app. When the
+                /// runtime lands in the system scope the app installs
+                /// --no-deps and the deploy gets re-verified before
+                /// the chain proceeds (flatpak's system-helper has
+                /// been seen to report success and not deploy).
+                First(std::process::Command, Option<(orchard_flatpak::Scope, String)>),
+                /// No enabled remote serves the runtime: refuse.
+                Missing(String),
+            }
+            let runtime_plan = match report
+                .as_ref()
+                .ok()
+                .and_then(|r| r.metadata.as_deref())
+                .and_then(permissions::runtime_ref_from_metadata)
+            {
+                None => RuntimePlan::Plain,
+                Some(runtime_ref) => {
+                    let mut deployed = None;
+                    for scope in [orchard_flatpak::Scope::User, orchard_flatpak::Scope::System] {
+                        let ok = cx
+                            .background_executor()
+                            .spawn({
+                                let runtime_ref = runtime_ref.clone();
+                                async move {
+                                    orchard_flatpak::info_ref(scope, &runtime_ref)
+                                        .status()
+                                        .is_ok_and(|s| s.success())
+                                }
+                            })
+                            .await;
+                        if ok {
+                            deployed = Some(scope);
+                            break;
+                        }
+                    }
+                    match deployed {
+                        Some(orchard_flatpak::Scope::User) => RuntimePlan::Plain,
+                        Some(_) => RuntimePlan::NoDeps,
+                        None => {
+                            // probe every channel's remote, user scope
+                            // first: its installs need no polkit
+                            let channels = this
+                                .update(cx, |this, _| this.channels.clone())
+                                .unwrap_or_default();
+                            let mut serving = Vec::new();
+                            for channel in &channels {
+                                let scope = channel_scope(channel);
+                                let ok = cx
+                                    .background_executor()
+                                    .spawn({
+                                        let remote = channel.remote.clone();
+                                        let runtime_ref = runtime_ref.clone();
+                                        async move {
+                                            orchard_flatpak::remote_info(scope, &remote, &runtime_ref)
+                                                .status()
+                                                .is_ok_and(|s| s.success())
+                                        }
+                                    })
+                                    .await;
+                                if ok {
+                                    serving.push((channel.remote.clone(), scope));
+                                }
+                            }
+                            match pick_runtime_remote(&serving) {
+                                Some((remote, scope)) => {
+                                    let landed_system =
+                                        scope == orchard_flatpak::Scope::System;
+                                    RuntimePlan::First(
+                                        orchard_flatpak::install_ref(
+                                            &runtime_ref,
+                                            &remote,
+                                            scope,
+                                        ),
+                                        landed_system
+                                            .then(|| {
+                                                (orchard_flatpak::Scope::System, runtime_ref.clone())
+                                            }),
+                                    )
+                                }
+                                None => RuntimePlan::Missing(runtime_ref),
+                            }
+                        }
+                    }
+                }
+            };
+            if let RuntimePlan::Missing(runtime_ref) = &runtime_plan {
+                let _ = this.update(cx, |this, cx| {
+                    this.jobs.remove(&app.app_id);
+                    this.fail(format!(
+                        "{} needs runtime {}, and no enabled remote serves it.",
+                        app.name, runtime_ref
+                    ));
+                    cx.notify();
+                });
+                return;
+            }
+
             // The registry fetch and the install handoff: flatpak's
             // docker:// image path never authenticates (it fetches
             // bare, so token registries like ghcr answer 401), so the
@@ -2351,7 +2481,12 @@ impl StoreRoot {
                         // The catalog ref must match what the image labels
                         // claim; flatpak enforces this again at pull time.
                         let _ = flatpak_ref;
-                        let cmd = orchard_flatpak::install_image(&install_arg);
+                        let app_cmd = match &runtime_plan {
+                            RuntimePlan::NoDeps | RuntimePlan::First(_, Some(_)) => {
+                                orchard_flatpak::install_image(&install_arg, true)
+                            }
+                            _ => orchard_flatpak::install_image(&install_arg, false),
+                        };
                         // the install phase continues the same job: the
                         // elapsed clock and a cancel pressed mid-verify
                         // carry over
@@ -2368,7 +2503,17 @@ impl StoreRoot {
                             &app.app_id,
                             app.publisher.as_deref(),
                         );
-                        this.run_job(cmd, &app.app_id, "Install", &place, cx);
+                        match runtime_plan {
+                            RuntimePlan::First(runtime_cmd, verify) => this.run_job_chained(
+                                runtime_cmd,
+                                &app.app_id,
+                                "Runtime install",
+                                &place,
+                                Some(ChainedInstall { cmd: app_cmd, verify }),
+                                cx,
+                            ),
+                            _ => this.run_job(app_cmd, &app.app_id, "Install", &place, cx),
+                        }
                     }
                     Err(err) => {
                         this.jobs.remove(&app.app_id);
@@ -2512,10 +2657,26 @@ impl StoreRoot {
     /// readers reach EOF is order-safe.
     fn run_job(
         &mut self,
+        cmd: std::process::Command,
+        app_id: &str,
+        label: &'static str,
+        place: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.run_job_chained(cmd, app_id, label, place, None, cx);
+    }
+
+    /// run_job with a follow-up command started on success: the
+    /// publisher install's runtime pre-flight chains the app install
+    /// behind the runtime deploy it was making way for. A cancel or a
+    /// failure drops the chain.
+    fn run_job_chained(
+        &mut self,
         mut cmd: std::process::Command,
         app_id: &str,
         label: &'static str,
         place: &str,
+        then: Option<ChainedInstall>,
         cx: &mut Context<Self>,
     ) {
         let app_id = app_id.to_string();
@@ -2615,6 +2776,36 @@ impl StoreRoot {
                 .background_executor()
                 .spawn(async move { list_installed() })
                 .await;
+            // the chained follow-up, with the runtime re-verified
+            // before the chain starts: the pre-flight's chain must
+            // not build on a deploy that reported success but did
+            // not stick (observed once on flatpak 1.18.4)
+            let mut chain = None;
+            let mut chain_failed = None;
+            if status.as_ref().is_ok_and(|s| s.success()) {
+                if let Some(next) = then {
+                    let ChainedInstall { cmd, verify } = next;
+                    match verify {
+                        None => chain = Some(ChainedInstall { cmd, verify: None }),
+                        Some((scope, runtime_ref)) => {
+                            let marker = runtime_ref.clone();
+                            let stuck = cx
+                                .background_executor()
+                                .spawn(async move {
+                                    orchard_flatpak::info_ref(scope, &marker)
+                                        .status()
+                                        .is_ok_and(|s| s.success())
+                                })
+                                .await;
+                            if stuck {
+                                chain = Some(ChainedInstall { cmd, verify: None });
+                            } else {
+                                chain_failed = Some(runtime_ref);
+                            }
+                        }
+                    }
+                }
+            }
             let _ = this.update(cx, |this, cx| {
                 let cancelled = this
                     .jobs
@@ -2632,6 +2823,23 @@ impl StoreRoot {
                         Ok(true) => {
                             this.error = None;
                             this.error_at = None;
+                            // the chained follow-up: the runtime's
+                            // deploy hands the job to the app install
+                            // it was making way for
+                            if let Some(failed_ref) = chain_failed {
+                                this.fail(format!(
+                                    "the runtime deploy did not stick: {failed_ref} is not deployed, so the install cannot continue"
+                                ));
+                            }
+                            if let Some(next) = chain {
+                                this.jobs.insert(
+                                    app_id.clone(),
+                                    Job::new(JobState::Installing),
+                                );
+                                this.run_job_chained(
+                                    next.cmd, &app_id, "Install", &place, None, cx,
+                                );
+                            }
                         }
                         Ok(false) => {
                             // flatpak's cleanup can error after the
@@ -8112,6 +8320,23 @@ fn channel_scope(channel: &RemoteChannel) -> orchard_flatpak::Scope {
     }
 }
 
+/// The serving remote to install a runtime from, user scope first
+/// (its installs need no polkit); enumeration order breaks ties, so
+/// flathub leads among system remotes.
+fn pick_runtime_remote(
+    serving: &[(String, orchard_flatpak::Scope)],
+) -> Option<(String, orchard_flatpak::Scope)> {
+    serving
+        .iter()
+        .find(|(_, scope)| *scope == orchard_flatpak::Scope::User)
+        .or_else(|| {
+            serving
+                .iter()
+                .find(|(_, scope)| *scope == orchard_flatpak::Scope::System)
+        })
+        .cloned()
+}
+
 /// The reviewed channels to render: every enabled classic remote
 /// with a readable AppStream, flathub first. Enumeration is
 /// best-effort: with the CLI gone or failing, the client still
@@ -9003,6 +9228,30 @@ mod tests {
         assert_eq!(kept[0].summary, "flathub's row");
         assert_eq!(kept[1].app_id, "com.example.Unique");
         assert_eq!(kept[1].remote.as_deref(), Some("flatpark"));
+    }
+
+    #[test]
+    fn pick_runtime_remote_prefers_the_user_scope() {
+        use orchard_flatpak::Scope;
+        // enumeration order breaks ties among system remotes: flathub leads
+        let system_only = vec![
+            ("flathub".to_string(), Scope::System),
+            ("other".to_string(), Scope::System),
+        ];
+        assert_eq!(
+            pick_runtime_remote(&system_only),
+            Some(("flathub".to_string(), Scope::System))
+        );
+        // a user-scope hit wins even when listed after a system one
+        let both = vec![
+            ("flathub".to_string(), Scope::System),
+            ("flatpark".to_string(), Scope::User),
+        ];
+        assert_eq!(
+            pick_runtime_remote(&both),
+            Some(("flatpark".to_string(), Scope::User))
+        );
+        assert_eq!(pick_runtime_remote(&[]), None);
     }
 
     #[test]

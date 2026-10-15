@@ -21,6 +21,7 @@ client, not a gatekeeper.**
 | Sandbox permissions | Never published in events: flatpak bakes `finish-args` into the artifact, the client reads the real sandbox from it; no declared-vs-actual gap |
 | Artifact fetch | The client owns it: verify the manifest by digest, download a local OCI layout, hand flatpak `oci:<dir>` (flatpak's own `docker://` fetch never authenticates; ghcr always challenges) |
 | Install scope | User scope for Orchard apps (flatpak's system-scope image install is broken upstream); Flathub installs stay system scope |
+| Runtime pre-flight | A publisher install deploys the artifact's own `runtime=` first: already user-deployed, plain install; system-deployed, `--no-deps` (flatpak's `oci:` path never resolves runtimes from remotes, but run time resolves them across installations); deployed nowhere, the runtime installs from the serving remote, user scope first, system scope under polkit |
 | Rendezvous relays | A small, public, versioned relay set; every publisher's manifest must include the Orchard-run relay (`wss://relay.orchard.rocks`), enforced by orchard-publish |
 | Identity for publishing | NIP-46 remote signer; the client never sees a secret key, the signer's pubkey is the identity |
 | Reviews | One per identity per app (kind 30065, parameterized replaceable); editing is republishing, the composer pre-fills an existing review |

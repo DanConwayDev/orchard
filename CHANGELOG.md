@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- **Publisher installs make way for the runtime they need.** Flatpak's
+  `oci:` install path does not resolve runtimes from remotes the way a
+  classic install does: it accepts only what the installing scope already
+  has deployed, so a publisher artifact targeting a runtime branch the
+  machine never deployed died with "requires the runtime
+  org.freedesktop.Platform/x86_64/26.08 which was not found" (Amethyst,
+  issue-free repro on a machine whose runtimes are all system-scope
+  installs). The client now reads the `runtime=` the artifact's own
+  metadata declares and plans around it: deployed user-scope, the plain
+  install proceeds; deployed only system-scope, the app installs
+  `--no-deps` and runs against it (a user install runs a system runtime:
+  how Orchard itself is deployed); deployed nowhere, the runtime installs
+  first, from a user remote when one serves it (no polkit), from the
+  system scope under polkit when only a system remote does, and the app
+  install chains behind it. A runtime no enabled remote serves fails the
+  install up front with that fact, before any download.
+
 ## v0.1.3 (2026-10-14)
 
 - **Other enabled flatpak remotes ingest as channels, not just Flathub** (issue #3).

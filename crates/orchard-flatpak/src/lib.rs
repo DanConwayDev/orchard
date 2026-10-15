@@ -63,13 +63,23 @@ pub fn ensure_oci_remote(index_url: &str) -> Command {
     cmd
 }
 
-/// Install an app id from a classic remote, e.g.
-/// `flatpak install --system -y flathub org.gnome.Polari`. The scope
-/// must be one hosting the remote: a user-install-only remote is
-/// unknown to the system installation and vice versa.
-pub fn install_ref(app_id: &str, remote: &str, scope: Scope) -> Command {
+/// Install a ref from a classic remote, e.g.
+/// `flatpak install --system -y flathub org.gnome.Polari` or a
+/// runtime branch (`runtime/org.freedesktop.Platform/x86_64/26.08`).
+/// The scope must be one hosting the remote: a user-install-only
+/// remote is unknown to the system installation and vice versa.
+pub fn install_ref(ref_: &str, remote: &str, scope: Scope) -> Command {
     let mut cmd = flatpak_command();
-    cmd.args(["install", scope.flag(), "-y", remote, app_id]);
+    cmd.args(["install", scope.flag(), "-y", remote, ref_]);
+    cmd
+}
+
+/// Whether a ref is deployed in a scope: the exit status of
+/// `flatpak info <scope> <ref>`. Deployments do not cross scopes for
+/// install-time dependency checks, so each scope asks for itself.
+pub fn info_ref(scope: Scope, ref_: &str) -> Command {
+    let mut cmd = flatpak_command();
+    cmd.args(["info", scope.flag(), ref_]);
     cmd
 }
 
@@ -104,9 +114,20 @@ impl Scope {
 /// rides the image source directly, and that path works end to end
 /// (verified against 1.18.4 with a local registry). A user-scope install
 /// also needs no polkit dialog.
-pub fn install_image(location: &str) -> Command {
+///
+/// `no_deps` adds `--no-deps`: the image path checks the runtime
+/// only against the installing scope's deployments, so when the
+/// runtime deploys in the other scope (a user install running a
+/// system runtime, the way Orchard itself is deployed), the check
+/// must be skipped; flatpak resolves the runtime across
+/// installations at run time.
+pub fn install_image(location: &str, no_deps: bool) -> Command {
     let mut cmd = flatpak_command();
-    cmd.args(["install", "--user", "-y", location]);
+    cmd.args(["install", "--user", "-y"]);
+    if no_deps {
+        cmd.arg("--no-deps");
+    }
+    cmd.arg(location);
     cmd
 }
 
@@ -330,13 +351,22 @@ mod tests {
             "oci-archive:/tmp/x.oci.tgz",
             "docker://localhost:5000/hello:stable",
         ] {
-            let cmd = install_image(location);
+            let cmd = install_image(location, false);
             let args = arg_strings(&cmd);
             // user scope: flatpak's system-scope image install is broken
             // (empty-URL origin remote), see install_image's doc
             assert!(args.contains(&"--user".to_string()));
+            assert!(!args.contains(&"--no-deps".to_string()));
             assert!(args.last().is_some_and(|last| last == location));
         }
+    }
+
+    #[test]
+    fn install_image_skips_the_dependency_check_on_demand() {
+        let cmd = install_image("oci:/abs/path/to/layout", true);
+        let args = arg_strings(&cmd);
+        assert!(args.contains(&"--no-deps".to_string()));
+        assert!(args.last().is_some_and(|last| last == "oci:/abs/path/to/layout"));
     }
 
     #[test]
