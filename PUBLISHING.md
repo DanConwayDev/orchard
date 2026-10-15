@@ -239,17 +239,25 @@ The manifest MIME is `application/vnd.oci.image.manifest.v1+json`; config and
 layers use their descriptor MIME types. Shared components can carry repeated
 `f` tags when published once for several platforms.
 
-On NIP-82 software asset events (kind 3063), `T` is the optional **software
-target** field: the intended packaging or execution environment when platform
+This implementation proposes an optional **software target** field, `T`, on
+NIP-82 software asset events (kind 3063): the intended packaging or execution environment when platform
 (`f`) and MIME type (`m`) alone cannot identify a compatible consumer.
 `flatpak-oci` identifies components of a Flatpak OCI image. Consumers
 match the target together with platform and MIME type; an unknown target must
 not be assumed compatible. Lowercase `t` remains a hashtag and does not select
-an installation target.
+an installation target. The optional `T` convention is proposed for adoption
+by other NIP-82 implementers. The [ngit software publishing guide](https://ngit.dev/protocol/software-publishing)
+describes release files with installation and dependency resolution left to
+clients. Orchard uses that model for config/layer assets; reconstructing a
+Flatpak OCI image from them requires a consumer that supports this workflow.
 
 Orchard verifies the manifest and config to display permissions. Layers are
 only downloaded for installation, when their hashes are checked against the
-manifest. Registry URLs retain the registry authentication flow. An archive
+manifest. Registry URLs retain the registry authentication flow. Public GHCR
+URLs still require an anonymous bearer-token exchange; a plain HTTP downloader
+may receive 401. Registry support does not imply every NIP-82 downloader can
+fetch those URLs. For consumers without registry support, host the same bytes
+at directly downloadable URLs, for example on Blossom. An archive
 is useful for bootstrap installation but is not needed to inspect permissions.
 
 ## Proving your repository

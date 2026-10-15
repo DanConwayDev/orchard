@@ -136,7 +136,8 @@ Zapstore publishers readable on Orchard day one:
 - `f` values describe OS and architecture (`linux-x86_64`, `linux-aarch64`).
   On kind 3063 assets, `T` identifies the intended packaging or execution
   environment when platform and MIME type are insufficient to select a compatible
-  consumer. This NIP-82 software-target field is scoped to software assets.
+  consumer. The optional software-target field is proposed for adoption by
+  other NIP-82 implementers. OCI component resolution is client-specific.
   Manifest, config and layer assets all carry `T=flatpak-oci` and their applicable
   `f` platforms. MIME type distinguishes the component roles; only a manifest is
   an installation entry point. Each `url`, bare SHA-256 `x`, and `size` describes
@@ -146,6 +147,8 @@ Zapstore publishers readable on Orchard day one:
   `/v2/<repository>/blobs/sha256:<hash>` for config/layers. Blossom URLs may use
   any host; no sibling-URL convention or ncontainer event is required. Runtime
   and permissions come from the verified config, without downloading layers.
+  Public registry URLs can require a bearer-token exchange; generic HTTP
+  consumers need directly downloadable copies, such as Blossom URLs.
 - One release references all architecture assets. `--upload-only` pushes each
   architecture without signing; `--asset` publishes them together without
   the build tree. Self-publication enables `--legacy-oci`, adding the same
