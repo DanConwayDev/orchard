@@ -131,6 +131,81 @@ pub fn install_image(location: &str, no_deps: bool) -> Command {
     cmd
 }
 
+/// Install a `.flatpak` bundle file, user scope. Unlike the `oci:`
+/// image path, a bundle install updates in place when the ref is
+/// already installed (verified: 0.64.13 bundle over 0.64.13), and
+/// flatpak itself resolves missing runtimes from the enabled remotes.
+pub fn install_bundle(path: &std::path::Path) -> Command {
+    let mut cmd = flatpak_command();
+    cmd.args(["install", "--user", "-y", "--bundle"]);
+    cmd.arg(path);
+    cmd
+}
+
+/// What a bundle file's header carries. The format is flatpak's
+/// single-file artifact: a `flatpak\0` magic, a version and size
+/// header, then the deploy ref and the app's full metadata ini
+/// inline, before the ostree payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BundleInfo {
+    /// The deploy ref, `app/<id>/<arch>/<branch>`.
+    pub flatpak_ref: String,
+    /// The metadata ini the deployed app would carry (the same
+    /// source the permissions viewer and the runtime pre-flight read).
+    pub metadata: String,
+}
+
+/// Read a bundle file's header. Only the first bytes move: the ini
+/// starts at the `[Application]` section marker and ends at the
+/// header's double-NUL, long before the payload begins.
+pub fn bundle_metadata(path: &std::path::Path) -> std::io::Result<BundleInfo> {
+    use std::io::Read as _;
+    let mut file = std::fs::File::open(path)?;
+    let mut head = [0u8; 64 * 1024];
+    let read = file.read(&mut head)?;
+    let head = &head[..read];
+    if !head.starts_with(b"flatpak\0") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{} is not a flatpak bundle", path.display()),
+        ));
+    }
+    let start = head
+        .windows(13)
+        .position(|w| w == b"[Application]")
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{} carries no [Application] section", path.display()),
+            )
+        })?;
+    let end = head[start..]
+        .windows(2)
+        .position(|w| w == b"\0\0")
+        .map(|p| start + p)
+        .unwrap_or(read);
+    Ok(BundleInfo {
+        flatpak_ref: header_ref(head),
+        metadata: String::from_utf8_lossy(&head[start..end]).into_owned(),
+    })
+}
+
+/// The deploy ref rides the header before the metadata: a
+/// length-prefixed string after the magic and sizes. Scan for the
+/// `app/` (or `runtime/`) prefix and read to the first NUL, which is
+/// tolerant of the exact header layout across bundle versions.
+fn header_ref(head: &[u8]) -> String {
+    for prefix in [b"app/".as_slice(), b"runtime/".as_slice()] {
+        if let Some(start) = head.windows(prefix.len()).position(|w| w == prefix) {
+            let rest = &head[start..];
+            if let Some(nul) = rest.iter().position(|b| *b == 0) {
+                return String::from_utf8_lossy(&rest[..nul]).into_owned();
+            }
+        }
+    }
+    String::new()
+}
+
 /// Update everything the `orchard` remote serves (plus whatever else is stale).
 pub fn update() -> Command {
     let mut cmd = flatpak_command();
@@ -329,6 +404,45 @@ mod tests {
         cmd.get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect()
+    }
+
+    /// A synthetic bundle header: magic, junk header bytes, the deploy
+    /// ref, then the metadata ini closed by the double-NUL and
+    /// followed by payload bytes.
+    #[test]
+    fn bundle_metadata_reads_ref_and_ini() {
+        let mut bytes = b"flatpak\0".to_vec();
+        bytes.extend_from_slice(&[1, 0, 0, 0, 0, 0, 0, 0]); // version + sizes
+        bytes.extend_from_slice(b"\x13\0\0\0app/com.example.Zap/x86_64/stable\0");
+        bytes.extend_from_slice(b"\x1e\0\0\0");
+        let ini = "[Application]\nname=com.example.Zap\nruntime=org.freedesktop.Platform/x86_64/25.08\n";
+        bytes.extend_from_slice(ini.as_bytes());
+        bytes.extend_from_slice(b"\0\0payload-bytes-past-the-header");
+        let path = std::env::temp_dir().join("orchard-bundle-header-test.flatpak");
+        std::fs::write(&path, &bytes).unwrap();
+
+        let info = bundle_metadata(&path).unwrap();
+        assert_eq!(info.flatpak_ref, "app/com.example.Zap/x86_64/stable");
+        assert_eq!(info.metadata, ini);
+        assert!(!info.metadata.contains("payload"));
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn bundle_metadata_rejects_non_bundles() {
+        let path = std::env::temp_dir().join("orchard-bundle-header-test.txt");
+        std::fs::write(&path, b"not a bundle").unwrap();
+        assert!(bundle_metadata(&path).is_err());
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn install_bundle_builds_expected_invocation() {
+        let cmd = install_bundle(std::path::Path::new("/tmp/x.flatpak"));
+        assert_eq!(
+            arg_strings(&cmd),
+            ["install", "--user", "-y", "--bundle", "/tmp/x.flatpak"]
+        );
     }
 
     #[test]

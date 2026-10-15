@@ -78,6 +78,10 @@ pub enum Location {
         digest: Option<String>,
         scheme: Option<String>,
     },
+    /// A plain HTTPS URL serving one flatpak bundle file (the
+    /// Zapstore-shaped asset location: blossom and friends host the
+    /// bytes content-addressed by the sha256 the event pins).
+    Https { url: String },
 }
 
 impl Location {
@@ -122,7 +126,13 @@ impl Location {
                 scheme: scheme.map(str::to_string),
             });
         }
-        bail!("unsupported artifact location {s:?} (want oci: or docker://)")
+        // A bare https/http URL: a bundle file served by the
+        // publisher's own host (or a blob mirror). Anything the
+        // docker:// branch above can claim is already gone.
+        if s.starts_with("https://") || s.starts_with("http://") {
+            return Ok(Location::Https { url: s.to_string() });
+        }
+        bail!("unsupported artifact location {s:?} (want oci:, docker:// or https://)")
     }
 
     /// What to hand to `flatpak install` as the image location. The
@@ -156,6 +166,7 @@ impl Location {
                     }
                 }
             }
+            Location::Https { url } => url.clone(),
         }
     }
 }
@@ -165,6 +176,9 @@ impl Location {
 pub fn verify(location: &Location, pinned_digest: Option<&str>) -> Result<VerifyReport> {
     match location {
         Location::OciDir(dir) => verify_local(dir, pinned_digest),
+        Location::Https { url: _ } => {
+            bail!("a bundle location verifies against its destination file; use verify_bundle")
+        }
         Location::Registry {
             registry,
             repository,
@@ -190,8 +204,77 @@ pub fn verify(location: &Location, pinned_digest: Option<&str>) -> Result<Verify
     }
 }
 
-fn verify_local(dir: &Path, pinned: Option<&str>) -> Result<VerifyReport> {
-    let index_path = dir.join("index.json");
+/// Verify a bundle-served artifact (the Zapstore-shaped https
+/// location) into `dest`. The bundle is one opaque file, so the pin
+/// is the whole contract: the bytes hash to `pinned_digest` or they
+/// are refused; an unpinned bundle verifies nothing and is refused.
+/// A cached `dest` is re-hashed rather than re-downloaded. Returns
+/// the report with digest and sizes; the bundle header (ref, metadata
+/// ini) is the flatpak crate's parse and the caller merges it in.
+pub fn verify_bundle(
+    url: &str,
+    pinned_digest: Option<&str>,
+    dest: &Path,
+) -> Result<VerifyReport> {
+    let pinned = pinned_digest.ok_or_else(|| {
+        anyhow!("https artifact has no pinned digest: the event must carry the sha256")
+    })?;
+    if dest.is_file() {
+        // a completed twin: hash what is on disk
+        let bytes = std::fs::read(dest).with_context(|| format!("reading {}", dest.display()))?;
+        let digest = sha256_digest(&bytes);
+        check_pin(Some(pinned), &digest)?;
+        return Ok(bundle_report(&digest, bytes.len() as u64));
+    }
+    let response = agent().get(url).call().with_context(|| format!("fetching {url}"))?;
+    let mut reader = response.into_reader();
+    let tmp = dest.with_extension("part");
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let mut file =
+        std::fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
+    let mut hasher = Sha256::new();
+    let mut size = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = std::io::Read::read(&mut reader, &mut buffer)
+            .with_context(|| format!("reading body of {url}"))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        size += read as u64;
+        file.write_all(&buffer[..read])
+            .with_context(|| format!("writing {}", tmp.display()))?;
+    }
+    let digest = format!(
+        "sha256:{}",
+        hasher.finalize().iter().map(|b| format!("{b:02x}")).collect::<String>()
+    );
+    if let Err(err) = check_pin(Some(pinned), &digest) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err);
+    }
+    std::fs::rename(&tmp, dest)
+        .with_context(|| format!("moving {} into place", tmp.display()))?;
+    Ok(bundle_report(&digest, size))
+}
+
+fn bundle_report(digest: &str, size: u64) -> VerifyReport {
+    VerifyReport {
+        digest: digest.to_string(),
+        manifest_size: size,
+        flatpak_ref: None,
+        metadata: None,
+        installed_size: Some(size),
+        download_size: size,
+        config_digest: None,
+    }
+}
+
+fn verify_local(dir: &Path, pinned: Option<&str>) -> Result<VerifyReport> {    let index_path = dir.join("index.json");
     let index_bytes = std::fs::read(&index_path)
         .with_context(|| format!("reading {}", index_path.display()))?;
     let index: serde_json::Value = serde_json::from_slice(&index_bytes)
@@ -311,6 +394,9 @@ pub fn download_layout(location: &Location, pinned: Option<&str>, dest: &Path) -
         } => (registry, repository, scheme, digest.as_deref().or(tag.as_deref())),
         Location::OciDir(_) => {
             bail!("nothing to download: the location is already a local layout")
+        }
+        Location::Https { .. } => {
+            bail!("nothing to download here: a bundle location downloads through verify_bundle")
         }
     };
     let base = registry_base(registry, scheme.as_deref());
@@ -992,7 +1078,18 @@ mod tests {
         let loc = Location::parse("oci:/some/dir").unwrap();
         assert_eq!(loc.install_arg(), "oci:/some/dir");
 
-        assert!(Location::parse("https://nope").is_err());
+        // a bare https URL is a bundle location, not an error
+        let loc = Location::parse("https://blossom.example/abc123").unwrap();
+        assert_eq!(
+            loc,
+            Location::Https {
+                url: "https://blossom.example/abc123".into()
+            }
+        );
+        assert_eq!(loc.install_arg(), "https://blossom.example/abc123");
+
+        // other schemes stay refused
+        assert!(Location::parse("ftp://nope").is_err());
     }
 
     #[test]

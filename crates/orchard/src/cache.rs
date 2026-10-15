@@ -160,19 +160,32 @@ pub fn artifact_dir(app_id: &str, digest: &str) -> PathBuf {
     dir
 }
 
-/// Drop every artifact layout for an app id except the newest (by
-/// directory mtime): each release's OCI layout is rebuildable but
-/// roughly a hundred megabytes, and without this a history of them
-/// outlives every cap. Runs after a successful deploy, when the
-/// newest layout is the one the deployment came from.
+/// Where a verified bundle artifact lands as a single file, under
+/// the same artifacts root the OCI layouts use. Bundle semantics are
+/// identical: content-addressed by the pinned sha256, rename-in on
+/// completion, rebuilt by re-download when absent.
+pub fn artifact_file(app_id: &str, digest: &str) -> PathBuf {
+    let dir = root().join("artifacts").join(app_id);
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join(format!(
+        "{}.flatpak",
+        digest.trim_start_matches("sha256:")
+    ))
+}
+
+/// Drop every artifact entry for an app id except the newest (by
+/// mtime): each release's artifact is rebuildable but roughly a
+/// hundred megabytes, and without this a history of them outlives
+/// every cap. Runs after a successful deploy, when the newest entry
+/// is the one the deployment came from. Layouts are directories,
+/// bundles are files; both go.
 pub fn prune_old_artifacts(app_id: &str) {
     let dir = root().join("artifacts").join(app_id);
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return;
     };
-    let mut layouts: Vec<(std::time::SystemTime, PathBuf)> = entries
+    let mut entries: Vec<(std::time::SystemTime, PathBuf)> = entries
         .flatten()
-        .filter(|entry| entry.path().is_dir())
         .map(|entry| {
             (
                 entry
@@ -183,12 +196,16 @@ pub fn prune_old_artifacts(app_id: &str) {
             )
         })
         .collect();
-    if layouts.len() <= 1 {
+    if entries.len() <= 1 {
         return;
     }
-    layouts.sort_by_key(|(modified, _)| *modified);
-    for (_, path) in layouts.iter().rev().skip(1) {
-        let _ = std::fs::remove_dir_all(path);
+    entries.sort_by_key(|(modified, _)| *modified);
+    for (_, path) in entries.iter().rev().skip(1) {
+        if path.is_dir() {
+            let _ = std::fs::remove_dir_all(path);
+        } else {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 

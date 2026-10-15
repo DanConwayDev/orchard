@@ -2260,6 +2260,14 @@ impl StoreRoot {
                 .next()
                 .unwrap_or_default()
                 .to_string(),
+            // a bundle's host: the "from" on the status line
+            oci::Location::Https { url } => url
+                .trim_start_matches("https://")
+                .trim_start_matches("http://")
+                .split('/')
+                .next()
+                .unwrap_or_default()
+                .to_string(),
             oci::Location::OciDir(_) => String::new(),
         };
         self.jobs
@@ -2269,10 +2277,46 @@ impl StoreRoot {
         cx.spawn(async move |this, cx| {
             let pinned = app.pinned_digest.clone();
             let mut app = app;
-            let report = cx
-                .background_executor()
-                .spawn(async move { oci::verify(&location, pinned.as_deref()) })
-                .await;
+            let report = if matches!(location, oci::Location::Https { .. }) {
+                let app_id = app.app_id.clone();
+                cx.background_executor()
+                    .spawn(async move {
+                        let report =
+                            match (&location, pinned.as_deref()) {
+                                (oci::Location::Https { url }, Some(pin)) => {
+                                    let file = crate::cache::artifact_file(&app_id, pin);
+                                    oci::verify_bundle(url, Some(pin), &file)
+                                }
+                                (oci::Location::Https { url: _ }, None) => {
+                                    return Err(anyhow::anyhow!(
+                                        "https artifact for {app_id} has no pinned digest: the event must carry the sha256"
+                                    ))
+                                }
+                                _ => {
+                                    return Err(anyhow::anyhow!(
+                                        "bundle verify reached a non-bundle location"
+                                    ))
+                                }
+                            };
+                        let mut report = report?;
+                        // the bundle header carries the metadata ini
+                        // (and the deploy ref); it feeds the
+                        // permissions viewer and the runtime pre-flight
+                        if report.metadata.is_none() {
+                            let file = crate::cache::artifact_file(&app_id, &report.digest);
+                            if let Ok(info) = orchard_flatpak::bundle_metadata(&file) {
+                                report.flatpak_ref = Some(info.flatpak_ref);
+                                report.metadata = Some(info.metadata);
+                            }
+                        }
+                        Ok::<_, anyhow::Error>(report)
+                    })
+                    .await
+            } else {
+                cx.background_executor()
+                    .spawn(async move { oci::verify(&location, pinned.as_deref()) })
+                    .await
+            };
 
             // The runtime pre-flight. Flatpak's oci: path does not
             // resolve runtimes from remotes the way a classic install
@@ -2429,6 +2473,14 @@ impl StoreRoot {
                     }
                 }
                 (Ok(_), oci::Location::OciDir(path)) => format!("oci:{}", path.display()),
+                // a bundle: verify_bundle already fetched and pinned
+                // the file; it installs from where it landed
+                (Ok(report), oci::Location::Https { .. }) => crate::cache::artifact_file(
+                    &app.app_id,
+                    &report.digest,
+                )
+                .display()
+                .to_string(),
                 // verify failed: the update below reports it and never
                 // reaches an install
                 (Err(_), _) => String::new(),
@@ -2468,8 +2520,20 @@ impl StoreRoot {
                         // The catalog ref must match what the image labels
                         // claim; flatpak enforces this again at pull time.
                         let _ = flatpak_ref;
+                        // a bundle artifact installs with --bundle and
+                        // updates in place (no uninstall step: proven
+                        // bundle-over-bundle); an image artifact needs
+                        // the uninstall-then-install chain when updating
+                        let is_bundle =
+                            matches!(download_source, oci::Location::Https { .. });
                         let app_cmd = |no_deps: bool| {
-                            orchard_flatpak::install_image(&install_arg, no_deps)
+                            if is_bundle {
+                                orchard_flatpak::install_bundle(
+                                    &crate::cache::artifact_file(&app.app_id, &digest),
+                                )
+                            } else {
+                                orchard_flatpak::install_image(&install_arg, no_deps)
+                            }
                         };
                         // the install phase continues the same job: the
                         // elapsed clock and a cancel pressed mid-verify
@@ -2502,9 +2566,9 @@ impl StoreRoot {
                             then: None,
                             label: install_label,
                         };
-                        // An update brings the installed ref down
-                        // before the install: flatpak refuses to
-                        // install over an installed ref at any
+                        // An image update brings the installed ref
+                        // down before the install: flatpak refuses
+                        // to install over an installed ref at any
                         // version ("is already installed"), and the
                         // oci: flow leaves no persistent remote for
                         // flatpak update to serve from, so there is
@@ -2512,7 +2576,9 @@ impl StoreRoot {
                         // instance survives the uninstall (deleted
                         // deploys stay mapped) and user data is
                         // kept; a failed install leaves the cached
-                        // layout one press away.
+                        // layout one press away. A bundle artifact
+                        // skips all of it: bundle installs update in
+                        // place.
                         match runtime_plan {
                             RuntimePlan::First(runtime_cmd, verify) => {
                                 // the runtime's deploy hands the job
@@ -2527,7 +2593,7 @@ impl StoreRoot {
                                     "Runtime install"
                                 };
                                 let no_deps = verify.is_some();
-                                if updating {
+                                if updating && !is_bundle {
                                     let runtime_step = ChainedInstall {
                                         cmd: runtime_cmd,
                                         verify,
@@ -2546,6 +2612,9 @@ impl StoreRoot {
                                         cx,
                                     );
                                 } else {
+                                    // a first install, or a bundle
+                                    // update (in place, no uninstall
+                                    // step): the runtime deploy leads
                                     this.run_job_chained(
                                         runtime_cmd,
                                         &app.app_id,
@@ -2556,7 +2625,7 @@ impl StoreRoot {
                                     );
                                 }
                             }
-                            _ if updating => {
+                            _ if updating && !is_bundle => {
                                 this.run_job_chained(
                                     orchard_flatpak::uninstall(
                                         orchard_flatpak::Scope::User,

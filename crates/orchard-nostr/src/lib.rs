@@ -164,6 +164,34 @@ struct Asset {
     runtime: Option<String>,
     #[allow(dead_code)]
     version: Option<String>,
+    /// What the artifact is: Zapstore-shaped events tag it `m`
+    /// (a content type); Orchard's own events carry no `m`.
+    #[allow(dead_code)]
+    content_type: Option<String>,
+    /// The file name the publisher gave it, `filename` tag.
+    #[allow(dead_code)]
+    filename: Option<String>,
+}
+
+impl Asset {
+    /// Whether the artifact is one this flatpak store can install:
+    /// an image location (Orchard's own events), or a Zapstore-shaped
+    /// asset that names itself a flatpak. A release references every
+    /// format the publisher ships (apk, exe, AppImage), all sharing
+    /// the linux platform tags, so the kind, not just the platform,
+    /// decides installability.
+    fn installable_kind(&self) -> bool {
+        match self.location.as_deref() {
+            Some(loc) if loc.starts_with("oci:") || loc.starts_with("docker://") => true,
+            _ => {
+                self.content_type.as_deref() == Some("application/vnd.flatpak")
+                    || self
+                        .filename
+                        .as_deref()
+                        .is_some_and(|name| name.ends_with(".flatpak"))
+            }
+        }
+    }
 }
 
 /// A publisher profile (kind 0): content is standard NIP-01 metadata.
@@ -472,7 +500,10 @@ impl Feed {
 
     fn absorb_asset(&mut self, event: Event, parts: Parts) -> Result<bool> {
         let digest = parts.tag("x").map(normalize_digest);
-        let location = parts.tag("oci");
+        // the location: Orchard's own events name an image location
+        // (`oci`); Zapstore-shaped events name a plain https URL the
+        // flatpak bundle is served from
+        let location = parts.tag("oci").or_else(|| parts.tag("url"));
         check_digest_agreement(digest.as_deref(), location.as_deref())?;
         if self.assets.contains_key(&parts.id) {
             return Ok(false);
@@ -486,6 +517,8 @@ impl Feed {
                 location,
                 runtime: parts.tag("runtime"),
                 version: parts.tag("version"),
+                content_type: parts.tag("m"),
+                filename: parts.tag("filename"),
                 event,
             },
         );
@@ -625,14 +658,17 @@ impl Feed {
                 continue;
             }
             // an installable asset of one release: same publisher,
-            // pinned somewhere, built for this platform. An asset from
-            // before the platform tag existed stays installable
-            // anywhere; it is the fallback after an exact match.
+            // pinned somewhere, built for this platform, and a flatpak
+            // artifact (not the apk or AppImage riding the same
+            // release's platform tags). An asset from before the
+            // platform tag existed stays installable anywhere; it is
+            // the fallback after an exact match.
             let same_publisher = |reference: &String| {
                 self.assets
                     .get(reference)
                     .filter(|asset| asset.event.pubkey.to_string() == *author)
                     .filter(|asset| asset.location.is_some())
+                    .filter(|asset| asset.installable_kind())
             };
             let installable = |release: &Release| {
                 release
@@ -807,6 +843,21 @@ fn check_digest_agreement(digest: Option<&str>, location: Option<&str>) -> Resul
         return Ok(());
     };
     let Some(at) = location.rfind('@') else {
+        // not an oci pin; a content-addressed https path (blossom and
+        // friends name the file by its own sha256) must agree with
+        // the digest too when it carries one
+        if location.starts_with("http") {
+            if let Some(segment) = location.rsplit('/').next() {
+                let hex = segment.trim_end_matches(".flatpak");
+                let is_hex64 =
+                    hex.len() == 64 && hex.chars().all(|c| c.is_ascii_hexdigit());
+                if is_hex64 && !format!("sha256:{hex}").eq_ignore_ascii_case(digest) {
+                    bail!(
+                        "asset url {location:?} names {hex}, disagrees with digest {digest:?}"
+                    );
+                }
+            }
+        }
         return Ok(());
     };
     let pinned = &location[at + 1..];
@@ -1358,6 +1409,140 @@ mod tests {
         );
         let mut feed = Feed::new();
         assert!(feed.absorb(asset).is_err(), "pin/ref disagreement must reject");
+    }
+
+    /// A Zapstore-shaped asset: the location is a plain https URL (a
+    /// blossom, content-addressed by the sha256 the event pins) and
+    /// the kind rides the `m`/`filename` tags instead of an image
+    /// scheme. It projects installable with the URL as its location.
+    #[test]
+    fn zapstore_url_assets_project_as_installable() {
+        let keys = demo_keys();
+        let app = signed(
+            &keys,
+            KIND_APP,
+            "An app.",
+            vec![("d", "com.example.Zap"), ("f", "linux-x86_64")],
+        );
+        let url = format!("https://blossom.example/{DIGEST}");
+        let asset = signed(
+            &keys,
+            KIND_ASSET,
+            "",
+            vec![
+                ("i", "com.example.Zap"),
+                ("x", DIGEST),
+                ("version", "0.64.14"),
+                ("f", "linux-x86_64"),
+                ("m", "application/vnd.flatpak"),
+                ("filename", "Armada.flatpak"),
+                ("url", &url),
+            ],
+        );
+        let asset_id = asset.id.to_string();
+        let release = signed(
+            &keys,
+            KIND_RELEASE,
+            "",
+            vec![
+                ("d", "com.example.Zap@0.64.14"),
+                ("i", "com.example.Zap"),
+                ("version", "0.64.14"),
+                ("c", "main"),
+                ("e", &asset_id),
+            ],
+        );
+        let mut feed = Feed::new();
+        absorb_all(&mut feed, &[app, asset, release]);
+        let catalog = feed.catalog();
+        assert_eq!(catalog.apps.len(), 1);
+        let entry = &catalog.apps[0];
+        assert_eq!(entry.version, "0.64.14");
+        assert_eq!(entry.location, url);
+        assert_eq!(entry.digest.as_deref(), Some(format!("sha256:{DIGEST}").as_str()));
+    }
+
+    /// A release's non-flatpak artifacts (the AppImage and apk riding
+    /// the same platform tags as the bundle) never win the pick: the
+    /// kind decides, so a mixed release installs the flatpak.
+    #[test]
+    fn non_flatpak_assets_on_the_host_platform_are_not_installable() {
+        let keys = demo_keys();
+        let app = signed(
+            &keys,
+            KIND_APP,
+            "An app.",
+            vec![("d", "com.example.Mixed"), ("f", "linux-x86_64")],
+        );
+        // first ref in the release is an AppImage, second the bundle
+        let appimage = signed(
+            &keys,
+            KIND_ASSET,
+            "",
+            vec![
+                ("i", "com.example.Mixed"),
+                ("x", DIGEST),
+                ("version", "1.0"),
+                ("f", "linux-x86_64"),
+                ("m", "application/vnd.appimage"),
+                ("filename", "Mixed.AppImage"),
+                ("url", "https://blossom.example/somebytes"),
+            ],
+        );
+        let bundle = signed(
+            &keys,
+            KIND_ASSET,
+            "",
+            vec![
+                ("i", "com.example.Mixed"),
+                ("x", DIGEST),
+                ("version", "1.0"),
+                ("f", "linux-x86_64"),
+                ("m", "application/vnd.flatpak"),
+                ("filename", "Mixed.flatpak"),
+                ("url", &format!("https://blossom.example/{DIGEST}")),
+            ],
+        );
+        let (appimage_id, bundle_id) = (appimage.id.to_string(), bundle.id.to_string());
+        let release = signed(
+            &keys,
+            KIND_RELEASE,
+            "",
+            vec![
+                ("d", "com.example.Mixed@1.0"),
+                ("i", "com.example.Mixed"),
+                ("version", "1.0"),
+                ("c", "main"),
+                ("e", &appimage_id),
+                ("e", &bundle_id),
+            ],
+        );
+        let mut feed = Feed::new();
+        absorb_all(&mut feed, &[app, appimage, bundle, release]);
+        let catalog = feed.catalog();
+        assert_eq!(catalog.apps.len(), 1);
+        let entry = &catalog.apps[0];
+        assert!(entry.location.ends_with(DIGEST), "the bundle asset wins, got {}", entry.location);
+    }
+
+    /// A content-addressed URL whose path names a different sha256
+    /// than the event's digest pin is rejected at absorb time.
+    #[test]
+    fn mismatched_url_and_digest_is_rejected() {
+        let keys = demo_keys();
+        let other = "bb".repeat(32);
+        let asset = signed(
+            &keys,
+            KIND_ASSET,
+            "",
+            vec![
+                ("i", "com.example.Zap"),
+                ("x", DIGEST),
+                ("url", &format!("https://blossom.example/{other}")),
+            ],
+        );
+        let mut feed = Feed::new();
+        assert!(feed.absorb(asset).is_err(), "url/digest disagreement must reject");
     }
 
     #[test]
