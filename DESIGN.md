@@ -167,9 +167,11 @@ Other enabled classic remotes (FlatPark and the like) ingest as extra channels t
 the same reader: `flatpak remotes` enumerates (disabled and `no-enumerate` remotes
 skipped, same-URL subset remotes deduped), each remote's AppStream parses with the same
 code, and the row carries its origin remote so install, metadata, and updates route to
-the installation that hosts it. The same app id on two remotes renders once, the
-built-in remote's row winning; per-channel twins are a follow-up. Orchard itself stays
-read-only over flatpak state: no `remote-add`, no key handling.
+the installation that hosts it. A remote whose AppStream never synced (just added,
+never searched) is refreshed client-side with flatpak's own catalog fetch and merged
+late; a dead remote times out and stays absent. The same app id on two remotes renders
+once, the built-in remote's row winning; per-channel twins are a follow-up. Orchard
+itself stays read-only over flatpak state: no `remote-add`, no key handling.
 
 ## Client
 

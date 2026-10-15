@@ -246,6 +246,17 @@ pub fn update_ref(scope: Scope, app_id: &str) -> Command {
     cmd
 }
 
+/// Refresh a remote's AppStream catalog metadata:
+/// `flatpak update --appstream <scope> <remote>`. This is the fetch
+/// flatpak itself runs on its next update or search, pulled earlier
+/// for a remote the user just added and never searched. Only catalog
+/// metadata lands in flatpak's cache; nothing installed changes.
+pub fn update_appstream(scope: Scope, remote: &str) -> Command {
+    let mut cmd = flatpak_command();
+    cmd.args(["update", scope.flag(), "--appstream", remote]);
+    cmd
+}
+
 /// Summary of the remote's current commit for an app, before install:
 /// `flatpak remote-info <scope> <remote> <app>`: version and the
 /// download / installed sizes of what would be installed.
@@ -368,6 +379,14 @@ mod tests {
             .contains(&"remotes".to_string()));
         assert!(args
             .contains(&"--columns=name,title,url,options".to_string()));
+    }
+
+    #[test]
+    fn update_appstream_targets_the_scope_and_remote() {
+        let cmd = update_appstream(Scope::User, "flatpark");
+        let args = arg_strings(&cmd);
+        let tail: Vec<String> = args.iter().skip(args.len() - 4).cloned().collect();
+        assert_eq!(tail, ["update", "--user", "--appstream", "flatpark"]);
     }
 
     #[test]

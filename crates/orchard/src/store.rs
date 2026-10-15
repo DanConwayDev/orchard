@@ -645,7 +645,7 @@ impl StoreRoot {
         // Reviewed channels: parse every enabled classic remote's
         // local AppStream (flathub first) in the background.
         cx.spawn(async move |this, cx| {
-            let (apps, channels) = cx
+            let (apps, channels, missing) = cx
                 .background_executor()
                 .spawn(async move { load_reviewed() })
                 .await;
@@ -655,6 +655,22 @@ impl StoreRoot {
                 this.reviewed_loading = false;
                 cx.notify();
             });
+            // Channels whose catalog never synced: refresh and merge
+            // late, one at a time, with the store already up. A dead
+            // remote times out inside flatpak and simply never
+            // arrives.
+            for channel in missing {
+                if let Some((rows, channel)) = cx
+                    .background_executor()
+                    .spawn(async move { refresh_channel(channel) })
+                    .await
+                {
+                    let _ = this.update(cx, |this, cx| {
+                        this.merge_reviewed(rows, channel);
+                        cx.notify();
+                    });
+                }
+            }
         })
         .detach();
 
@@ -923,6 +939,23 @@ impl StoreRoot {
             });
         })
         .detach();
+    }
+
+    /// Reviewed rows from a late-arriving channel (its appstream
+    /// synced after startup): drop the app ids an earlier reviewed
+    /// channel already rendered, then take the rest. Publisher twins
+    /// of the same id coexist by design; this only collapses the
+    /// reviewed side, same as the startup load.
+    fn merge_reviewed(&mut self, rows: Vec<StoreApp>, channel: RemoteChannel) {
+        let known: HashSet<String> = self
+            .apps
+            .iter()
+            .filter(|app| app.source == Source::Reviewed)
+            .map(|app| app.app_id.clone())
+            .collect();
+        self.apps
+            .extend(rows.into_iter().filter(|app| !known.contains(&app.app_id)));
+        self.channels.push(channel);
     }
 
     /// Replace the publisher-channel rows with a fresh read of the
@@ -8083,7 +8116,10 @@ fn channel_scope(channel: &RemoteChannel) -> orchard_flatpak::Scope {
 /// with a readable AppStream, flathub first. Enumeration is
 /// best-effort: with the CLI gone or failing, the client still
 /// serves flathub by name, exactly as before extra channels existed.
-fn load_reviewed() -> (Vec<StoreApp>, Vec<RemoteChannel>) {
+/// Remotes whose appstream never synced (a remote the user just
+/// added, never searched) come back as the third element: the caller
+/// refreshes those late and merges them in.
+fn load_reviewed() -> (Vec<StoreApp>, Vec<RemoteChannel>, Vec<RemoteChannel>) {
     let arch = orchard_core::host_ref_arch();
     let listings: Vec<orchard_flatpak::RemoteListing> = match orchard_flatpak::list_remotes().output()
     {
@@ -8104,17 +8140,17 @@ fn load_reviewed() -> (Vec<StoreApp>, Vec<RemoteChannel>) {
 
     let mut apps = Vec::new();
     let mut rendered = Vec::new();
+    let mut missing = Vec::new();
     for channel in channels {
         let Some(path) = orchard_core::appstream::appstream_paths(&channel.remote, &arch)
             .into_iter()
             .find(|path| path.exists())
         else {
-            // a remote whose appstream never synced is a logged skip,
-            // not an empty dead-end channel
             eprintln!(
-                "{} catalog: no appstream synced on this machine; skipping",
+                "{} catalog: no appstream synced yet; refreshing in the background",
                 channel.remote
             );
+            missing.push(channel);
             continue;
         };
         let icons_root = path
@@ -8140,7 +8176,44 @@ fn load_reviewed() -> (Vec<StoreApp>, Vec<RemoteChannel>) {
             Err(err) => eprintln!("{} catalog: {}: {err:#}", channel.remote, path.display()),
         }
     }
-    (dedupe_reviewed(apps), rendered)
+    missing.sort_by(|a, b| a.title.cmp(&b.title));
+    (dedupe_reviewed(apps), rendered, missing)
+}
+
+/// A late-arriving channel: fetch the AppStream metadata flatpak
+/// itself would fetch on its next update or search, then read it.
+/// None when the remote is dead or carries no catalog (churn is the
+/// norm for publisher remotes): it stays absent, the rest of the
+/// store unaffected.
+fn refresh_channel(channel: RemoteChannel) -> Option<(Vec<StoreApp>, RemoteChannel)> {
+    let scope = channel_scope(&channel);
+    let out = orchard_flatpak::update_appstream(scope, &channel.remote).output().ok()?;
+    if !out.status.success() {
+        eprintln!(
+            "{} catalog: appstream refresh failed: {}",
+            channel.remote,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+        return None;
+    }
+    let path = orchard_core::appstream::appstream_paths(&channel.remote, &orchard_core::host_ref_arch())
+        .into_iter()
+        .find(|path| path.exists())?;
+    let icons_root = path
+        .parent()
+        .map(|active| active.join("icons"))
+        .unwrap_or_default();
+    let rows = orchard_core::appstream::load(&path, &icons_root).ok()?;
+    eprintln!(
+        "{} catalog: {} apps after the appstream refresh",
+        channel.remote,
+        rows.len()
+    );
+    let apps = rows
+        .iter()
+        .map(|row| StoreApp::from_appstream(row, &channel.remote))
+        .collect();
+    Some((apps, channel))
 }
 
 /// The built-in channel: flathub, titled and scoped from the
