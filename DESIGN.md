@@ -15,7 +15,7 @@ client, not a gatekeeper.**
 | Artifacts | OCI images on developer-owned registries (ghcr, quay, self-hosted); `.flatpak` bundles as fallback |
 | Metadata protocol | Nostr events (Zapstore-style, NIP-82 draft); Orchard is a client/indexer, never the source of truth |
 | Product surface | Desktop client only (no server-side store) |
-| Flathub | Ingested client-side as a read-only "reviewed" channel; other enabled classic remotes ingest the same way as extra channels (no-enumerate remotes excepted) |
+| Flathub | Ingested client-side as a read-only "reviewed" channel, locked on: reviewed installs resolve their runtimes and dependencies from it, so the source cannot be hidden (load re-clamps a pre-lock off) |
 | Binaries | Developer-owned registries only; Orchard never stores or proxies bytes |
 | Media | Publisher-hosted URLs; no Orchard-run media service |
 | Sandbox permissions | Never published in events: flatpak bakes `finish-args` into the artifact, the client reads the real sandbox from it; no declared-vs-actual gap |
@@ -26,6 +26,8 @@ client, not a gatekeeper.**
 | Identity for publishing | NIP-46 remote signer; the client never sees a secret key, the signer's pubkey is the identity |
 | Reviews | One per identity per app (kind 30065, parameterized replaceable); editing is republishing, the composer pre-fills an existing review |
 | Confirmations | One confirm modal for every consequential action (install, update, remove, job cancel, settings clears); no two-press arming, nothing configurable |
+| Update checks | The launch check is unconditional (every session, whatever the setting says); the cadence only picks the repeats: Off, Hourly, Daily (default) |
+| Update affordance | No "Update available" badge: the Update button wears the amber itself, on rows and the app page; a publisher-key change is a banner on the page and a line in the confirm modal |
 | Language / UI | Rust end-to-end; GPUI `0.2` from crates.io |
 | Build | Podman container on the atomic host (see "Build environment") |
 | Trust grouping | Flathub listings group by the developer claim (navigation); Orchard listings group by publisher key only |

@@ -8,8 +8,9 @@ use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
 
-/// Channel visibility defaults to on; the update check defaults to
-/// once per launch (the behavior before settings existed).
+/// Channel visibility defaults to on (Flathub is locked on in the UI
+/// and re-clamped at load); the update cadence defaults to daily, with
+/// the launch check always running on top of it.
 impl Default for Settings {
     fn default() -> Self {
         Settings {
@@ -18,7 +19,7 @@ impl Default for Settings {
             default_channel: "all".into(),
             event_relays: Vec::new(),
             social_relays: Vec::new(),
-            update_checks: "launch".into(),
+            update_checks: "daily".into(),
             remote_images: true,
             sort: "updated".into(),
         }
@@ -28,7 +29,10 @@ impl Default for Settings {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
-    /// Show the Flathub (reviewed) channel in the catalog.
+    /// Show the Flathub (reviewed) channel in the catalog. Locked on:
+    /// the UI offers no switch and load re-clamps any stored false,
+    /// because reviewed installs resolve their runtimes and
+    /// dependencies from Flathub.
     pub flathub_source: bool,
     /// Show the Orchard (publisher) channel in the catalog.
     pub orchard_source: bool,
@@ -40,8 +44,9 @@ pub struct Settings {
     /// Social relay URLs (profiles, contact lists). Empty: the
     /// rendezvous set.
     pub social_relays: Vec<String>,
-    /// How often to scan installed apps for updates: `launch`,
-    /// `hourly`, `daily`, or `off`.
+    /// How often to re-scan installed apps for updates: `hourly`,
+    /// `daily`, or `off`. The launch check is not a cadence: it always
+    /// runs once at startup, whatever this says.
     pub update_checks: String,
     /// Fetch publisher-hosted images (icons, screenshots) from their
     /// URLs. Off: placeholders only, no contact with publisher hosts.
@@ -75,13 +80,27 @@ impl SettingsHandle {
 
     /// Load from `path`, falling back to defaults for a missing or
     /// unparseable file (a corrupt file must never gate the store).
+    /// Two values are clamped on the way in: the Flathub channel is
+    /// required (reviewed installs resolve their runtimes from it), so
+    /// a pre-lock file that turned it off must not hide it; and
+    /// `launch` is a retired update cadence (the launch check now runs
+    /// unconditionally, the cadence only picks the repeats), so a file
+    /// saved before the change maps to the new default rather than
+    /// pinning a removed option.
     pub fn load(path: PathBuf) -> Self {
-        let settings = std::fs::read(&path)
+        let mut settings = std::fs::read(&path)
             .ok()
             .and_then(|bytes| {
                 serde_json::from_slice::<Settings>(&bytes).ok()
             })
             .unwrap_or_default();
+        settings.flathub_source = true;
+        if !matches!(
+            settings.update_checks.as_str(),
+            "off" | "hourly" | "daily"
+        ) {
+            settings.update_checks = "daily".into();
+        }
         Self {
             inner: Arc::new(RwLock::new(settings)),
             path: Arc::new(path),
@@ -132,8 +151,25 @@ mod tests {
         let handle = SettingsHandle::load(std::env::temp_dir().join("orchard-settings-missing"));
         assert!(handle.get().flathub_source);
         assert_eq!(handle.get().default_channel, "all");
-        assert_eq!(handle.get().update_checks, "launch");
+        assert_eq!(handle.get().update_checks, "daily");
         assert!(handle.get().event_relays.is_empty());
+    }
+
+    #[test]
+    fn flathub_stays_locked_and_launch_maps_to_daily() {
+        // a pre-lock file: Flathub turned off, the retired launch
+        // cadence baked in by an older version's full-struct save
+        let path = std::env::temp_dir().join(format!("orchard-settings-lock-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(
+            &path,
+            r#"{"flathub_source": false, "orchard_source": true, "default_channel": "all", "event_relays": [], "social_relays": [], "update_checks": "launch", "remote_images": true, "sort": "updated"}"#,
+        )
+        .unwrap();
+        let reloaded = SettingsHandle::load(path.clone());
+        assert!(reloaded.get().flathub_source);
+        assert_eq!(reloaded.get().update_checks, "daily");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -142,16 +178,17 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let handle = SettingsHandle::load(path.clone());
         handle.update(|s| {
-            s.flathub_source = false;
+            s.orchard_source = false;
+            s.update_checks = "off".into();
             s.event_relays = vec!["ws://127.0.0.1:8008".into()];
         });
         let reloaded = SettingsHandle::load(path.clone());
-        assert!(!reloaded.get().flathub_source);
+        assert!(!reloaded.get().orchard_source);
+        assert_eq!(reloaded.get().update_checks, "off");
         assert_eq!(
             reloaded.get().event_relays,
             vec!["ws://127.0.0.1:8008".to_string()]
         );
-        assert!(reloaded.get().orchard_source);
         let _ = std::fs::remove_file(&path);
     }
 }

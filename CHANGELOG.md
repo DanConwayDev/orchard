@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- **Flathub is a required source.** Reviewed installs resolve their
+  runtimes and dependencies from Flathub, so the settings row no longer
+  offers a switch: it wears the same "required" badge as the pinned
+  relay, and a settings file saved before the lock (with the source
+  turned off) is re-clamped to on at load.
+- **Update checks: launch always, daily by default.** The startup
+  comparison is not a cadence anymore: it always runs once per launch,
+  whatever the setting says, so a user who never closes the app still
+  gets a check every session. The cadence picks the repeats (Off,
+  Hourly, Daily) and defaults to Daily; the "On launch" option is
+  retired, and a file saved with it maps to Daily at load. Users who
+  deliberately picked Off or Hourly keep their choice.
+- **The Update button carries the signal.** The amber "Update
+  available" badge is gone from the catalog rows and the app page: the
+  Update button itself now wears the badge's amber everywhere, so the
+  row reads one fact shorter. A publisher-key change is still named:
+  as the banner on the app page, and now in the confirm modal when the
+  update is launched from a row.
 - **The settings page scrolls to its end.** The scroll container's
   content child was a flex item in a column flex container, so when the
   page ran longer than the body the child was compressed to fit instead

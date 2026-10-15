@@ -619,9 +619,11 @@ impl StoreRoot {
 
         // The update scan: how often to re-compare installed apps
         // against their channels' newest versions. The launch check is
-        // the orchard loop above plus refresh_installed here; the
-        // cadence setting adds periodic repeats, read live from the
-        // settings (a cadence edit applies on the next 30s poll).
+        // unconditional (the orchard loop above plus refresh_installed
+        // here): a user who never closes the app still gets the
+        // startup comparison every session. The cadence setting only
+        // adds periodic repeats, read live from the settings (a
+        // cadence edit applies on the next 30s poll).
         let update_settings = settings.clone();
         cx.spawn(async move |this, cx| {
             let mut since_check: u32 = 0;
@@ -633,6 +635,7 @@ impl StoreRoot {
                 let due = match update_settings.get().update_checks.as_str() {
                     "hourly" => since_check >= 3600,
                     "daily" => since_check >= 86400,
+                    // off, or anything unrecognized
                     _ => false,
                 };
                 if !due {
@@ -1864,27 +1867,14 @@ impl StoreRoot {
         cx.notify();
     }
 
-    /// Show or hide a channel's source. Hiding the source of the
-    /// active channel filter resets the filter: the hidden channel no
-    /// longer appears in the dropdown, so an empty-looking list would
-    /// only confuse.
-    fn set_source_visible(&mut self, reviewed: bool, visible: bool, cx: &mut Context<Self>) {
-        self.edit_settings(
-            |settings| {
-                if reviewed {
-                    settings.flathub_source = visible;
-                } else {
-                    settings.orchard_source = visible;
-                }
-            },
-            cx,
-        );
-        let hidden = match &self.filter {
-            Filter::Reviewed => reviewed,
-            Filter::Publisher => !reviewed,
-            _ => false,
-        };
-        if hidden && !visible {
+    /// Show or hide the Orchard channel's source (Flathub is locked
+    /// on: reviewed installs resolve their runtimes from it). Hiding
+    /// the source of the active channel filter resets the filter: the
+    /// hidden channel no longer appears in the dropdown, so an
+    /// empty-looking list would only confuse.
+    fn set_orchard_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        self.edit_settings(|settings| settings.orchard_source = visible, cx);
+        if matches!(&self.filter, Filter::Publisher) && !visible {
             self.filter = Filter::All;
         }
     }
@@ -3908,35 +3898,14 @@ impl StoreRoot {
                             // remove is not on the card: a destructive
                             // action belongs on the app page, not
                             // beside the Open it can mis-arm
-                            // the newest release is signed by a key
-                            // other than the deployed artifact's: the
-                            // update arms amber and the badge says so
-                            let key_changed = self
-                                .installed_from(action_id.as_str())
-                                .is_some_and(|from| {
-                                    Some(from) != row_publisher.as_deref()
-                                });
                             div()
                                 .flex()
                                 .items_center()
                                 .gap_2()
-                                // no "Installed" badge: the actions
-                                // (Open, Remove) already say it, and
-                                // the Installed page says it again;
-                                // only something to do earns a badge
-                                .when(outdated, |slot| {
-                                    slot.child(if key_changed {
-                                        badge(
-                                            "Update from a new publisher key",
-                                            ui::risk_color(orchard_core::Risk::Medium),
-                                        )
-                                    } else {
-                                        badge(
-                                            "Update available",
-                                            ui::risk_color(orchard_core::Risk::Medium),
-                                        )
-                                    })
-                                })
+                                // no update badge: the amber Update
+                                // button carries the signal itself,
+                                // and a key change is named in the
+                                // confirm modal
                                 .child(ui::small_button(
                                     format!("row-open-{action_id}-{}", row_publisher.as_deref().unwrap_or("")),
                                     Some("icons/play.svg"),
@@ -3958,7 +3927,7 @@ impl StoreRoot {
                                             ),
                                             Some("icons/update.svg"),
                                             "Update",
-                                            if key_changed { Tone::Warn } else { Tone::Quiet },
+                                            Tone::Warn,
                                         )
                                         .on_click(cx.listener(
                                             move |this, _e: &ClickEvent, _w, cx| {
@@ -4243,8 +4212,8 @@ impl StoreRoot {
         };
 
         // the update's key differs from the deployed artifact's: the
-        // fact tones the update button amber and rides above the
-        // content as a banner, a fact not a verdict
+        // fact rides above the content as a banner, a fact not a
+        // verdict (the Update button is amber for every update)
         let update_changed = self
             .installed
             .get(&app_id)
@@ -4310,11 +4279,10 @@ impl StoreRoot {
                                     "btn-update",
                                     Some("icons/update.svg"),
                                     "Update",
-                                    if update_changed {
-                                        Tone::Warn
-                                    } else {
-                                        Tone::Quiet
-                                    },
+                                    // amber, like every Update button:
+                                    // the key-change fact lives in the
+                                    // banner above the content
+                                    Tone::Warn,
                                 )
                                 .on_click(cx.listener(move |this, _e: &ClickEvent, _w, cx| {
                                     this.confirm = Some(Confirm::Update {
@@ -6732,18 +6700,31 @@ impl StoreRoot {
                 "Install",
                 Tone::Accent,
             ),
-            Confirm::Update { .. } => (
-                format!("Update {}?", name),
-                version
+            Confirm::Update { app_id, publisher } => {
+                // the row badges are gone, so the modal is where a
+                // launch from the list still names a key change
+                let key_note = self
+                    .installed_from(app_id)
+                    .is_some_and(|from| Some(from) != publisher.as_deref())
+                    .then(|| "This update is signed by a new publisher key.".to_string());
+                let mut body = version
                     .clone()
                     .map(|v| format!("Version {v} will replace the installed build."))
                     .unwrap_or_else(|| {
                         "The catalog release will replace the installed build.".to_string()
-                    }),
-                "Cancel",
-                "Update",
-                Tone::Accent,
-            ),
+                    });
+                if let Some(note) = key_note {
+                    body.push(' ');
+                    body.push_str(&note);
+                }
+                (
+                    format!("Update {}?", name),
+                    body,
+                    "Cancel",
+                    "Update",
+                    Tone::Accent,
+                )
+            }
             Confirm::Remove { .. } => (
                 format!("Remove {}?", name),
                 "The app is uninstalled from this machine. Files it saved inside your home stay."
@@ -7588,15 +7569,8 @@ impl StoreRoot {
             .gap_1p5()
             .child(self.settings_row(
                 "Flathub channel",
-                "Reviewed, curated apps from flathub.org.",
-                div()
-                    .id("settings-source-flathub")
-                    .cursor_pointer()
-                    .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
-                        let visible = !this.settings.get().flathub_source;
-                        this.set_source_visible(true, visible, cx);
-                    }))
-                    .child(ui::toggle_pill(settings.flathub_source)),
+                "Reviewed, curated apps from flathub.org. Required: reviewed installs resolve their runtimes and dependencies from it.",
+                ui::badge("required", ui::accent()),
             ))
             .child(self.settings_row(
                 "Orchard channel",
@@ -7606,7 +7580,7 @@ impl StoreRoot {
                     .cursor_pointer()
                     .on_click(cx.listener(|this, _e: &ClickEvent, _w, cx| {
                         let visible = !this.settings.get().orchard_source;
-                        this.set_source_visible(false, visible, cx);
+                        this.set_orchard_visible(visible, cx);
                     }))
                     .child(ui::toggle_pill(settings.orchard_source)),
             ))
@@ -7647,15 +7621,10 @@ impl StoreRoot {
 
         let updates_body = div().flex().flex_col().gap_1p5().child(self.settings_row(
             "Check for updates",
-            "How often installed apps are compared with their channel's newest version.",
+            "How often installed apps are compared with their channel's newest version. The check also always runs once per launch.",
             self.settings_segmented(
                 "update-checks",
-                &[
-                    ("off", "Off"),
-                    ("launch", "On launch"),
-                    ("hourly", "Hourly"),
-                    ("daily", "Daily"),
-                ],
+                &[("off", "Off"), ("hourly", "Hourly"), ("daily", "Daily")],
                 &settings.update_checks,
                 |this, name, cx| {
                     this.edit_settings(|s| s.update_checks = name.to_string(), cx);
