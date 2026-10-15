@@ -50,6 +50,16 @@
   the newest cached artifact per app (each is roughly a hundred
   megabytes and every older one was there for a retry that never
   comes); a finished remove drops all of them.
+- **The relay sync splits profiles from the catalog.** One combined
+  subscription made first contact with the public relays a treadmill:
+  kind 0 is the whole of Nostr, so the profile firehose streamed
+  forever, drowned the catalog kinds behind it, and its EOSE never
+  came (the 2026-10-15 Armada miss: the events were on the relay, the
+  sync never reached them). The catalog kinds now ride their own
+  subscription, whose corpus is small enough to finish, and profiles
+  ride a capped one (the newest few hundred, plenty for publisher
+  names and icons). The backfill anchor waits for both streams'
+  EOSE.
 
 ## v0.1.4 (2026-10-15)
 

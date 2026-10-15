@@ -22,7 +22,7 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{bail, Context as _, Result};
+use anyhow::Result;
 use nostr::prelude::*;
 use orchard_core::{CatalogApp, CatalogFile, Publisher};
 
@@ -1586,7 +1586,7 @@ mod tests {
                 &std::sync::Arc::new(std::sync::Mutex::new(feed)),
             )
             .unwrap();
-        assert!(!absorbed && !eose);
+        assert!(!absorbed && eose.is_none());
     }
 
     #[test]

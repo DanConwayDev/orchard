@@ -83,14 +83,24 @@ pub fn social_relay_urls(env_value: Option<&str>) -> Vec<String> {
 
 /// NIP-82 kinds Orchard reads: profiles, listings, releases, assets,
 /// reviews, migrations.
-const SUB_KINDS: [u16; 6] = [
-    crate::KIND_PROFILE as u16,
+/// The kinds that build the catalog: listings, releases, assets,
+/// reviews, migrations. Each is one publisher community's output, a
+/// small corpus even on the public relays, so the pull stays
+/// unbounded and reaches its EOSE.
+const CATALOG_KINDS: [u16; 5] = [
     crate::KIND_APP as u16,
     crate::KIND_RELEASE as u16,
     crate::KIND_ASSET as u16,
     crate::KIND_REVIEW as u16,
     crate::KIND_MIGRATION as u16,
 ];
+
+/// Profiles only decorate the catalog (publisher names and icons), but
+/// on the public relays kind 0 is the whole of Nostr: unbounded, it
+/// streams forever and drowns the catalog kinds behind it (the 2026
+/// 10-15 Armada miss). Capped, the query terminates with an EOSE and
+/// the newest profiles are plenty for the cosmetics.
+const PROFILE_LIMIT: usize = 200;
 
 const BACKOFF: Duration = Duration::from_secs(5);
 
@@ -100,19 +110,27 @@ const BACKOFF: Duration = Duration::from_secs(5);
 /// clear's full refill, not this filter.
 const SINCE_OVERLAP: u64 = 60 * 60;
 
-/// The subscription text for one session. Before the first full
-/// backfill it asks for everything; after, only for events newer than
-/// the feed's newest (minus overlap), so a reconnect costs a delta
-/// instead of re-downloading and re-verifying the relay's whole
-/// history.
-fn subscription(feed: &Feed, backfilled: bool) -> String {
-    let mut filter = serde_json::json!({ "kinds": SUB_KINDS });
+/// The subscription texts for one session, one REQ per stream: the
+/// catalog kinds, and the capped profile pull. Before the first full
+/// backfill the catalog stream asks for everything; after, only for
+/// events newer than the feed's newest (minus overlap), so a
+/// reconnect costs a delta instead of re-downloading and re-verifying
+/// the relay's whole history.
+fn subscriptions(feed: &Feed, backfilled: bool) -> Vec<String> {
+    let mut catalog = serde_json::json!({ "kinds": CATALOG_KINDS });
     if backfilled
         && let Some(newest) = feed.newest_created_at()
     {
-        filter["since"] = serde_json::json!(newest.saturating_sub(SINCE_OVERLAP));
+        catalog["since"] = serde_json::json!(newest.saturating_sub(SINCE_OVERLAP));
     }
-    serde_json::json!(["REQ", "orchard", filter]).to_string()
+    let profiles = serde_json::json!({
+        "kinds": [crate::KIND_PROFILE as u16],
+        "limit": PROFILE_LIMIT,
+    });
+    vec![
+        serde_json::json!(["REQ", "orchard", catalog]).to_string(),
+        serde_json::json!(["REQ", "orchard-profiles", profiles]).to_string(),
+    ]
 }
 
 /// How long one relay read may block before the loop wakes to check
@@ -136,7 +154,7 @@ pub fn run_forever(
     let mut backfilled = false;
     while !stop.load(std::sync::atomic::Ordering::Relaxed) {
         // rebuilt per session: the anchor moves as the feed grows
-        let sub = subscription(
+        let subs = subscriptions(
             &feed
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
@@ -146,7 +164,7 @@ pub fn run_forever(
         // background thread's panic is invisible in the UI, so it
         // costs a log line and the loop continues instead
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            session(url, &sub, &feed, &on_change, &stop)
+            session(url, &subs, &feed, &on_change, &stop)
         }));
         match outcome {
             Ok(Ok(saw_eose)) => {
@@ -178,18 +196,26 @@ fn panic_message(panic: &Box<dyn std::any::Any + Send>) -> String {
 
 fn session(
     url: &str,
-    sub: &str,
+    subs: &[String],
     feed: &Arc<Mutex<Feed>>,
     on_change: &Arc<dyn Fn() + Send + Sync>,
     stop: &Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<bool> {
     let (mut socket, _response) = tungstenite::connect(url)?;
     crate::connect::set_read_timeout(&mut socket, READ_WAKE);
-    socket.send(Message::text(sub))?;
-    // whether this session saw the relay's end-of-stored-events: the
-    // caller's next subscription filters on since only once this has
-    // happened once
-    let mut saw_eose = false;
+    for sub in subs {
+        socket.send(Message::text(sub))?;
+    }
+    // whether this session saw the relay's end-of-stored-events for
+    // every subscription: the caller's next subscription filters on
+    // since only once this has happened once. Each stream EOSEs
+    // separately; the capped profile stream lands its EOSE long
+    // before the catalog corpus finishes.
+    let mut pending: std::collections::HashSet<String> = subs
+        .iter()
+        .map(|sub| sub_id(sub).to_string())
+        .collect();
+    let mut saw_eose = pending.is_empty();
     loop {
         let message = match socket.read() {
             Ok(message) => message,
@@ -212,7 +238,12 @@ fn session(
         match message {
             Message::Text(text) => {
                 let (absorbed, eose) = handle_frame(text.as_str(), feed)?;
-                saw_eose |= eose;
+                if let Some(id) = eose {
+                    pending.remove(&id);
+                    if pending.is_empty() {
+                        saw_eose = true;
+                    }
+                }
                 if absorbed {
                     on_change();
                 }
@@ -226,7 +257,9 @@ fn session(
 
 /// Process one text frame. Returns whether an event was absorbed and
 /// whether the frame was the relay's end-of-stored-events marker.
-pub(crate) fn handle_frame(text: &str, feed: &Arc<Mutex<Feed>>) -> Result<(bool, bool)> {
+/// Process one text frame. Returns whether the frame changed the feed,
+/// and on an EOSE the sub id that finished.
+pub(crate) fn handle_frame(text: &str, feed: &Arc<Mutex<Feed>>) -> Result<(bool, Option<String>)> {
     let frame: serde_json::Value = serde_json::from_str(text)?;
     match frame.as_array().and_then(|rows| rows.first()).and_then(|v| v.as_str()) {
         // ["EVENT", <sub-id>, <event>]
@@ -238,7 +271,7 @@ pub(crate) fn handle_frame(text: &str, feed: &Arc<Mutex<Feed>>) -> Result<(bool,
                 // keep the session, never wedge the sync on content
                 Err(err) => {
                     eprintln!("relay event unparseable, skipping: {err}");
-                    return Ok((false, false));
+                    return Ok((false, None));
                 }
             };
             // locks recover on poison: the feed is a dedup cache, so
@@ -249,22 +282,35 @@ pub(crate) fn handle_frame(text: &str, feed: &Arc<Mutex<Feed>>) -> Result<(bool,
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             match feed.absorb(event) {
-                Ok(absorbed) => Ok((absorbed, false)),
+                Ok(absorbed) => Ok((absorbed, None)),
                 // a rejected event (a tampered signature, a relay
                 // lying) skips and the session lives: one hostile
                 // event must not freeze the catalog with a retry loop
                 Err(err) => {
                     eprintln!("relay event rejected, skipping: {err:#}");
-                    Ok((false, false))
+                    Ok((false, None))
                 }
             }
         }
-        // ["EOSE", <sub-id>]: the stored history is fully delivered;
-        // the subscription stays open, keep reading
-        Some("EOSE") => Ok((false, true)),
+        // ["EOSE", <sub-id>]: the stored history for that stream is
+        // fully delivered; the subscription stays open, keep reading
+        Some("EOSE") => Ok((
+            false,
+            Some(frame.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string()),
+        )),
         // NOTICE/OK/CLOSED: nothing to act on for a read-only sub
-        _ => Ok((false, false)),
+        _ => Ok((false, None)),
     }
+}
+
+/// The sub id of our own REQ frame text.
+fn sub_id(sub: &str) -> String {
+    let frame: serde_json::Value = serde_json::from_str(sub).expect("our own REQ frame parses");
+    frame
+        .get(1)
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 /// Publish signed events to one relay and wait for every OK. A rejection
@@ -516,7 +562,26 @@ mod tests {
     #[test]
     fn subscription_asks_for_everything_before_backfill() {
         let feed = Feed::new();
-        assert!(!subscription(&feed, false).contains("since"));
+        let subs = subscriptions(&feed, false);
+        // the catalog stream first, the capped profile stream second
+        assert!(!subs[0].contains("since"));
+        assert!(!subs[1].contains("since"));
+    }
+
+    /// The catalog stream never asks for profiles, and the profile
+    /// stream is capped: on the public relays kind 0 is unbounded and
+    /// would drown the catalog kinds behind it.
+    #[test]
+    fn subscription_splits_catalog_from_capped_profiles() {
+        let feed = Feed::new();
+        let subs = subscriptions(&feed, false);
+        let catalog: serde_json::Value = serde_json::from_str(&subs[0]).unwrap();
+        let profiles: serde_json::Value = serde_json::from_str(&subs[1]).unwrap();
+        let kinds = catalog[2]["kinds"].as_array().unwrap();
+        assert!(!kinds.iter().any(|k| k.as_u64() == Some(0)));
+        assert_eq!(profiles[1].as_str(), Some("orchard-profiles"));
+        assert_eq!(profiles[2]["limit"].as_u64(), Some(PROFILE_LIMIT as u64));
+        assert_eq!(profiles[2]["kinds"][0].as_u64(), Some(0));
     }
 
     /// An empty feed asks for everything even once backfilled: there
@@ -524,7 +589,8 @@ mod tests {
     #[test]
     fn subscription_backfilled_empty_feed_omits_since() {
         let feed = Feed::new();
-        assert!(!subscription(&feed, true).contains("since"));
+        let subs = subscriptions(&feed, true);
+        assert!(!subs[0].contains("since"));
     }
 
     /// After a backfill the anchor is the feed's newest event minus
@@ -543,13 +609,13 @@ mod tests {
         let newest = feed.newest_created_at().unwrap();
 
         let frame: serde_json::Value =
-            serde_json::from_str(&subscription(&feed, true)).unwrap();
+            serde_json::from_str(&subscriptions(&feed, true)[0]).unwrap();
         assert_eq!(
             frame[2]["since"].as_u64(),
             Some(newest.saturating_sub(SINCE_OVERLAP))
         );
         // the same feed, pre-backfill, still carries no filter
-        assert!(!subscription(&feed, false).contains("since"));
+        assert!(!subscriptions(&feed, false)[0].contains("since"));
     }
 
     /// The contact list's follows are its p tags, in tag order.

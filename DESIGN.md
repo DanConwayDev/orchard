@@ -140,6 +140,11 @@ Zapstore publishers readable on Orchard day one:
 - **Reviews are replaceable per (pubkey, app id):** one identity holds one review per
   app, editing is republishing, a malformed rating is a protocol-level error.
 - Media are plain URLs the publisher hosts; Orchard runs no media service.
+- Reading: a reader subscribes the catalog kinds (32267, 30063, 3063, 30065, 30066)
+  unbounded and profiles (kind 0) in a separate capped REQ (the newest few hundred).
+  On the public relays kind 0 is the whole of Nostr; combined, the profile firehose
+  never reaches EOSE and drowns the catalog kinds behind it, so no row ever projects
+  (the 2026-10-15 Armada miss).
 - Rules: relays are dumb mirrors, the client reads several and merges. Curation is
   published as event lists users opt into. The relay list is itself a published event
   plus a hardcoded fallback. Orchard operates a kind-restricted nostr-rs-relay
