@@ -22,6 +22,7 @@ fn main() {
 struct Args {
     manifest_path: PathBuf,
     upload_only: bool,
+    legacy_oci: bool,
     assets: Vec<PathBuf>,
     out: Option<PathBuf>,
     arch: Option<String>,
@@ -46,6 +47,7 @@ fn parse_args() -> Result<Args> {
         };
         match flag.as_str() {
             "--upload-only" => args.upload_only = true,
+            "--legacy-oci" => args.legacy_oci = true,
             "--asset" => args.assets.push(next()?.into()),
             "--out" => args.out = Some(next()?.into()),
             "--arch" => args.arch = Some(next()?),
@@ -191,6 +193,12 @@ fn run() -> Result<()> {
     if args.upload_only {
         return Ok(());
     }
+    // Validate transition locations before loading keys or publishing anything.
+    let legacy_locations = assets.iter().map(|asset| {
+        if args.legacy_oci {
+            Ok(Some(push::legacy_location(asset.url.as_deref().context("manifest needs a URL")?, &asset.sha256)?))
+        } else { Ok(None) }
+    }).collect::<Result<Vec<_>>>()?;
     // Upload-only returns before loading a signing identity.
     let keys = match args.nsec.or_else(|| std::env::var("ORCHARD_NSEC").ok()) {
         Some(raw) => Keys::parse(raw.trim())?,
@@ -207,17 +215,17 @@ fn run() -> Result<()> {
         },
     };
     let mut signed = Vec::new();
-    for asset in &assets {
+    for (asset, legacy) in assets.iter().zip(&legacy_locations) {
         let components = std::iter::once((
             &asset.sha256, &asset.mime, asset.size, &asset.filename, &asset.url,
         )).chain(asset.components.iter().map(|c| (&c.sha256, &c.mime, c.size, &c.filename, &c.url)));
         for (hash, mime, size, filename, url) in components {
-            signed.push(events::sign_asset(&keys, &Asset {
+            signed.push(events::sign_asset_with_legacy_location(&keys, &Asset {
                 app_id: app_id.clone(), version: version.clone(),
                 platform: asset.platform.clone(), digest: hash.clone(),
                 url: url.clone().context("component needs a public URL")?,
                 size, filename: filename.clone(), mime: mime.clone(),
-            })?);
+            }, if mime == orchard_core::oci_asset::MIME { legacy.as_deref() } else { None })?);
         }
     }
     signed.push(events::sign_release(

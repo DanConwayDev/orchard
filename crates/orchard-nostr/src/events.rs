@@ -98,6 +98,22 @@ pub fn sign_listing(keys: &Keys, listing: &Listing) -> Result<Event> {
 }
 
 pub fn sign_asset(keys: &Keys, asset: &Asset) -> Result<Event> {
+    sign_asset_with_legacy_location(keys, asset, None)
+}
+
+/// Add a registry location understood by Orchard v0.2.0 to a manifest asset.
+/// Both locations must identify the same manifest digest.
+pub fn sign_asset_with_legacy_location(keys: &Keys, asset: &Asset, legacy: Option<&str>) -> Result<Event> {
+    if let Some(location) = legacy {
+        if asset.mime != orchard_core::oci_asset::MIME {
+            anyhow::bail!("only manifest assets can carry a legacy OCI location");
+        }
+        match orchard_core::oci::Location::parse(location)? {
+            orchard_core::oci::Location::Registry { digest: Some(digest), .. }
+                if orchard_core::oci_asset::hash_hex(&digest)? == asset.digest => {},
+            _ => anyhow::bail!("legacy OCI location must pin the same manifest digest"),
+        }
+    }
     if asset.digest.len() != 64 { anyhow::bail!("asset hash must be bare SHA-256 hex"); }
     orchard_core::oci_asset::hash_hex(&asset.digest)?;
     if !(asset.url.starts_with("https://") || asset.url.starts_with("http://")) {
@@ -113,6 +129,7 @@ pub fn sign_asset(keys: &Keys, asset: &Asset) -> Result<Event> {
         .tag(tag("url", &asset.url))
         .tag(tag("size", &asset.size.to_string()))
         .tag(tag("filename", &asset.filename))
+        .tag_maybe(legacy.map(|location| tag("oci", location)))
         .finalize(keys)?)
 }
 
@@ -161,6 +178,28 @@ pub fn sign_review(keys: &Keys, review: &Review) -> Result<Event> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transition_tags_only_name_the_same_manifest() {
+        let keys = Keys::generate();
+        let mut asset = Asset {
+            app_id: "com.example.Transition".into(), version: "1".into(),
+            platform: "linux-x86_64".into(), digest: "a".repeat(64),
+            url: format!("https://ghcr.io/v2/example/app/manifests/sha256:{}", "a".repeat(64)),
+            size: 42, filename: "app.manifest.json".into(), mime: orchard_core::oci_asset::MIME.into(),
+        };
+        let legacy = format!("docker://ghcr.io/example/app@sha256:{}", asset.digest);
+        let event = sign_asset_with_legacy_location(&keys, &asset, Some(&legacy)).unwrap();
+        let parts = crate::Parts::parse(&event).unwrap();
+        assert_eq!(parts.tag("oci").as_deref(), Some(legacy.as_str()));
+        assert_eq!(parts.tag("url").as_deref(), Some(asset.url.as_str()));
+        assert_eq!(parts.tag("x").as_deref(), Some(asset.digest.as_str()));
+        assert!(crate::Parts::parse(&sign_asset(&keys, &asset).unwrap()).unwrap().tag("oci").is_none());
+        assert!(sign_asset_with_legacy_location(&keys, &asset,
+            Some(&format!("docker://ghcr.io/example/app@sha256:{}", "b".repeat(64)))).is_err());
+        asset.mime = "application/vnd.oci.image.config.v1+json".into();
+        assert!(sign_asset_with_legacy_location(&keys, &asset, Some(&legacy)).is_err());
+    }
 
     /// The round-trip rule: a builder's event must absorb on the read
     /// side and project the same fields back.
