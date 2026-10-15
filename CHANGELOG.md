@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.1.3 (2026-10-14)
 
 - **Other enabled flatpak remotes ingest as channels, not just Flathub** (issue #3).
   The catalog rendered exactly two sources, Flathub's local AppStream and the Orchard
@@ -111,7 +111,7 @@
   said Fedora at the version the release targets, and the pin had drifted. Now 43.
   The pin bumps with the runtime the publish manifest targets.
 
-## v0.1.0 (2026-10-12)
+## v0.1.0 (2026-10-11)
 
 - **A permissionless Flatpak store, first public release.** The client is a GPUI
   desktop app over one unified catalog: Flathub ingested client-side as a read-only
