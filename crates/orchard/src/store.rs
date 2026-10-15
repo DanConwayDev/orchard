@@ -1212,13 +1212,30 @@ impl StoreRoot {
         self.run_digest_check(key.to_string(), location, pinned, app_id.to_string(), publisher, cx);
     }
 
+    /// The bundle verify plus the header merge its callers would
+    /// otherwise repeat: metadata and the deploy ref ride the bundle's
+    /// own bytes, the same ones the pin check just hashed.
+    fn verify_bundle_report(
+        url: String,
+        pinned: Option<String>,
+        dest: std::path::PathBuf,
+    ) -> anyhow::Result<oci::VerifyReport> {
+        let mut report = oci::verify_bundle(&url, pinned.as_deref(), &dest)?;
+        if report.metadata.is_none() {
+            if let Ok(info) = orchard_flatpak::bundle_metadata(&dest) {
+                report.flatpak_ref = Some(info.flatpak_ref);
+                report.metadata = Some(info.metadata);
+            }
+        }
+        Ok(report)
+    }
+
     /// The one digest check: fetch the registry manifest, compare the
     /// pin, read the sandbox labels. Ok records the verdict in memory
     /// and, with a location and pin present, on disk (a checked pin is
     /// a fact that cannot rot, so the cache never expires); Err records
     /// the failure for the page.
-    fn run_digest_check(
-        &mut self,
+    fn run_digest_check(        &mut self,
         key: String,
         location_text: Option<String>,
         pinned: Option<String>,
@@ -1243,10 +1260,38 @@ impl StoreRoot {
             .as_deref()
             .map(|pin| digest_cache_key(location_text.as_deref().unwrap_or(""), pin));
         cx.spawn(async move |this, cx| {
-            let report = cx
-                .background_executor()
-                .spawn(async move { oci::verify(&location, pinned.as_deref()) })
-                .await;
+            // A bundle's pin check hashes its bytes: with the artifact
+            // cached that is cheap and honest; without, the check
+            // waits for the install, which verifies the pin before
+            // anything deploys anyway. A hundred megabytes fetched to
+            // decorate a page is not a check, it is the install worn
+            // twice, so an uncached bundle records no verdict and no
+            // error and the page keeps its neutral note.
+            let bundle = match (&location, pinned.as_deref()) {
+                (oci::Location::Https { url }, Some(pin)) => Some((
+                    url.clone(),
+                    crate::cache::artifact_file(&app_id, pin),
+                )),
+                _ => None,
+            };
+            let report = match bundle {
+                Some((url, file)) if file.is_file() => cx
+                    .background_executor()
+                    .spawn(async move {
+                        Self::verify_bundle_report(url, pinned.clone(), file)
+                    })
+                    .await,
+                Some(_) => {
+                    let _ = this.update(cx, |this, _cx| {
+                        this.publisher_fetching.remove(&key);
+                    });
+                    return;
+                }
+                None => cx
+                    .background_executor()
+                    .spawn(async move { oci::verify(&location, pinned.as_deref()) })
+                    .await,
+            };
             let _ = this.update(cx, |this, cx| {
                 this.publisher_fetching.remove(&key);
                 match report {
@@ -2281,35 +2326,22 @@ impl StoreRoot {
                 let app_id = app.app_id.clone();
                 cx.background_executor()
                     .spawn(async move {
-                        let report =
-                            match (&location, pinned.as_deref()) {
-                                (oci::Location::Https { url }, Some(pin)) => {
-                                    let file = crate::cache::artifact_file(&app_id, pin);
-                                    oci::verify_bundle(url, Some(pin), &file)
-                                }
-                                (oci::Location::Https { url: _ }, None) => {
-                                    return Err(anyhow::anyhow!(
-                                        "https artifact for {app_id} has no pinned digest: the event must carry the sha256"
-                                    ))
-                                }
-                                _ => {
-                                    return Err(anyhow::anyhow!(
-                                        "bundle verify reached a non-bundle location"
-                                    ))
-                                }
-                            };
-                        let mut report = report?;
-                        // the bundle header carries the metadata ini
-                        // (and the deploy ref); it feeds the
-                        // permissions viewer and the runtime pre-flight
-                        if report.metadata.is_none() {
-                            let file = crate::cache::artifact_file(&app_id, &report.digest);
-                            if let Ok(info) = orchard_flatpak::bundle_metadata(&file) {
-                                report.flatpak_ref = Some(info.flatpak_ref);
-                                report.metadata = Some(info.metadata);
+                        match (&location, pinned.as_deref()) {
+                            (oci::Location::Https { url }, Some(pin)) => {
+                                let file = crate::cache::artifact_file(&app_id, pin);
+                                Self::verify_bundle_report(
+                                    url.clone(),
+                                    Some(pin.to_string()),
+                                    file,
+                                )
                             }
+                            (oci::Location::Https { .. }, None) => Err(anyhow::anyhow!(
+                                "https artifact for {app_id} has no pinned digest: the event must carry the sha256"
+                            )),
+                            _ => Err(anyhow::anyhow!(
+                                "bundle verify reached a non-bundle location"
+                            )),
                         }
-                        Ok::<_, anyhow::Error>(report)
                     })
                     .await
             } else {
