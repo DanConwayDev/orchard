@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **The settings page scrolls to its end.** The scroll container's
+  content child was a flex item in a column flex container, so when the
+  page ran longer than the body the child was compressed to fit instead
+  of overflowing: gpui measured zero scrollable range, nothing scrolled,
+  and the tail ("Clear cached events") painted under the status bar.
+  The container now nests the way the app page does: a flex column
+  wrapper reserves the body, the scroll div lays its content out at
+  natural height, and a bottom cushion keeps the last row clear of the
+  footer.
+- **Switching channels leaves the app page.** The channel dropdown set
+  the filter behind whatever covered the list: the detail page (or a
+  collection page, or settings) stayed on screen until "All apps" was
+  pressed. A channel click now closes those, handing the list back
+  clean the way the back button does.
+
 - **Publisher installs make way for the runtime they need.** Flatpak's
   `oci:` install path does not resolve runtimes from remotes the way a
   classic install does: it accepts only what the installing scope already

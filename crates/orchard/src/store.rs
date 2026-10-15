@@ -7080,6 +7080,17 @@ impl StoreRoot {
                             // a pending install confirm does not
                             // survive a channel switch
                             this.confirm = None;
+                            // the switch navigates: whatever covered
+                            // the list gives way. A mouse close hands
+                            // the list back clean, like the back button.
+                            this.collection_view = None;
+                            if this.settings_open {
+                                this.close_settings(cx);
+                            }
+                            if this.page_open {
+                                this.selected = None;
+                                this.close_page(cx);
+                            }
                             cx.notify();
                         }))
                         .child(label.clone())
@@ -7679,18 +7690,26 @@ impl StoreRoot {
         );
 
         div()
-            .id("settings-scroll")
             .flex_1()
             .min_h_0()
             .flex()
             .flex_col()
-            .overflow_y_scroll()
-            .track_scroll(&self.settings_scroll)
             .child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .gap_4()
+                    .id("settings-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.settings_scroll)
+                    // a cushion below the last section, as on the
+                    // app page: a scroll end flush on the viewport
+                    // edge reads as clipped
+                    .child(
+                        div().pb_5().child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_4()
                     // one definite width for every section: the
                     // content stretches to it, nothing shrink-wraps
                     // wider than another
@@ -7798,6 +7817,8 @@ impl StoreRoot {
                             ))
                             .into_any_element(),
                     )),
+                        ),
+                    ),
             )
             .into_any_element()
     }
