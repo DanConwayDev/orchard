@@ -68,6 +68,21 @@
   backfill or lives a minute resets the stretch: a relay that resets
   once an hour retries in seconds; one that is down is retried every
   few minutes, not hammered and not spamming the log.
+- **Bundle pages stop failing their digest check.** The app page's
+  digest check ran the registry verifier on every artifact, and a
+  https bundle is not a registry artifact (its pin rides the bytes
+  themselves), so a Zapstore app's page claimed the artifact did not
+  pass its digest check when nothing had failed. Bundles verify
+  against their cached file when one exists; before an install, the
+  page shows its neutral sandbox note and the install's verify does
+  the checking.
+- **The sync path stops paying for nothing.** Re-delivered events
+  (every reconnect re-pulls the overlap window) are recognized by
+  their id and skip re-verification and re-storage; the event cache
+  serializes once per burst instead of once per three seconds while
+  a backfill streams; a cached bundle hashes through a stream reader
+  instead of landing in RAM; and the client's loopback reads share
+  one connection pool.
 
 ## v0.1.4 (2026-10-15)
 

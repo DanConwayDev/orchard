@@ -210,7 +210,10 @@ outgrew the box.
   30 second timeout, so publishers get an error instead of a hang, and
   the diagnosis is `podman logs orchard-relay | grep panicked` followed
   by a restart. A periodic health check that round-trips a small event
-  through the public endpoint is the cheap watchtower.
+  through the public endpoint is the cheap watchtower. On hosts whose
+  CPU trips the panic (warped TSC cores, metrics-rs/quanta#61),
+  `containers/orchard-relay.containerfile` builds 0.10.0 with quanta's
+  own fix applied; the dev relay runs it.
 - **Backup the SQLite files** (`nostr.db` plus WAL) like any other
   stateful service; the events are the discovery layer.
 - **The dev relay** (`orchard-relay` podman container,

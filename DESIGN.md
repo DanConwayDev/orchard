@@ -104,7 +104,10 @@ distribution infrastructure stays at zero central servers.
   The bundle header carries the deploy ref and the metadata ini, so the runtime
   pre-flight and the permissions viewer read the same bytes they get from an image
   label. Install is `flatpak install --user --bundle`; flatpak resolves missing
-  runtimes from the remotes itself, and bundle installs update in place.
+  runtimes from the remotes itself, and bundle installs update in place. The app
+  page's digest check never fetches an artifact to decorate the page: a bundle
+  verifies against its cached file when one exists, and otherwise the install's
+  verify is the first and only download.
 - **Bootstrap:** `curl` the release's per-arch oci-archive and
   `flatpak install --user oci-archive:` ; every later update flows through the catalog.
 - **Runtime convention:** apps default to runtimes hosted on the flathub remote, so
@@ -263,7 +266,7 @@ sandbox; bump the pin with the runtime the publish manifest targets, and wipe
 | M4 | Permissions viewer (built, reads the real sandbox from the artifact); `orchard://` scheme handler | viewer done; handler not built |
 | M5 | Publish CLI: manifest → build → push → sign → events, proven live against a TLS registry | done |
 | M6 | Reviews, review trust, circle + two-hop graph, self-distribution (Orchard publishes itself through the ordinary path), rendezvous topology | code complete 2026-10-11 |
-| M7 | The public loop: tags ship through CI to ghcr, install and update through the GUI | v0.1.0 through v0.1.3 shipped |
+| M7 | The public loop: tags ship through CI to ghcr, install and update through the GUI | v0.1.0 through v0.1.4 shipped |
 
 **M7 open items:**
 
