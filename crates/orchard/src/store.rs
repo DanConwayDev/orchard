@@ -7670,23 +7670,26 @@ impl StoreRoot {
                     .min_h_0()
                     .overflow_y_scroll()
                     .track_scroll(&self.settings_scroll)
-                    // a cushion below the last section, as on the
-                    // app page: a scroll end flush on the viewport
-                    // edge reads as clipped
+                    // the cushion wrapper is the app page's exact
+                    // pattern: a flex row that centers the content and
+                    // gives w_full a definite parent, so every section
+                    // stretches to the same width (a block wrapper
+                    // shrink-wraps the sections instead); the pb_5 is
+                    // the scroll-end cushion
                     .child(
-                        div().pb_5().child(
+                        div().flex().justify_center().pb_5().child(
                             div()
                                 .flex()
                                 .flex_col()
                                 .gap_4()
-                    // one definite width for every section: the
-                    // content stretches to it, nothing shrink-wraps
-                    // wider than another
-                    .w_full()
-                    .max_w(px(640.))
-                    .mx_auto()
-                    .py_4()
-                    .px_4()
+                                // one definite width for every section:
+                                // the content stretches to it, nothing
+                                // shrink-wraps wider than another
+                                .w_full()
+                                .min_w_0()
+                                .max_w(px(640.))
+                                .py_4()
+                                .px_4()
                     // the page header: title plus the way out, since
                     // the keyboard is the primary navigation here
                     .child(
