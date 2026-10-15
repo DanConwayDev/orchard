@@ -66,12 +66,18 @@ Revisit when gpui ships a tree without xattr 0.2.x.
 ## Local services
 
 The dev relay (`orchard-relay`, podman, `ws://127.0.0.1:8008`) runs the
-kind-restricted operator config from `relay/config.toml` with dev
-values: foreign kinds are rejected at admission, and `limit_scrapers`
-must stay false or the client's kind-based subscriptions get refused.
-The config was applied with `podman cp` plus restart and lives in the
-container layer, as does its database: both survive `podman restart`,
-neither survives `podman rm`.
+kind-restricted operator config from `relay/config.toml`: foreign kinds
+are rejected at admission, and `limit_scrapers` must stay false or the
+client's kind-based subscriptions get refused. The image is built
+locally from `containers/orchard-relay.containerfile` (upstream
+nostr-rs-relay 0.10.0 with quanta's calibration panic patched out:
+upstream pins quanta 0.9.3 via prometheus, and this host's warped TSC
+core panics it, which took down the tokio worker answering EVENT
+writes, so reads worked and writes hung; see the 2026-10-11 incident).
+The config bind-mounts from the repo file, so `relay/config.toml` is
+the source of truth and a restart applies its edits. The database
+lives in the container layer: it survives `podman restart`, not
+`podman rm`.
 
 ## Docs
 
