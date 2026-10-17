@@ -2520,7 +2520,14 @@ impl StoreRoot {
                 // verify failed: the update below reports it and never
                 // reaches an install
                 (Err(_), _) => String::new(),
-                (Ok(_), oci::Location::Registry { .. } | oci::Location::ManifestUrl(_)) => unreachable!(),
+                (Ok(_), oci::Location::Registry { .. } | oci::Location::ManifestUrl(_)) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.jobs.remove(&app.app_id);
+                        this.fail(format!("could not select an OCI install path for {}", app.name));
+                        cx.notify();
+                    });
+                    return;
+                }
             };
             let verified = report.map(|report| {
                 (
