@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **Listings carry screenshots.** The publisher manifest's `[app]`
+  gains `screenshots` (absolute URLs, best first), which ride the
+  listing event as `screenshot` tag rows; the store parses them into
+  the catalog and publisher apps now render the same screenshot strip
+  (with the same disk cache) that reviewed AppStream apps always had.
+  Older publishers and older stores ignore the tags on both sides:
+  a pre-screenshots publish is silent about them, a pre-screenshots
+  store just shows no strip.
+
 ## v0.2.0 (2026-10-15)
 
 - **Zapstore releases install and update.** Apps published in Zapstore's

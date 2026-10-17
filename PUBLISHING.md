@@ -111,6 +111,7 @@ name = "App"                            # shown in the catalog
 summary = "Does a thing"                # one line
 description-file = "description.md"     # long form, relative path; or inline `description`
 icon = "https://you.example/icon.png"   # URL you host
+screenshots = ["https://you.example/shot.png"]   # URLs, best first
 categories = ["Utilities"]              # AppStream categories
 license = "MIT"                         # optional
 repository = "https://github.com/you/app"   # source, shown as a link; a github
@@ -398,9 +399,11 @@ square PNG is the safe choice. (The launcher icon is separate: it rides
 inside the artifact's `export/share/icons/hicolor/...`, not the
 listing.)
 
-Screenshots: the listing does not carry them yet. A publisher app's
-page shows no screenshot strip today; reviewed (Flathub) apps get
-theirs from AppStream. Plan the `image` tag for a future release.
+Screenshots: plain URLs in the listing's `screenshot` tags, best
+first, one tag row each. Host them like icons (Orchard runs no media
+service and proxies no bytes); a landscape PNG reads best, and the
+page shows the first six. Publisher apps and reviewed (AppStream)
+apps render the same strip.
 
 ### PNG, not SVG
 
