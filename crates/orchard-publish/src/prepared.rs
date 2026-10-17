@@ -52,6 +52,8 @@ pub fn write(
     url: Option<String>,
 ) -> Result<PathBuf> {
     let report = asset::validate_layout(layout)?;
+    // The publisher builds stable Flatpak refs regardless of release channel.
+    // Preparation and hosted-asset validation enforce that same invariant.
     let expected = format!(
         "app/{}/{}/stable",
         app_id,
@@ -213,6 +215,8 @@ pub fn validate_report(asset: &Prepared, report: &orchard_core::oci::VerifyRepor
     if report.manifest_size != asset.size {
         bail!("hosted manifest size differs from prepared asset");
     }
+    // The publisher builds stable Flatpak refs regardless of release channel.
+    // Preparation and hosted-asset validation enforce that same invariant.
     let expected = format!(
         "app/{}/{}/stable",
         asset.app_id,

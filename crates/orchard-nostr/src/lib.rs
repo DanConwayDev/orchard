@@ -860,6 +860,9 @@ impl Feed {
                 flatpak_ref: format!("app/{app_id}/{ref_arch}/stable"),
                 location,
                 digest,
+                // Candidate components span the release for this publisher/platform.
+                // Multiple manifests may share blobs. Verification selects only the
+                // chosen manifest's descriptors by hash, MIME and size before fetch.
                 oci_assets: asset.filter(|a| a.blob.is_some()).map(|_| {
                     release.asset_refs.iter().filter_map(|id| self.assets.get(id))
                         .filter(|a| a.event.pubkey.to_string() == *author)

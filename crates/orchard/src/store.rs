@@ -2563,6 +2563,8 @@ impl StoreRoot {
                         }
                         // The catalog ref must match what the image labels
                         // claim; flatpak enforces this again at pull time.
+                        // Flatpak refs deliberately use stable, independently of
+                        // the NIP-82 release channel, matching the publisher.
                         let expected_ref = format!("app/{}/{}/stable", app.app_id, orchard_core::host_ref_arch());
                         if flatpak_ref.as_deref() != Some(expected_ref.as_str()) {
                             this.jobs.remove(&app.app_id);

@@ -154,6 +154,13 @@ Zapstore publishers readable on Orchard day one:
   the build tree. Self-publication enables `--legacy-oci`, adding the same
   manifest's registry location for v0.2.0 clients. One release serves both
   readers; config and layer assets do not carry legacy install locations.
+  Third-party publishers may omit the legacy location, deliberately requiring
+  a component-aware client (0.3.0 or later) for OCI installation. v0.2.0 cannot
+  install those component-only releases; native Flatpak bundles are unaffected.
+  If other publishers do not adopt `T`, it remains an Orchard convention.
+  Unknown tags need not prevent other clients from reading compatible assets,
+  but MIME and platform alone cannot distinguish Flatpak OCI from other OCI
+  targets. Orchard does not infer a Flatpak target for untagged component graphs.
 - **Migration:** a 30066 signed by the OLD key hands the app id to a successor; once the
   successor's listing exists, the old row stops projecting. Replaceable per (app id,
   old key); revocation is a newer statement with no `p`. Only the listed key can
