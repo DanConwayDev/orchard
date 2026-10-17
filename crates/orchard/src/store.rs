@@ -9513,6 +9513,7 @@ mod tests {
             description: None,
             icon_url: None,
             categories: Vec::new(),
+            screenshots: Vec::new(),
             publisher: Publisher {
                 pubkey: "k".into(),
                 nip05: None,
@@ -9627,6 +9628,7 @@ mod tests {
             description: None,
             icon_url: None,
             categories: Vec::new(),
+            screenshots: Vec::new(),
             publisher: Publisher {
                 pubkey: "k".into(),
                 nip05: None,

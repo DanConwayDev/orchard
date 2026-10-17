@@ -40,6 +40,7 @@ struct Args {
     description: Option<String>,
     icon: Option<String>,
     categories: Vec<String>,
+    screenshots: Vec<String>,
     version: String,
     location: String,
     digest: String,
@@ -63,6 +64,7 @@ fn parse_args() -> Result<Args> {
     let mut description = None;
     let mut icon = None;
     let mut categories = Vec::new();
+    let mut screenshots = Vec::new();
     let mut version = None;
     let mut location = None;
     let mut digest = None;
@@ -87,6 +89,7 @@ fn parse_args() -> Result<Args> {
             "--description" => description = Some(next()?),
             "--icon" => icon = Some(next()?),
             "--category" => categories.push(next()?),
+            "--screenshot" => screenshots.push(next()?),
             "--version" => version = Some(next()?),
             "--location" => location = Some(next()?),
             "--digest" => digest = Some(next()?),
@@ -110,6 +113,7 @@ fn parse_args() -> Result<Args> {
         description,
         icon,
         categories,
+        screenshots,
         version: version.ok_or_else(|| anyhow::anyhow!("--version required"))?,
         location: location.ok_or_else(|| anyhow::anyhow!("--location required"))?,
         digest: digest.ok_or_else(|| anyhow::anyhow!("--digest required"))?,
@@ -175,6 +179,7 @@ fn run() -> Result<()> {
             icon: args.icon.clone(),
             categories: args.categories.clone(),
             platforms: vec![args.arch.clone()],
+            screenshots: args.screenshots.clone(),
             license: None,
             repository: args.repository.clone(),
             homepage: args.homepage.clone(),

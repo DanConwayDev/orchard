@@ -842,6 +842,7 @@ mod tests {
                 description: None,
                 icon_url: None,
                 categories: Vec::new(),
+                screenshots: Vec::new(),
                 publisher: orchard_core::Publisher {
                     pubkey: "demo-pubkey".into(),
                     nip05: None,

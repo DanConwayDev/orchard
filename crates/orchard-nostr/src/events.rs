@@ -17,6 +17,10 @@ pub struct Listing {
     /// Platform tags the listing claims coverage for, one `f` tag
     /// each, e.g. `linux-x86_64`, `linux-aarch64`.
     pub platforms: Vec<String>,
+    /// Screenshot image URLs, best first, one `screenshot` tag each.
+    /// Absolute URLs: the store fetches them, it cannot read the
+    /// publisher's disk.
+    pub screenshots: Vec<String>,
     pub license: Option<String>,
     pub repository: Option<String>,
     /// The project's homepage, the `h` tag.
@@ -90,6 +94,10 @@ pub fn sign_listing(keys: &Keys, listing: &Listing) -> Result<Event> {
         .platforms
         .iter()
         .fold(builder, |builder, platform| builder.tag(tag("f", platform)));
+    let builder = listing
+        .screenshots
+        .iter()
+        .fold(builder, |builder, url| builder.tag(tag("screenshot", url)));
     Ok(builder.finalize(keys)?)
 }
 
@@ -167,6 +175,10 @@ mod tests {
                 icon: Some("https://example.com/icon.png".into()),
                 categories: vec!["Utilities".into()],
                 platforms: vec!["linux-x86_64".into()],
+                screenshots: vec![
+                    "https://example.com/shot1.png".into(),
+                    "https://example.com/shot2.png".into(),
+                ],
                 license: Some("MIT".into()),
                 repository: None,
                 homepage: None,
@@ -208,6 +220,10 @@ mod tests {
         assert_eq!(app.name, "Hello");
         assert_eq!(app.categories, ["Utilities"]);
         assert_eq!(app.description.as_deref(), Some("Long description."));
+        assert_eq!(
+            app.screenshots,
+            ["https://example.com/shot1.png", "https://example.com/shot2.png"]
+        );
     }
 
     /// Reviews: one per identity per app (replaceable), rating

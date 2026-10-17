@@ -26,6 +26,11 @@ pub struct AppMeta {
     #[serde(rename = "description-file")]
     pub description_file: Option<PathBuf>,
     pub icon: Option<String>,
+    /// Screenshot image URLs, best first, one `screenshot` tag each on
+    /// the listing. Absolute URLs: the store fetches them, it cannot
+    /// read the publisher's disk.
+    #[serde(default)]
+    pub screenshots: Vec<String>,
     #[serde(default)]
     pub categories: Vec<String>,
     pub license: Option<String>,

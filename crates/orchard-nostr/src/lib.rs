@@ -119,6 +119,8 @@ struct Listing {
     summary: String,
     icon_url: Option<String>,
     categories: Vec<String>,
+    /// Screenshot image URLs, best first, from `screenshot` tags.
+    screenshots: Vec<String>,
     platforms: Vec<String>,
     repository: Option<String>,
     homepage: Option<String>,
@@ -480,6 +482,7 @@ impl Feed {
                 summary: parts.tag("summary").unwrap_or_default(),
                 icon_url: parts.tag("icon"),
                 categories: parts.tag_values("t"),
+                screenshots: parts.tag_values("screenshot"),
                 platforms,
                 repository: parts.tag("repository"),
                 homepage: parts.tag("h"),
@@ -825,6 +828,7 @@ impl Feed {
                     .then(|| listing.event.content.clone()),
                 icon_url: listing.icon_url.clone(),
                 categories: listing.categories.clone(),
+                screenshots: listing.screenshots.clone(),
                 publisher: Publisher {
                     pubkey: author.clone(),
                     nip05: self.profiles.get(author).and_then(|p| p.nip05.clone()),

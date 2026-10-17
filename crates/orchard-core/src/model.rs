@@ -179,6 +179,10 @@ pub struct CatalogApp {
     pub icon_url: Option<String>,
     #[serde(default)]
     pub categories: Vec<String>,
+    /// Screenshot image URLs, best first, from the listing's
+    /// `screenshot` tags.
+    #[serde(default)]
+    pub screenshots: Vec<String>,
     pub publisher: Publisher,
     pub version: String,
     /// Platform tags the listing claims coverage for, e.g.
@@ -321,7 +325,7 @@ impl StoreApp {
             icon_path: None,
             icon_url: app.icon_url.clone(),
             categories: app.categories.clone(),
-            screenshots: Vec::new(),
+            screenshots: app.screenshots.clone(),
             publisher: Some(app.publisher.pubkey.clone()),
             metadata: app.metadata.clone(),
             location: Some(app.location.clone()),

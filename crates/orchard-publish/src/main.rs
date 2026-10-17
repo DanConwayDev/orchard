@@ -256,6 +256,7 @@ fn run() -> Result<()> {
             summary: manifest.app.summary.clone(),
             description: manifest.app.description.clone(),
             icon: manifest.app.icon.clone(),
+            screenshots: manifest.app.screenshots.clone(),
             categories: manifest.app.categories.clone(),
             platforms: manifest.listing_platforms(),
             license: manifest.app.license.clone(),
