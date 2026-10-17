@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.2.1 (2026-10-16)
 
 - **Listings carry screenshots.** The publisher manifest's `[app]`
   gains `screenshots` (absolute URLs, best first), which ride the

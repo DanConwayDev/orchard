@@ -29,6 +29,7 @@ client, not a gatekeeper.**
 | Update checks | The launch check is unconditional (every session, whatever the setting says); the cadence only picks the repeats: Off, Hourly, Daily (default) |
 | Update affordance | No "Update available" badge: the Update button wears the amber itself, on rows and the app page; a publisher-key change is a banner on the page and a line in the confirm modal |
 | Update seam | Image updates are uninstall-then-install: flatpak 1.18.4 refuses `flatpak install` over an installed ref at any version (`--or-update` included) and the `oci:` flow's origin remote is transient, so `flatpak update` is blind. The running instance survives the uninstall (deleted deploys stay mapped) and user data is kept. Bundle artifacts (`.flatpak` over https) install with `--bundle` and update in place, no chain |
+| Screenshots | The listing carries them as `screenshot` tag rows: absolute URLs, best first, the store renders the first six from the same disk cache the icons use. No media service and no blobs: the publisher hosts the bytes like the icon |
 | Language / UI | Rust end-to-end; GPUI `0.2` from crates.io |
 | Build | Podman container on the atomic host (see "Build environment") |
 | Trust grouping | Flathub listings group by the developer claim (navigation); Orchard listings group by publisher key only |
