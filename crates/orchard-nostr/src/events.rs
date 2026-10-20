@@ -201,6 +201,31 @@ mod tests {
         assert!(sign_asset_with_legacy_location(&keys, &asset, Some(&legacy)).is_err());
     }
 
+    // Golden contract for v0.2.0 (4d2978a): absorb requires i/version/f,
+    // an installable oci location and an x pin agreeing with that location.
+    // Keep this fixture independent of the current builder and Feed parser.
+    #[test]
+    fn legacy_oci_asset_tags_match_v020_contract() {
+        let keys = Keys::generate();
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/legacy-oci-asset-tags.json"
+        )).unwrap();
+        let hash = "a".repeat(64);
+        let legacy = format!("docker://https://ghcr.io/example/app@sha256:{hash}");
+        let event = sign_asset_with_legacy_location(&keys, &Asset {
+            app_id: "com.example.Transition".into(), version: "1".into(),
+            platform: "linux-x86_64".into(), digest: hash.clone(),
+            url: format!("https://ghcr.io/v2/example/app/manifests/sha256:{hash}"),
+            size: 42, filename: "app.manifest.json".into(),
+            mime: orchard_core::oci_asset::MIME.into(),
+        }, Some(&legacy)).unwrap();
+        event.verify().unwrap();
+        let json: serde_json::Value = serde_json::from_str(&event.as_json()).unwrap();
+        assert_eq!(json["kind"], 3063);
+        assert_eq!(json["content"], "");
+        assert_eq!(json["tags"], expected);
+    }
+
     /// The round-trip rule: a builder's event must absorb on the read
     /// side and project the same fields back.
     #[test]
