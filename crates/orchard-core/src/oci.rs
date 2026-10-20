@@ -438,7 +438,7 @@ pub fn download_layout(location: &Location, pinned: Option<&str>, dest: &Path) -
             check_pin(Some(pin), &digest)?;
             (bytes, digest)
         }
-        Location::OciDir(_) | Location::Https { .. } => unreachable!(),
+        Location::OciDir(_) | Location::Https { .. } => bail!("location does not support OCI manifest fetching"),
     };
 
     let parsed: serde_json::Value = serde_json::from_slice(&manifest_bytes)
